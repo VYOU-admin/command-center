@@ -46,15 +46,46 @@ function make(bound: Fields): Logger {
 export const log: Logger = make({});
 
 /** Errors do not survive JSON.stringify; flatten one into loggable fields. */
+/**
+ * Flatten an error and its cause chain into one line.
+ *
+ * This matters more than it looks. Node's fetch reports every network problem
+ * as a bare "TypeError: fetch failed" and hides the real reason — ENOTFOUND,
+ * ECONNREFUSED, a TLS failure — in `err.cause`. An alert that says "fetch
+ * failed" tells an operator nothing, so the chain is unwrapped here rather than
+ * thrown away.
+ */
+function describe(err: unknown, maxDepth = 4): string {
+  const parts: string[] = [];
+  let current: unknown = err;
+
+  for (let depth = 0; depth < maxDepth && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof Error) {
+      parts.push(`${current.name}: ${current.message}`);
+      current = current.cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+
+  return parts.join(' <- ') || String(err);
+}
+
 export function errorFields(err: unknown): Fields {
   if (err instanceof Error) {
-    return { error: err.message, error_type: err.name, stack: err.stack };
+    return {
+      error: describe(err),
+      error_type: err.name,
+      ...(err.cause ? { cause: describe(err.cause) } : {}),
+      stack: err.stack,
+    };
   }
   return { error: String(err) };
 }
 
 /** Short human-readable form, safe to store in Postgres and post to Discord. */
 export function errorMessage(err: unknown): string {
-  const raw = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  const raw = describe(err);
   return raw.length > 900 ? `${raw.slice(0, 897)}...` : raw;
 }
