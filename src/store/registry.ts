@@ -136,13 +136,15 @@ export async function recordRun(client: PoolClient, run: RunResult): Promise<Mon
        last_status           = $3,
        last_error            = $4,
        last_success_at       = case when $5 then $2 else last_success_at end,
-       last_record_count     = $6,
-       last_new_record_count = $7,
-       last_duration_ms      = $8,
+       last_record_count     = $6::integer,
+       last_new_record_count = $7::integer,
+       last_duration_ms      = $8::integer,
        consecutive_failures  = case when $5 then 0 else consecutive_failures + 1 end,
        total_runs            = total_runs + 1,
        total_failures        = total_failures + case when $5 then 0 else 1 end,
-       total_records         = total_records + $7,
+       -- $7 also feeds a bigint column; without the cast Postgres cannot deduce
+       -- a single type for the parameter and rejects the whole statement.
+       total_records         = total_records + $7::integer,
        stale_alert_at        = case when $5 then null else stale_alert_at end,
        updated_at            = now()
      where id = $1

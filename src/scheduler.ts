@@ -31,6 +31,13 @@ export interface SchedulerOptions {
 export class Scheduler {
   private timer: NodeJS.Timeout | null = null;
   private readonly inFlight = new Set<string>();
+  /**
+   * When a run was last *attempted* in this process. "Due" normally comes from
+   * last_run_at in Postgres, but if recording an outcome fails, that column
+   * never advances and the monitor would look due on every single tick —
+   * hammering the upstream source. This is the belt to that braces.
+   */
+  private readonly lastAttempt = new Map<string, number>();
   private stopping = false;
 
   constructor(private readonly opts: SchedulerOptions) {}
@@ -71,6 +78,10 @@ export class Scheduler {
 
       const due = enabled.filter((config) => {
         if (this.inFlight.has(config.id)) return false;
+        const attempted = this.lastAttempt.get(config.id);
+        if (attempted !== undefined && now.getTime() - attempted < config.scheduleMs) {
+          return false;
+        }
         return isDue(byId.get(config.id), config, now);
       });
 
@@ -92,6 +103,7 @@ export class Scheduler {
       return;
     }
     this.inFlight.add(config.id);
+    this.lastAttempt.set(config.id, Date.now());
 
     const runLog = log.child({ monitor_id: config.id, source: config.source });
     const startedAt = new Date();
