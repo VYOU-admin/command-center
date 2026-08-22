@@ -1,0 +1,21 @@
+# TEMPORARY — exercises the failure-alert path end to end, then gets deleted.
+#
+# Points at a .invalid domain, which RFC 2606 reserves as guaranteed never to
+# resolve, so every run fails fast and deterministically. On the 30s schedule
+# below, consecutive_failures reaches the threshold in roughly two minutes.
+
+id: alert-test
+name: Alert Test (temporary)
+source: rss
+enabled: true
+schedule: 30s
+
+options:
+  url: https://this-host-does-not-exist.invalid/feed.xml
+  timeout_ms: 5000
+
+alerts:
+  discord_on_consecutive_failures: 3
+
+dashboard:
+  window_hours: 24

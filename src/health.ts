@@ -70,10 +70,18 @@ export function assessMonitor(
     if (!config.enabled) return 'disabled';
     if (!state || state.totalRuns === 0) return 'pending';
     if (state.consecutiveFailures >= config.alerts.discordOnConsecutiveFailures) return 'failing';
-    if (!state.lastSuccessAt) return 'stale';
-    if (now.getTime() - state.lastSuccessAt.getTime() > staleAfterMs(config.scheduleMs)) {
+
+    // Staleness means "no success in far too long". With no success ever, the
+    // clock runs from when the monitor was registered — otherwise a brand-new
+    // monitor that fails once would immediately read as having gone silent,
+    // which is both wrong and the opposite of what is happening: it is running
+    // and erroring, and the consecutive-failure path is the one that should
+    // speak for it.
+    const reference = state.lastSuccessAt ?? state.createdAt;
+    if (now.getTime() - reference.getTime() > staleAfterMs(config.scheduleMs)) {
       return 'stale';
     }
+
     if (state.lastStatus === 'failure') return 'degraded';
     return 'ok';
   })();

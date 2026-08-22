@@ -13,6 +13,9 @@ export interface MonitorState {
   source: string;
   enabled: boolean;
   scheduleMs: number;
+  /** When the monitor first entered the registry. The staleness reference for
+   *  a monitor that has never had a successful run. */
+  createdAt: Date;
   lastRunAt: Date | null;
   lastStatus: 'success' | 'failure' | null;
   lastError: string | null;
@@ -46,6 +49,7 @@ function toState(row: any): MonitorState {
     source: row.source,
     enabled: row.enabled,
     scheduleMs: Number(row.schedule_ms),
+    createdAt: row.created_at,
     lastRunAt: row.last_run_at,
     lastStatus: row.last_status,
     lastError: row.last_error,
