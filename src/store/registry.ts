@@ -95,6 +95,22 @@ export async function syncMonitors(pool: Pool, monitors: MonitorConfig[]): Promi
   }
 }
 
+/**
+ * total_records is a running counter, incremented per run for cheap reads. A
+ * counter can drift from reality — a run whose records committed but whose
+ * outcome failed to record leaves it permanently short. Re-derive it from the
+ * records themselves at boot so the registry heals instead of lying.
+ */
+export async function reconcileRecordCounts(pool: Pool): Promise<void> {
+  await pool.query(
+    `update monitors m
+        set total_records = coalesce(
+              (select count(*) from records r where r.monitor_id = m.id), 0)
+      where m.total_records is distinct from coalesce(
+              (select count(*) from records r where r.monitor_id = m.id), 0)`,
+  );
+}
+
 export async function getMonitorStates(pool: Pool, ids?: string[]): Promise<MonitorState[]> {
   const result = ids
     ? await pool.query('select * from monitors where id = any($1) order by id', [ids])

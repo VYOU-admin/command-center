@@ -12,7 +12,7 @@ import { loadEnv, redact, type Env } from './env.js';
 import { log } from './logger.js';
 import { DiscordSink } from './sinks/discord.js';
 import { createPool, migrate, type Pool } from './store/db.js';
-import { syncMonitors } from './store/registry.js';
+import { reconcileRecordCounts, syncMonitors } from './store/registry.js';
 
 export interface App {
   env: Env;
@@ -66,6 +66,7 @@ export async function bootstrap(): Promise<App> {
   const pool = createPool(env.databaseUrl);
   await migrate(pool);
   await syncMonitors(pool, monitors);
+  await reconcileRecordCounts(pool);
 
   const discord = new DiscordSink(env.discordWebhookUrl);
   const alerter = new Alerter(pool, discord, env);
