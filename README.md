@@ -131,6 +131,18 @@ start commands and points the healthcheck at `/health`. The service binds the
 `PORT` Railway provides. Attach a Postgres database and Railway sets
 `DATABASE_URL` itself; set `DISCORD_WEBHOOK_URL` as a service variable.
 
+Do not add `npm ci` to `buildCommand` — Nixpacks already installs dependencies
+(including devDependencies, so `tsc` is present). A second `npm ci` tries to
+remove `node_modules` while Railway has `node_modules/.cache` mounted as a build
+cache, and the build fails with `EBUSY`.
+
+**Pending:** Railway has deprecated `railway.json` in favour of Infrastructure as
+Code in `.railway/railway.ts`; existing config files keep working until
+2026-12-01. Migrating is deliberately left as its own change — `railway config
+migrate` emits a project definition listing only the app service, so applying it
+as-is risks orphaning the Postgres service, and the IaC format needs the
+`railway` npm package as a dependency.
+
 ## Adding a source
 
 1. Write `src/adapters/<name>.ts` default-exporting a `SourceAdapter`.
