@@ -1,0 +1,26 @@
+# CoinDesk news feed.
+#
+# Adding a new monitor = one adapter file in src/adapters/ + one file like this.
+# Nothing else needs to change.
+
+id: coindesk
+name: CoinDesk
+source: rss
+enabled: true
+
+# How often to run. Accepts 30s / 15m / 1h / 2d.
+schedule: 1h
+
+# Passed verbatim to the adapter named by `source`, and validated by it at boot.
+options:
+  url: https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml
+  # Give up on a slow feed rather than wedging the scheduler.
+  timeout_ms: 20000
+
+alerts:
+  # Post to Discord after this many consecutive failed runs.
+  discord_on_consecutive_failures: 3
+
+dashboard:
+  # Rolling window the dashboard shows for this monitor.
+  window_hours: 24

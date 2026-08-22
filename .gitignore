@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+# Secrets never get committed. Everything sensitive comes from env vars.
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+.DS_Store
