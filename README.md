@@ -21,26 +21,41 @@ as adding the second.
 ## Layers
 
 **Ingest.** One file per source in `src/adapters/`, each default-exporting a
-`SourceAdapter`: `validate(options)` and `fetch(ctx) -> NormalizedRecord[]`.
-Adapters know nothing about Postgres, the dashboard, or Discord. The directory
-is scanned at boot, so there is no registration list to keep in sync.
+`SourceAdapter`. The directory is scanned at boot, so there is no registration
+list to keep in sync. Required: `validate(options)` and `fetch(ctx)`. Optional:
+`migrate(client)`, `persist(ctx, client, rows)`, and `renderPanel(ctx)` for
+sources that own their storage and their view.
 
 **Store.** Postgres, connection string from `DATABASE_URL`, never hardcoded.
-Tables are created on startup if missing. Three of them:
+Tables are created on startup if missing. The spine owns three:
 
 | table          | holds                                                        |
 | -------------- | ------------------------------------------------------------ |
 | `monitors`     | the registry: last run, last success, status, counts, streaks |
 | `monitor_runs` | one row per run, for history                                  |
-| `records`      | normalized records, deduped per monitor                       |
+| `records`      | document-shaped records, deduped per monitor                  |
 
-Dedupe is a unique index on `(monitor_id, external_id)` plus `ON CONFLICT DO
-NOTHING`. Adapters just return everything the source gave them; reruns cannot
-create duplicates. The "new records" number on the dashboard is how many rows
-actually landed.
+`records` dedupes on a unique `(monitor_id, external_id)` index plus `ON CONFLICT
+DO NOTHING` — one row per item, never overwritten. That is right for articles and
+wrong for time series, so sources that need something else declare their own
+tables instead (see below).
 
 **Output.** The dashboard at `/` and Discord alerts both read the same tables.
 Neither is in the ingest path, so a Discord outage cannot stop data collection.
+The dashboard renders the spine's monitor status cards, then one panel per
+monitor supplied by its adapter.
+
+### Why adapters own their storage
+
+v1 assumed every source was document-shaped and could share one table. The
+Solana monitor disproved it: it needs **append-only** rows, where the same token
+writes a new row every poll — the exact inverse of `records`' "never overwrite"
+rule. Rather than branch inside the scheduler, storage shape became the
+adapter's business.
+
+What stayed common is what genuinely is common: scheduling, the run registry,
+health, and failure/recovery alerting. RSS declares no `migrate`/`persist` and
+still gets the shared document store for free.
 
 ## Monitors
 
@@ -65,6 +80,68 @@ dashboard:
 Everything is validated at boot — an unknown `source`, a malformed URL, a bad
 duration — so a typo fails the deploy instead of becoming a monitor that quietly
 never produces anything.
+
+## The Solana monitor
+
+Two free, key-less stages: DexScreener for discovery and metrics, RugCheck for
+authority / LP / holder enrichment on candidates that clear every hard floor.
+All floors, weights, and limits live in `monitors/solana-tokens.yaml`.
+
+It owns three tables:
+
+| table                       | holds                                              |
+| --------------------------- | -------------------------------------------------- |
+| `solana_tokens`             | one row per token: first seen, launch date, pair    |
+| `solana_token_observations` | **append-only**, one row per token per poll         |
+| `solana_top_membership`     | top-N membership, so entry alerts fire on edges     |
+
+Nothing in `solana_token_observations` is ever updated, which is what makes
+retrospective questions answerable:
+
+```sql
+-- of tokens scoring 80+ at hour 12, how many still had liquidity at day 7
+with scored_at_12h as (
+  select distinct on (mint) mint, score
+    from solana_token_observations
+   where monitor_id = 'solana-tokens' and score is not null and age_hours between 11 and 13
+   order by mint, abs(age_hours - 12)
+),
+at_day_7 as (
+  select distinct on (mint) mint, liquidity_usd
+    from solana_token_observations
+   where monitor_id = 'solana-tokens' and age_hours between 160 and 176
+   order by mint, abs(age_hours - 168)
+)
+select count(*) filter (where d.liquidity_usd >= 15000) as still_liquid,
+       count(*)                                          as cohort
+  from scored_at_12h s left join at_day_7 d using (mint)
+ where s.score >= 80;
+```
+
+Tracking deliberately continues past the 7-day scoring window — a token dropped
+at day 7 could never answer that question.
+
+### Known data limits
+
+These are properties of the free APIs, not of the code, and they are worth
+knowing before trusting a number:
+
+- **Discovery is not exhaustive.** DexScreener has no endpoint that enumerates a
+  chain's pairs by age (search returns mature pairs — in testing, 1 of 75 was in
+  a 6h–7d window). The universe is instead *accumulated* from the "latest
+  profiles/boosts" feeds, so coverage grows over days and is biased toward
+  tokens that appear in them.
+- **There is no unique-wallet data.** Neither API exposes unique traders, so
+  dispersion uses holder count. Holders are rent-funded on-chain accounts that
+  cost real SOL to create, making them far harder to fake than transaction
+  counts, which volume bots inflate in lockstep with volume.
+- **Holder data is unreliable.** RugCheck returns `totalHolders` and `topHolders`
+  populated sometimes and zeroed other times *for the same mint minutes apart*.
+  Scores are therefore computed over whatever was measurable and normalised, and
+  every observation stores a `completeness` figure — the fraction of scoring
+  weight that could be measured. **A score is only meaningful read next to its
+  completeness**, which is why the dashboard prints both. Raise
+  `scoring.min_completeness` to refuse to score tokens missing holder data.
 
 ## Designing against silent failure
 
@@ -148,5 +225,7 @@ as-is risks orphaning the Postgres service, and the IaC format needs the
 1. Write `src/adapters/<name>.ts` default-exporting a `SourceAdapter`.
 2. Add `monitors/<monitor>.yaml` with `source: <name>`.
 
-There is no step 3. Storage, dedupe, scheduling, the registry, the dashboard,
-health, and alerting all pick it up automatically.
+There is no step 3. Scheduling, the registry, health, and failure/recovery
+alerting pick it up automatically. Document-shaped sources also get the shared
+record store, dedupe, and a default dashboard panel; sources needing a different
+shape add `migrate` / `persist` / `renderPanel` to the same file.

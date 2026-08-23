@@ -9,10 +9,11 @@
  * instead of an hour later.
  */
 
-import type { SourceAdapter } from './adapters/types.js';
+import type { AdapterContext, AnyAdapter, NormalizedRecord } from './adapters/types.js';
 import type { Alerter } from './alerts.js';
 import type { MonitorConfig } from './config.js';
 import { errorFields, errorMessage, log } from './logger.js';
+import type { Alert, DiscordSink } from './sinks/discord.js';
 import { withTransaction, type Pool } from './store/db.js';
 import { insertRecords } from './store/records.js';
 import { getMonitorStates, recordRun, type MonitorState } from './store/registry.js';
@@ -22,9 +23,10 @@ const MAX_RUN_MS = 5 * 60_000;
 
 export interface SchedulerOptions {
   pool: Pool;
-  adapters: Map<string, SourceAdapter>;
+  adapters: Map<string, AnyAdapter>;
   monitors: MonitorConfig[];
   alerter: Alerter;
+  discord: DiscordSink;
   tickMs: number;
 }
 
@@ -114,27 +116,46 @@ export class Scheduler {
     let newRecordCount = 0;
     let error: string | null = null;
 
+    // Adapters raise content alerts (a token entering the top N) while writing,
+    // but network I/O must not happen inside the persist transaction. They are
+    // collected here and flushed once the write is durable.
+    const pendingAlerts: Alert[] = [];
+
     try {
       const adapter = this.opts.adapters.get(config.source);
       if (!adapter) throw new Error(`no adapter registered for source "${config.source}"`);
 
       runLog.info('run started');
 
-      const records = await adapter.fetch({
+      const ctx: AdapterContext = {
         monitorId: config.id,
+        monitorName: config.name,
         options: config.options,
         log: runLog,
         signal: controller.signal,
-      });
+        db: this.opts.pool,
+        queueAlert: (alert) => pendingAlerts.push(alert),
+      };
+
+      const records = await adapter.fetch(ctx);
       recordCount = records.length;
 
+      // Storage shape belongs to the adapter; document-shaped sources that
+      // declare no persist() fall back to the shared record store.
       newRecordCount = await withTransaction(this.opts.pool, (client) =>
-        insertRecords(client, config.id, records),
+        adapter.persist
+          ? adapter.persist(ctx, client, records)
+          : insertRecords(client, config.id, records as NormalizedRecord[]),
       );
+
+      for (const alert of pendingAlerts) {
+        await this.opts.discord.send(alert);
+      }
 
       runLog.info('run succeeded', {
         record_count: recordCount,
         new_record_count: newRecordCount,
+        alerts_sent: pendingAlerts.length,
         duration_ms: Date.now() - startedAt.getTime(),
       });
     } catch (err) {

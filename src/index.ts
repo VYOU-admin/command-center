@@ -16,6 +16,7 @@ async function main(): Promise<void> {
   const server = createWebServer({
     pool: app.pool,
     monitors: app.monitors,
+    adapters: app.adapters,
     port: app.env.port,
     bootedAt,
   });
@@ -37,6 +38,7 @@ async function main(): Promise<void> {
     adapters: app.adapters,
     monitors: app.monitors,
     alerter: app.alerter,
+    discord: app.discord,
     tickMs: app.env.tickMs,
   });
   scheduler.start();

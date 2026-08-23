@@ -5,20 +5,20 @@
  */
 
 import { loadAdapters } from './adapters/registry.js';
-import type { SourceAdapter } from './adapters/types.js';
+import type { AnyAdapter } from './adapters/types.js';
 import { Alerter } from './alerts.js';
 import { loadMonitorConfigs, type MonitorConfig } from './config.js';
 import { loadEnv, redact, type Env } from './env.js';
 import { log } from './logger.js';
 import { DiscordSink } from './sinks/discord.js';
-import { createPool, migrate, type Pool } from './store/db.js';
+import { createPool, migrate, withTransaction, type Pool } from './store/db.js';
 import { reconcileRecordCounts, syncMonitors } from './store/registry.js';
 
 export interface App {
   env: Env;
   pool: Pool;
   monitors: MonitorConfig[];
-  adapters: Map<string, SourceAdapter>;
+  adapters: Map<string, AnyAdapter>;
   discord: DiscordSink;
   alerter: Alerter;
 }
@@ -65,6 +65,17 @@ export async function bootstrap(): Promise<App> {
 
   const pool = createPool(env.databaseUrl);
   await migrate(pool);
+
+  // Adapters that own their storage declare their own tables. Run these after
+  // the core schema and only for adapters a configured monitor actually uses,
+  // so an unused adapter never creates tables in the database.
+  const usedSources = new Set(monitors.map((m) => m.source));
+  for (const [type, adapter] of adapters) {
+    if (!adapter.migrate || !usedSources.has(type)) continue;
+    await withTransaction(pool, (client) => adapter.migrate!(client));
+    log.info('adapter schema ready', { source: type });
+  }
+
   await syncMonitors(pool, monitors);
   await reconcileRecordCounts(pool);
 

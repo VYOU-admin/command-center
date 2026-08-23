@@ -10,8 +10,11 @@ import {
   requireString,
   type AdapterContext,
   type NormalizedRecord,
+  type PanelContext,
   type SourceAdapter,
 } from './types.js';
+import { getRecentRecords } from '../store/records.js';
+import { renderRecordListPanel } from '../web/views.js';
 
 const parser = new Parser({
   customFields: { item: [['dc:creator', 'dcCreator']] },
@@ -146,6 +149,19 @@ const adapter: SourceAdapter = {
     }
 
     return records;
+  },
+
+  // No migrate() or persist(): articles are genuinely document-shaped, so this
+  // adapter keeps the spine's shared record store and its dedupe by externalId.
+
+  async renderPanel(ctx: PanelContext) {
+    const windowHours = ctx.windowHours;
+    const records = await getRecentRecords(ctx.db, {
+      hours: windowHours,
+      monitorId: ctx.monitorId,
+      limit: 200,
+    });
+    return renderRecordListPanel({ monitorName: ctx.monitorName, records, windowHours });
   },
 };
 

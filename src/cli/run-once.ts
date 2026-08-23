@@ -34,6 +34,7 @@ async function main(): Promise<void> {
     adapters: app.adapters,
     monitors: app.monitors,
     alerter: app.alerter,
+    discord: app.discord,
     tickMs: app.env.tickMs,
   });
 

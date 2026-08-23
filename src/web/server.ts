@@ -4,17 +4,19 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AnyAdapter, PanelContext } from '../adapters/types.js';
 import type { MonitorConfig } from '../config.js';
 import { assessAll, overallStatus } from '../health.js';
 import { errorFields, log } from '../logger.js';
 import type { Pool } from '../store/db.js';
 import { getRecentRecords } from '../store/records.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
-import { renderDashboard } from './views.js';
+import { escapeHtml, renderDashboard, renderRecordListPanel } from './views.js';
 
 export interface WebServerOptions {
   pool: Pool;
   monitors: MonitorConfig[];
+  adapters: Map<string, AnyAdapter>;
   port: number;
   /** Reported by /health so a deploy can be identified in logs. */
   bootedAt: Date;
@@ -138,19 +140,50 @@ export function createWebServer(opts: WebServerOptions): Server {
     }
 
     if (path === '/') {
-      const windowHours = defaultWindow(monitors);
-      const [states, records] = await Promise.all([
-        getMonitorStates(pool, monitors.map((m) => m.id)),
-        getRecentRecords(pool, { hours: windowHours, limit: 200 }),
-      ]);
+      const states = await getMonitorStates(pool, monitors.map((m) => m.id));
       const health = assessAll(monitors, states);
+
+      // Each monitor renders its own panel. One panel failing must not blank the
+      // whole dashboard — the status cards above it are the thing you most need
+      // to see when something is broken.
+      const panels = await Promise.all(
+        monitors.map(async (monitor) => {
+          const panelCtx: PanelContext = {
+            db: pool,
+            monitorId: monitor.id,
+            monitorName: monitor.name,
+            options: monitor.options,
+            windowHours: monitor.dashboard.windowHours,
+          };
+          try {
+            const adapter = opts.adapters.get(monitor.source);
+            if (adapter?.renderPanel) return await adapter.renderPanel(panelCtx);
+            const records = await getRecentRecords(pool, {
+              hours: monitor.dashboard.windowHours,
+              monitorId: monitor.id,
+              limit: 200,
+            });
+            return renderRecordListPanel({
+              monitorName: monitor.name,
+              records,
+              windowHours: monitor.dashboard.windowHours,
+            });
+          } catch (err) {
+            log.error('panel render failed', { monitor_id: monitor.id, ...errorFields(err) });
+            return (
+              `<h2 class="section">${escapeHtml(monitor.name)}</h2>` +
+              `<p class="error">This panel failed to render: ${escapeHtml((err as Error).message)}</p>`
+            );
+          }
+        }),
+      );
+
       sendHtml(
         res,
         200,
         renderDashboard({
           monitors: health,
-          records,
-          windowHours,
+          panels,
           overall: overallStatus(health),
           generatedAt: new Date(),
         }),

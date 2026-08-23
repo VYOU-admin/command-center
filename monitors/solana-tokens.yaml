@@ -1,0 +1,86 @@
+# Solana new-token tracking.
+#
+# Two ingest stages, both free and key-less:
+#   1. DexScreener  — discover newly-listed Solana tokens, poll metrics for the
+#                     whole tracked universe.
+#   2. RugCheck     — for candidates clearing every hard floor below, pull
+#                     authority / LP / holder data, then score.
+#
+# Everything you are likely to tune lives in this file, not in the code.
+
+id: solana-tokens
+name: Solana Tokens
+source: solana-tokens
+enabled: true
+schedule: 1h
+
+options:
+  # Candidacy window, measured from the pair's creation time.
+  # NOTE: this gates *scoring only*. Tokens keep being observed long past
+  # max_age_hours, because "did it still have liquidity at day 7" needs day-7
+  # rows to exist.
+  min_age_hours: 6
+  max_age_hours: 168 # 7d
+
+  # HARD FLOORS — disqualifying, all must pass. Set any to 0 to disable it.
+  floors:
+    liquidity_usd: 15000
+    volume_24h_usd: 25000
+    volume_to_mcap: 0.30
+    liquidity_to_mcap: 0.10
+    txns_1h: 100
+
+  # Scoring weights. Relative, normalised to 100 — they need not sum to 100.
+  # Authorities and LP dominate deliberately: they are the difference between
+  # "risky" and "the deployer can take the money whenever they like".
+  weights:
+    mint_renounced: 25
+    freeze_renounced: 10
+    lp_locked: 25
+    holder_distribution: 15 # top-10 concentration, penalised for insiders
+    liquidity_depth: 10 # liquidity as a fraction of market cap
+    dispersion: 15 # holder count — see note below
+
+  scoring:
+    # A live mint authority means supply can be inflated at will, so it is
+    # treated as near-disqualifying rather than merely penalised: the whole
+    # score is multiplied by this.
+    mint_not_renounced_multiplier: 0.25
+    # liquidity/mcap ratio that earns full marks for depth.
+    liquidity_depth_target: 0.4
+    # Holder count that earns full marks for dispersion (log-scaled).
+    #
+    # Dispersion uses holders rather than unique trading wallets because no free
+    # API exposes unique traders. Holders are rent-funded on-chain accounts that
+    # cost real SOL to create, so they are far harder to fake than transaction
+    # counts — which volume bots inflate in lockstep with volume itself.
+    dispersion_holder_target: 2000
+    # RugCheck's holder fields are unreliable — the same mint returns 22,000
+    # holders one hour and 0 the next. Scoring an absent value as zero would
+    # conflate "badly distributed" with "not visible", so the score is the
+    # weighted average over whatever WAS measurable, and `completeness` records
+    # what fraction of the weight that covered. Tokens below this floor are
+    # observed and stored but left unscored.
+    min_completeness: 0.5
+
+  limits:
+    # Universe cap. Newly discovered tokens always take priority over the tail.
+    max_tracked: 400
+    # RugCheck calls per run. Deepest-liquidity candidates are enriched first.
+    max_enrich_per_run: 25
+    request_delay_ms: 250
+    timeout_ms: 20000
+
+  alerts:
+    top_n: 20
+    # A token that drops out and comes straight back will not re-alert until it
+    # has been outside the top N for this long, so boundary oscillation cannot
+    # spam the channel.
+    re_entry_cooldown_hours: 24
+
+alerts:
+  # Spine-level: consecutive run failures for the monitor itself.
+  discord_on_consecutive_failures: 3
+
+dashboard:
+  window_hours: 24

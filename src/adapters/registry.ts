@@ -10,7 +10,7 @@
 import { readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
-import type { SourceAdapter } from './types.js';
+import type { AnyAdapter, SourceAdapter } from './types.js';
 
 const NOT_ADAPTERS = new Set(['types.js', 'registry.js']);
 
@@ -24,13 +24,13 @@ function isAdapter(value: unknown): value is SourceAdapter {
   );
 }
 
-export async function loadAdapters(): Promise<Map<string, SourceAdapter>> {
+export async function loadAdapters(): Promise<Map<string, AnyAdapter>> {
   const dir = import.meta.dirname;
   const files = (await readdir(dir))
     .filter((f) => f.endsWith('.js') && !NOT_ADAPTERS.has(f))
     .sort();
 
-  const adapters = new Map<string, SourceAdapter>();
+  const adapters = new Map<string, AnyAdapter>();
 
   for (const file of files) {
     const module: Record<string, unknown> = await import(
