@@ -20,6 +20,8 @@ interface LaunchStats {
   instrumented_today: number;
   graduated_today: number;
   graduated_total: number;
+  /** Graduations among launches we saw from t=0 — the only cohort a rate is valid over. */
+  graduated_from_launch: number;
   resolved_total: number;
   pending_total: number;
   samples_total: number;
@@ -84,6 +86,9 @@ export async function renderPumpFunPanel(ctx: PanelContext): Promise<string> {
        (select count(*)::int from pump_launches
          where monitor_id = $1 and outcome = 'graduated')                as graduated_total,
        (select count(*)::int from pump_launches
+         where monitor_id = $1 and outcome = 'graduated'
+           and observed_from_launch)                                     as graduated_from_launch,
+       (select count(*)::int from pump_launches
          where monitor_id = $1 and outcome <> 'pending'
            and observed_from_launch)                                     as resolved_total,
        (select count(*)::int from pump_launches
@@ -104,12 +109,22 @@ export async function renderPumpFunPanel(ctx: PanelContext): Promise<string> {
 
   const s = (result.rows[0] ?? {}) as Partial<LaunchStats>;
   const resolved = int(s.resolved_total);
-  const graduatedResolved = int(s.graduated_total);
+  const graduatedTotal = int(s.graduated_total);
+  const graduatedFromLaunch = int(s.graduated_from_launch);
 
-  // The rate is over RESOLVED launches only. Dividing graduations by every
-  // launch ever seen would understate it, because the newest launches have not
-  // had time to graduate yet and are all still counted as failures.
-  const observedRate = resolved > 0 ? graduatedResolved / resolved : null;
+  // Numerator and denominator must describe the SAME population, which is why
+  // both are restricted to launches observed from t=0.
+  //
+  // The migration feed is platform-wide, so most graduations seen early on are
+  // for tokens that launched before this monitor existed. Counting those in the
+  // numerator while the denominator only holds launches we witnessed produced a
+  // rate above 100% — 15 graduations over 12 resolved launches.
+  //
+  // Restricting to resolved launches also matters in the other direction:
+  // dividing by every launch ever seen would understate the rate, because the
+  // newest launches have not had time to graduate and would all count as
+  // failures.
+  const observedRate = resolved > 0 ? graduatedFromLaunch / resolved : null;
   const socialsKnown = int(s.socials_known);
   const telegramShare = socialsKnown > 0 ? int(s.with_telegram) / socialsKnown : null;
   const twitterShare = socialsKnown > 0 ? int(s.with_twitter) / socialsKnown : null;
@@ -117,8 +132,8 @@ export async function renderPumpFunPanel(ctx: PanelContext): Promise<string> {
   const tiles: [string, string, string][] = [
     ['Launches (24h)', int(s.launches_today).toLocaleString('en-US'), `${int(s.launches_total).toLocaleString('en-US')} total`],
     ['Instrumented (24h)', int(s.instrumented_today).toLocaleString('en-US'), 'curve subscribed'],
-    ['Graduations (24h)', int(s.graduated_today).toLocaleString('en-US'), `${graduatedResolved.toLocaleString('en-US')} total`],
-    ['Graduation rate', pct(observedRate), `of ${resolved.toLocaleString('en-US')} resolved`],
+    ['Graduations (24h)', int(s.graduated_today).toLocaleString('en-US'), `${graduatedTotal.toLocaleString('en-US')} total, all sources`],
+    ['Graduation rate', pct(observedRate), `${graduatedFromLaunch}/${resolved.toLocaleString('en-US')} launches seen from t=0`],
     ['Trade samples', int(s.samples_total).toLocaleString('en-US'), `${int(s.samples_today).toLocaleString('en-US')} in 24h`],
     ['Telegram / Twitter', `${pct(telegramShare, 1)} / ${pct(twitterShare, 1)}`, `of ${socialsKnown.toLocaleString('en-US')} with metadata`],
     ['Last launch', ago(s.last_launch_at ?? null), 'stream liveness'],
