@@ -24,6 +24,13 @@ enabled: true
 
 # Drain interval. Shorter means less data at risk if the process dies between
 # drains; the shutdown hook performs a final drain on SIGTERM either way.
+#
+# NOTE: the effective interval is 60s, not 30s. The scheduler ticks every 30s
+# and only runs a monitor once its full schedule has elapsed, so a 30s schedule
+# lands on every second tick. 30s is the configured floor, so 60s is the fastest
+# drain achievable without lowering the global tick. This is harmless here — a
+# drain carries ~30 launches and ~400 samples against a 20k buffer — but it does
+# mean up to 60s of events are in memory rather than committed.
 schedule: 30s
 
 options:
@@ -37,23 +44,26 @@ options:
     # resource: concurrent bonding-curve subscriptions, hard-limited to 100 by
     # the RPC. Figures below are MEASURED off the live stream, not estimated.
     #
-    #   launch rate                                ~48.7/min
-    #   mcap above default      (16% of launches)   ~7.8/min
-    #   control sample          (6% of remainder)   ~2.5/min
-    #   telegram present        (3% of remainder)   ~1.4/min
-    #   instrumented total                         ~11.7/min
-    #   x dense_window_minutes (5)                  ~59 concurrent
-    #   against max_curve_subscriptions (95)        ~38% headroom
+    #   launch rate                    ~48.7/min typical, 76/min observed
+    #   instrumented share             ~29% of launches (measured in prod)
+    #   steady-state concurrent slots  43-61
+    #   PEAK concurrent slots          89   <-- measured, during a burst
     #
-    # The headroom is deliberately generous because launch rate is bursty and
-    # the penalty for exceeding the cap is not a rejected subscription but a
-    # CLOSED CONNECTION (code 1013), which drops every active subscription with
-    # it. Slots also free early whenever a curve completes.
+    # The peak is what sizes this, not the average. At a 5-minute window the
+    # peak reached 89 of 95 available slots — 94% utilisation, with the next
+    # burst spilling over.
     #
-    # This is the primary tuning knob. If "curve subscription slots exhausted"
-    # appears in the logs, shorten this window or lower control_sample_rate
-    # before touching the cap.
-    dense_window_minutes: 5
+    # Spilling over is not a crash: instrument() refuses to exceed the cap, so
+    # the connection is never at risk of a 1013 close. The cost is subtler and
+    # worse for the dataset. Denied tokens are silently not sampled, and denial
+    # happens precisely when launch rate is highest — so the missing tokens are
+    # not a random subset, they are correlated with platform activity. That is a
+    # confound baked into the data rather than a gap visible in it.
+    #
+    # Hence 4 minutes: peak drops to ~71, leaving real burst headroom.
+    # Denials are logged as "curve subscription slots exhausted" — if that
+    # appears, shorten this further or lower control_sample_rate.
+    dense_window_minutes: 4
 
     # Initial market cap above the 30 SOL platform default is the strongest
     # single t=0 predictor in the survival literature (Cox HR 4.51), so these
