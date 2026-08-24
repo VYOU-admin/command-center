@@ -20,8 +20,10 @@ interface LaunchStats {
   instrumented_today: number;
   graduated_today: number;
   graduated_total: number;
-  /** Graduations among launches we saw from t=0 — the only cohort a rate is valid over. */
-  graduated_from_launch: number;
+  /** Launches seen from t=0 and old enough for either outcome to have occurred. */
+  mature_cohort: number;
+  /** Of that cohort, how many graduated. */
+  mature_graduated: number;
   resolved_total: number;
   pending_total: number;
   samples_total: number;
@@ -70,6 +72,14 @@ function short(address: string): string {
 }
 
 export async function renderPumpFunPanel(ctx: PanelContext): Promise<string> {
+  // Must match pumpfun-outcomes' unobserved_death_after_hours: that is when a
+  // launch we never instrumented is finally called dead, so it is the point at
+  // which the cohort can be fully resolved.
+  const cohortHours = (() => {
+    const value = ctx.options['rate_cohort_hours'];
+    return typeof value === 'number' && value > 0 ? value : 24;
+  })();
+
   const result = await ctx.db.query(
     `select
        (select count(*)::int from pump_launches
@@ -85,9 +95,15 @@ export async function renderPumpFunPanel(ctx: PanelContext): Promise<string> {
            and graduated_at > now() - interval '24 hours')               as graduated_today,
        (select count(*)::int from pump_launches
          where monitor_id = $1 and outcome = 'graduated')                as graduated_total,
+       -- The rate cohort: launches old enough that BOTH outcomes have had time
+       -- to occur. See the comment on observedRate below for why this cannot
+       -- simply be "resolved launches".
        (select count(*)::int from pump_launches
-         where monitor_id = $1 and outcome = 'graduated'
-           and observed_from_launch)                                     as graduated_from_launch,
+         where monitor_id = $1 and observed_from_launch
+           and launched_at < now() - ($2 || ' hours')::interval)          as mature_cohort,
+       (select count(*)::int from pump_launches
+         where monitor_id = $1 and observed_from_launch and outcome = 'graduated'
+           and launched_at < now() - ($2 || ' hours')::interval)          as mature_graduated,
        (select count(*)::int from pump_launches
          where monitor_id = $1 and outcome <> 'pending'
            and observed_from_launch)                                     as resolved_total,
@@ -104,27 +120,34 @@ export async function renderPumpFunPanel(ctx: PanelContext): Promise<string> {
          where monitor_id = $1 and socials_fetched)                      as socials_known,
        (select max(launched_at) from pump_launches where monitor_id = $1) as last_launch_at,
        (select max(graduated_at) from pump_launches where monitor_id = $1) as last_graduation_at`,
-    [ctx.monitorId],
+    [ctx.monitorId, cohortHours],
   );
 
   const s = (result.rows[0] ?? {}) as Partial<LaunchStats>;
-  const resolved = int(s.resolved_total);
   const graduatedTotal = int(s.graduated_total);
-  const graduatedFromLaunch = int(s.graduated_from_launch);
+  const cohort = int(s.mature_cohort);
+  const cohortGraduated = int(s.mature_graduated);
 
-  // Numerator and denominator must describe the SAME population, which is why
-  // both are restricted to launches observed from t=0.
+  // Two separate traps make this number harder than it looks, and both produced
+  // a wrong figure on the live dashboard before this shape.
   //
-  // The migration feed is platform-wide, so most graduations seen early on are
-  // for tokens that launched before this monitor existed. Counting those in the
-  // numerator while the denominator only holds launches we witnessed produced a
-  // rate above 100% — 15 graduations over 12 resolved launches.
+  // 1. MISMATCHED POPULATIONS. The migration feed is platform-wide, so early on
+  //    most graduations are for tokens that launched before this monitor
+  //    existed. Counting those against a denominator of only launches we
+  //    witnessed gave 15/12 — a rate above 100%. Hence observed_from_launch on
+  //    both sides.
   //
-  // Restricting to resolved launches also matters in the other direction:
-  // dividing by every launch ever seen would understate the rate, because the
-  // newest launches have not had time to graduate and would all count as
-  // failures.
-  const observedRate = resolved > 0 ? graduatedFromLaunch / resolved : null;
+  // 2. ASYMMETRIC RESOLUTION TIME. Graduation is observed within seconds, but
+  //    death is only declared after 60 minutes of curve silence, or 24 hours
+  //    for a token we never instrumented. So "resolved launches" fills with
+  //    graduations first and deaths much later, and a rate over it read 17/17 =
+  //    100% for a phenomenon whose true rate is ~0.2%.
+  //
+  // The fix for the second is a cohort, not a filter on outcome: count launches
+  // old enough that both outcomes have had time to happen, and treat anything
+  // still pending in that cohort as not-graduated, which it is. Before the
+  // cohort matures there is no honest number to show, so none is shown.
+  const observedRate = cohort > 0 ? cohortGraduated / cohort : null;
   const socialsKnown = int(s.socials_known);
   const telegramShare = socialsKnown > 0 ? int(s.with_telegram) / socialsKnown : null;
   const twitterShare = socialsKnown > 0 ? int(s.with_twitter) / socialsKnown : null;
@@ -133,7 +156,13 @@ export async function renderPumpFunPanel(ctx: PanelContext): Promise<string> {
     ['Launches (24h)', int(s.launches_today).toLocaleString('en-US'), `${int(s.launches_total).toLocaleString('en-US')} total`],
     ['Instrumented (24h)', int(s.instrumented_today).toLocaleString('en-US'), 'curve subscribed'],
     ['Graduations (24h)', int(s.graduated_today).toLocaleString('en-US'), `${graduatedTotal.toLocaleString('en-US')} total, all sources`],
-    ['Graduation rate', pct(observedRate), `${graduatedFromLaunch}/${resolved.toLocaleString('en-US')} launches seen from t=0`],
+    [
+      'Graduation rate',
+      pct(observedRate),
+      cohort > 0
+        ? `${cohortGraduated}/${cohort.toLocaleString('en-US')} in the ${cohortHours}h+ cohort`
+        : `cohort matures at ${cohortHours}h`,
+    ],
     ['Trade samples', int(s.samples_total).toLocaleString('en-US'), `${int(s.samples_today).toLocaleString('en-US')} in 24h`],
     ['Telegram / Twitter', `${pct(telegramShare, 1)} / ${pct(twitterShare, 1)}`, `of ${socialsKnown.toLocaleString('en-US')} with metadata`],
     ['Last launch', ago(s.last_launch_at ?? null), 'stream liveness'],

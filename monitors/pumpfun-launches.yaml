@@ -81,6 +81,18 @@ options:
     # reproducible months later.
     control_sample_rate: 0.06
 
+  # Age at which a launch enters the graduation-rate cohort. Must match
+  # pumpfun-outcomes' unobserved_death_after_hours: that is when a token we
+  # never instrumented is finally called dead, so it is the point at which the
+  # cohort is fully resolvable.
+  #
+  # A rate cannot be taken over "resolved launches". Graduation is observed in
+  # seconds but death is only declared after 60 minutes of curve silence, so
+  # the resolved set fills with graduations first — which briefly showed a
+  # graduation rate of 100% on the live dashboard for a ~0.2% phenomenon.
+  # Until the cohort matures, no rate is displayed at all.
+  rate_cohort_hours: 24
+
   limits:
     # The RPC closes the connection with code 1013 on the 101st concurrent
     # subscription — measured, not documented. This leaves headroom.
