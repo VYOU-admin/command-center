@@ -1,0 +1,91 @@
+# pump.fun launch stream.
+#
+# PURPOSE: logging and dataset building. This monitor ranks nothing and signals
+# nothing. At the current platform-wide graduation rate of roughly 0.2%, any
+# live ranking drawn from a few days of collection would be noise.
+#
+# Unlike the other monitors this one is not a poll. Two websockets are held open
+# by the adapter and the schedule below is the DRAIN interval — how often
+# buffered events are committed — not a request rate.
+#
+#   PumpPortal  subscribeNewToken   -> every launch          (free, no API key)
+#               subscribeMigration  -> every graduation      (free, no API key)
+#   Solana RPC  accountSubscribe    -> one push per trade on a token's bonding
+#                                      curve, which is how per-trade velocity is
+#                                      measured without paying for a trade feed.
+#                                      PumpPortal's own subscribeTokenTrade is
+#                                      metered at 0.01 SOL / 10k events, which is
+#                                      not viable at ~70k launches/day.
+
+id: pumpfun-launches
+name: Pump.fun Launches
+source: pumpfun-launches
+enabled: true
+
+# Drain interval. Shorter means less data at risk if the process dies between
+# drains; the shutdown hook performs a final drain on SIGTERM either way.
+schedule: 30s
+
+options:
+  pumpportal_url: wss://pumpportal.fun/api/data
+  # Public RPC works and needs no key. Swap in a provider URL for more headroom;
+  # the concurrent-subscription cap below is the thing that would change.
+  rpc_url: wss://api.mainnet-beta.solana.com
+
+  sampling:
+    # SLOT ARITHMETIC — retune these together. They trade against one capped
+    # resource: concurrent bonding-curve subscriptions, hard-limited to 100 by
+    # the RPC. Figures below are MEASURED off the live stream, not estimated.
+    #
+    #   launch rate                                ~48.7/min
+    #   mcap above default      (16% of launches)   ~7.8/min
+    #   control sample          (6% of remainder)   ~2.5/min
+    #   telegram present        (3% of remainder)   ~1.4/min
+    #   instrumented total                         ~11.7/min
+    #   x dense_window_minutes (5)                  ~59 concurrent
+    #   against max_curve_subscriptions (95)        ~38% headroom
+    #
+    # The headroom is deliberately generous because launch rate is bursty and
+    # the penalty for exceeding the cap is not a rejected subscription but a
+    # CLOSED CONNECTION (code 1013), which drops every active subscription with
+    # it. Slots also free early whenever a curve completes.
+    #
+    # This is the primary tuning knob. If "curve subscription slots exhausted"
+    # appears in the logs, shorten this window or lower control_sample_rate
+    # before touching the cap.
+    dense_window_minutes: 5
+
+    # Initial market cap above the 30 SOL platform default is the strongest
+    # single t=0 predictor in the survival literature (Cox HR 4.51), so these
+    # are always instrumented.
+    instrument_mcap_sol_above: 32
+
+    # Telegram presence carries an 8.94x graduation lift. Socials arrive a beat
+    # after the launch event, so these subscribe slightly late.
+    instrument_if_telegram: true
+
+    # THE CONTROL GROUP. Launches that fail every filter above, instrumented
+    # anyway at this rate. Without it the dataset could only ever describe
+    # tokens the filter already liked, and the filter itself would be
+    # unfalsifiable. Membership is a hash of the mint, not a coin flip, so it is
+    # reproducible months later.
+    control_sample_rate: 0.06
+
+  limits:
+    # The RPC closes the connection with code 1013 on the 101st concurrent
+    # subscription — measured, not documented. This leaves headroom.
+    max_curve_subscriptions: 95
+    metadata_timeout_ms: 5000
+    metadata_concurrency: 6
+    max_buffered_events: 20000
+    # Launches run at ~50/min, so a multi-minute silence means broken even
+    # though the socket is connected. This is the failure a liveness check on
+    # the connection alone would miss entirely.
+    silence_fail_after_seconds: 300
+
+alerts:
+  # Silent by default. Failure and recovery only — no per-launch alerts.
+  discord_on_consecutive_failures: 3
+
+dashboard:
+  window_hours: 24

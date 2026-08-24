@@ -63,9 +63,31 @@ options:
     # observed and stored but left unscored.
     min_completeness: 0.5
 
+  # Where the candidate universe comes from.
+  discovery:
+    # Pull graduated tokens from the pump.fun launch monitor.
+    #
+    # DexScreener's only free path to new tokens is its "latest profiles/boosts"
+    # feeds, which list tokens whose developers PAID for visibility — so a
+    # universe accumulated from them alone over-represents launches with a
+    # marketing budget. Graduates are selected by the market instead.
+    #
+    # Set to an empty value to disable and fall back to the feeds alone. If the
+    # launch monitor is not deployed its tables will not exist, and discovery
+    # logs a warning and carries on rather than failing.
+    pumpfun_monitor_id: pumpfun-launches
+    # Matches max_age_hours below: a token older than the scoring window would
+    # enter the universe already past candidacy.
+    graduate_lookback_hours: 168
+
   limits:
     # Universe cap. Newly discovered tokens always take priority over the tail.
-    max_tracked: 400
+    #
+    # Raised from 400 when graduate discovery was added: pump.fun graduates run
+    # at roughly 50-150/day, so a 7-day lookback contributes up to ~1000 mints
+    # on its own and the old cap would have evicted them within days. At 30
+    # addresses per DexScreener request this is ~40 requests per run.
+    max_tracked: 1200
     # RugCheck calls per run. Deepest-liquidity candidates are enriched first.
     max_enrich_per_run: 25
     request_delay_ms: 250

@@ -12,6 +12,13 @@
  * panel (`renderPanel`). Sources that are genuinely document-shaped, like RSS,
  * declare none of these and get the shared behaviour for free.
  *
+ * The pump.fun monitor extended the same idea to liveness. Its source is a
+ * persistent websocket rather than a request, which fits none of `fetch()`'s
+ * assumptions. Rather than fork the spine into polled and streaming monitors,
+ * the adapter holds the socket and buffers events, and its scheduled `fetch()`
+ * drains the buffer. Scheduling, health, and alerting then work on a stream
+ * unchanged — a drain that finds the socket dead or silent simply throws.
+ *
  * The spine keeps what is genuinely common to every source: scheduling, the
  * run registry, health, and failure/recovery alerting.
  */
@@ -89,6 +96,14 @@ export interface SourceAdapter<TRecord = NormalizedRecord> {
 
   /** Render this source's dashboard section. Omit for the default record list. */
   renderPanel?(ctx: PanelContext): Promise<string>;
+
+  /**
+   * Release anything held between runs. Polled sources own nothing outside a
+   * run and omit this; a source backed by a persistent connection uses it so a
+   * Railway SIGTERM closes the socket and flushes buffered events rather than
+   * dropping one drain interval's worth of data.
+   */
+  shutdown?(): Promise<void>;
 }
 
 /** The spine handles adapters without knowing their record type. */

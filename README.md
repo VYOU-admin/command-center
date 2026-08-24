@@ -1,21 +1,21 @@
 # command-center
 
-A monitoring spine. Sources are pulled on a schedule, normalized into one shape,
-stored in Postgres, and read back by two sinks: a web dashboard and Discord
-alerts.
+A monitoring spine. Sources are collected on a schedule, normalized, stored in
+Postgres, and read back by two sinks: a web dashboard and Discord alerts.
 
 The point of the layering is that adding the tenth source should cost the same
 as adding the second.
 
 ```
-  INGEST                    STORE                 OUTPUT
-  ------                    -----                 ------
-  adapters/rss.ts   ─┐                         ┌─ web dashboard  (/)
-  adapters/...      ─┼──►  Postgres  ──────────┤
-  adapters/...      ─┘     records             └─ Discord alerts (failures)
-        ▲                  monitors (registry)
-        │                  monitor_runs
-   monitors/*.yaml
+  INGEST                        STORE                 OUTPUT
+  ------                        -----                 ------
+  adapters/rss.ts        ─┐                        ┌─ web dashboard  (/)
+  adapters/solana-*.ts   ─┼──►  Postgres  ─────────┤
+  adapters/pumpfun-*.ts  ─┘     records            └─ Discord alerts (failures)
+        ▲       ▲               monitors (registry)
+        │       │               monitor_runs
+   monitors/    └── websockets held open by the adapter;
+     *.yaml         the schedule drains their buffer
 ```
 
 ## Layers
@@ -23,8 +23,9 @@ as adding the second.
 **Ingest.** One file per source in `src/adapters/`, each default-exporting a
 `SourceAdapter`. The directory is scanned at boot, so there is no registration
 list to keep in sync. Required: `validate(options)` and `fetch(ctx)`. Optional:
-`migrate(client)`, `persist(ctx, client, rows)`, and `renderPanel(ctx)` for
-sources that own their storage and their view.
+`migrate(client)`, `persist(ctx, client, rows)`, `renderPanel(ctx)`, and
+`shutdown()` for sources that own their storage, their view, or a connection
+that outlives a run.
 
 **Store.** Postgres, connection string from `DATABASE_URL`, never hardcoded.
 Tables are created on startup if missing. The spine owns three:
@@ -39,6 +40,8 @@ Tables are created on startup if missing. The spine owns three:
 DO NOTHING` — one row per item, never overwritten. That is right for articles and
 wrong for time series, so sources that need something else declare their own
 tables instead (see below).
+
+Adapter-owned tables now outnumber the spine's: `solana_*` (3), `pump_*` (4).
 
 **Output.** The dashboard at `/` and Discord alerts both read the same tables.
 Neither is in the ingest path, so a Discord outage cannot stop data collection.
@@ -56,6 +59,29 @@ adapter's business.
 What stayed common is what genuinely is common: scheduling, the run registry,
 health, and failure/recovery alerting. RSS declares no `migrate`/`persist` and
 still gets the shared document store for free.
+
+### Why a websocket did not need a second kind of monitor
+
+The pump.fun monitor is not a poll. Its source is two persistent websockets,
+which fit none of `fetch()`'s assumptions: no beginning, no end, aborted by the
+run guard at five minutes, and permanently "stale" to a health model whose only
+question is when a *run* last succeeded.
+
+The alternative was to teach the spine about stream lifecycles — `start`/`stop`,
+a connection supervisor, a second health signal threaded through `health.ts`,
+`alerts.ts`, and the registry — which forks every layer into polled and
+streaming variants.
+
+Instead the adapter holds the sockets and buffers what arrives, and its
+scheduled `fetch()` drains the buffer. Everything above ingest keeps working
+unchanged: a drain that finds the socket dead or silent throws, and
+`consecutive_failures` does the rest. The only spine change was one optional
+`shutdown()` hook, plus a final drain before it, so a Railway SIGTERM commits
+buffered events instead of dropping them.
+
+Batching turned out to be the right shape anyway. At ~50 launches/minute, one
+insert per event is a write per second forever; one transaction per drain is
+strictly better for Postgres.
 
 ## Monitors
 
@@ -126,11 +152,18 @@ at day 7 could never answer that question.
 These are properties of the free APIs, not of the code, and they are worth
 knowing before trusting a number:
 
-- **Discovery is not exhaustive.** DexScreener has no endpoint that enumerates a
-  chain's pairs by age (search returns mature pairs — in testing, 1 of 75 was in
-  a 6h–7d window). The universe is instead *accumulated* from the "latest
-  profiles/boosts" feeds, so coverage grows over days and is biased toward
-  tokens that appear in them.
+- **Discovery is not exhaustive, and was biased.** DexScreener has no endpoint
+  that enumerates a chain's pairs by age (search returns mature pairs — in
+  testing, 1 of 75 was in a 6h–7d window). The universe is instead *accumulated*
+  from the "latest profiles/boosts" feeds — which list tokens whose developers
+  *paid* for visibility. Since the pump.fun monitor landed, graduated tokens are
+  unioned in from `pump_launches`, which are selected by the market instead. The
+  feeds are kept alongside rather than replaced, so tokens that never touched a
+  bonding curve stay in scope. Pre-graduation launches are deliberately *not*
+  pulled in: at ~70k/day they would swamp the universe, and none of them have
+  the pair, liquidity, or age this monitor's floors are written against. If the
+  launch monitor is not deployed its tables will not exist, and discovery logs a
+  warning and carries on feeds-only.
 - **There is no unique-wallet data.** Neither API exposes unique traders, so
   dispersion uses holder count. Holders are rent-funded on-chain accounts that
   cost real SOL to create, making them far harder to fake than transaction
@@ -142,6 +175,112 @@ knowing before trusting a number:
   weight that could be measured. **A score is only meaningful read next to its
   completeness**, which is why the dashboard prints both. Raise
   `scoring.min_completeness` to refuse to score tokens missing holder data.
+
+## The pump.fun monitor
+
+Two monitors over one launch stream, existing to build a dataset — not a buy
+list. Nothing here is ranked and nothing alerts per launch.
+
+| monitor            | schedule | does                                                |
+| ------------------ | -------- | --------------------------------------------------- |
+| `pumpfun-launches` | 30s      | drains the sockets, writes launches/trades/outcomes |
+| `pumpfun-outcomes` | 10m      | resolves outcomes, deployer stats, retention        |
+
+They are split so each has its own health and staleness alert. If outcome
+tracking wedges, that fails loudly rather than hiding behind a stream that is
+still happily ingesting.
+
+### Where the data comes from
+
+All of it is free and none of it needs an API key.
+
+| feed                            | gives                                    |
+| ------------------------------- | ---------------------------------------- |
+| PumpPortal `subscribeNewToken`  | every launch: mint, deployer, mcap, curve |
+| PumpPortal `subscribeMigration` | every graduation, platform-wide           |
+| Solana RPC `accountSubscribe`   | one push per trade on a token's curve     |
+| the token's metadata URI        | advertised twitter / telegram / website   |
+
+The third one is the load-bearing trick. **PumpPortal's own trade feed is not
+free** — `subscribeTokenTrade` is metered at 0.01 SOL per 10,000 events, which
+at ~70k launches/day is not viable. But every trade mutates the token's bonding
+curve account, so subscribing to that *account* yields one message per trade at
+no cost, carrying both the SOL level and, by counting messages, the trade count.
+
+### Why trade count, not just elapsed time
+
+The result this monitor exists to test is that liquidity velocity is the single
+most informative predictor of graduation ([Marino et al.][marino]). That
+paper's variable is **SOL per trade** — reaching a given level in *fewer* trades
+predicts graduation — not SOL per second. A design that only sampled curve
+balances on a timer would measure the time derivative and miss the published
+variable entirely.
+
+So `pump_curve_samples` stores a per-token `trade_seq` alongside `real_sol`, and
+`pump_velocity_summary` records both *trades-to-N-SOL* and *seconds-to-N-SOL* at
+each configured level. Which one carries the signal is then a question the
+dataset can answer rather than one the schema has already assumed.
+
+[marino]: https://arxiv.org/abs/2602.14860
+
+### Sampling, and why there is a control group
+
+At ~48.7 launches/minute measured and a hard cap of 100 concurrent RPC
+subscriptions, everything cannot be instrumented. Every launch gets a free t=0
+row; a subset gets a bonding-curve subscription:
+
+- **initial mcap above the 30 SOL default** — the strongest t=0 predictor in the
+  survival literature (Cox HR 4.51)
+- **an advertised Telegram** — an 8.94x graduation lift ([GRW study][grw])
+- **a random 6% of everything else** — the control group
+
+The control group is not optional. Instrumenting only tokens that pass a filter
+produces a dataset that can describe those tokens and nothing else, which makes
+the filter unfalsifiable: you could never measure what it threw away. Membership
+is a hash of the mint rather than a coin flip, so it stays reproducible.
+
+[grw]: https://arxiv.org/abs/2607.02823
+
+### Retention
+
+~70k launches/day means storing every trade for every token forever is not an
+option. The policy leans on the class imbalance rather than fighting it —
+graduations are ~0.2% of rows, so keeping them at full fidelity costs nothing,
+while tokens that died without trading are both the bulk of the data and the
+least informative per byte.
+
+| data                            | kept                                    |
+| ------------------------------- | --------------------------------------- |
+| launch rows (t=0 features)       | forever — they are the denominator      |
+| samples, graduated               | 180 days                                |
+| samples, everything else         | 30 days, then collapsed to a summary    |
+| samples, died without a trade    | 7 days                                  |
+| `pump_velocity_summary`          | forever — it outlives the raw detail    |
+| `pump_deployer_stats`            | forever                                 |
+
+Launch rows are never deleted. Without the tokens that failed there is no base
+rate, and every number computed from the table would be conditioned on success.
+Raw samples are only pruned after their velocity summary exists.
+
+### Known data limits
+
+- **Graduation is rarer than most sources claim.** ~0.2% platform-wide in 2026,
+  down from 0.63% in late 2025. At ~140/day, any leaderboard drawn from a few
+  days of collection is noise. The dashboard shows counts and an observed rate,
+  and deliberately shows no token ranking.
+- **The observed rate is over *resolved* launches only.** Dividing graduations
+  by every launch ever seen would understate it, because the newest launches
+  have not had time to graduate and would all count as failures.
+- **`website` is usually a self-link.** pump.fun writes the coin's own page into
+  that field for most launches, so counted naively every token looks like it has
+  a site. Self-links are stored as `website_is_self` instead.
+- **Graduations arrive for tokens that launched before this monitor existed.**
+  Those get a stub row flagged `observed_from_launch = false`: the outcome is
+  real, the t=0 features are not, and feature analysis must exclude them rather
+  than read the nulls as zeroes.
+- **The dense window is a sampling decision, not a measurement.** A token is
+  watched for its first 5 minutes. Trades after that are not recorded, so
+  `trade_count` is a count within the window and not a lifetime total.
 
 ## Designing against silent failure
 
@@ -228,4 +367,9 @@ as-is risks orphaning the Postgres service, and the IaC format needs the
 There is no step 3. Scheduling, the registry, health, and failure/recovery
 alerting pick it up automatically. Document-shaped sources also get the shared
 record store, dedupe, and a default dashboard panel; sources needing a different
-shape add `migrate` / `persist` / `renderPanel` to the same file.
+shape add `migrate` / `persist` / `renderPanel` to the same file, and sources
+holding a connection between runs add `shutdown`.
+
+That held for a websocket source too. Adding pump.fun cost two adapter files,
+two YAML files, and exactly one line of new interface — the rest of the spine
+did not move.

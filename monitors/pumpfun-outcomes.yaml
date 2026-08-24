@@ -1,0 +1,53 @@
+# pump.fun outcome reconciliation, deployer statistics, and retention.
+#
+# Separate from the launch stream so it has its own health and its own staleness
+# alert. If outcome tracking wedges, that fails loudly rather than hiding behind
+# a stream that is still happily ingesting.
+
+id: pumpfun-outcomes
+name: Pump.fun Outcomes
+source: pumpfun-outcomes
+enabled: true
+schedule: 10m
+
+options:
+  # Whose rows to maintain. The launch monitor owns the tables.
+  launch_monitor_id: pumpfun-launches
+
+  # An instrumented token whose curve has not moved in this long, and which
+  # never graduated, is called dead.
+  death_after_idle_minutes: 60
+
+  # A token we never instrumented has no curve history, so it is called dead on
+  # age alone. This is sound because the migration subscription is platform-wide:
+  # never having seen a graduation for it is real evidence, not just absence of
+  # observation.
+  unobserved_death_after_hours: 24
+
+  # SOL levels at which "how many trades did it take" and "how many seconds did
+  # it take" are both recorded. The published result this monitor exists to test
+  # is about TRADES — reaching a level in fewer trades predicts graduation —
+  # while elapsed time is the intuitive reading of velocity. Both are stored so
+  # the dataset can settle which one carries the signal.
+  velocity_thresholds_sol: [1, 5, 10, 30]
+
+  # RETENTION. Graduations are ~0.2% of rows, so keeping them at full fidelity
+  # costs almost nothing, while tokens that died without ever trading are both
+  # the bulk of the data and the least informative per byte.
+  #
+  # Launch rows are NEVER deleted — they are the denominator, and without them
+  # no base rate can be computed. Only raw per-trade samples are pruned, and
+  # only after their velocity summary has been extracted.
+  retention:
+    graduate_sample_days: 180 # the rare positive class; keep it
+    raw_sample_days: 30 # everything else at full detail
+    dead_sample_days: 7 # died without a single trade
+    max_rows_per_pass: 50000 # so a maintenance run never runs long
+
+  dashboard_min_launches: 3
+
+alerts:
+  discord_on_consecutive_failures: 3
+
+dashboard:
+  window_hours: 24

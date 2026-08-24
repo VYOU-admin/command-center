@@ -71,6 +71,13 @@ interface Config {
   minCompleteness: number;
   maxTracked: number;
   maxEnrichPerRun: number;
+  /**
+   * Monitor id whose graduated pump.fun tokens join this monitor's universe.
+   * Null disables it and leaves discovery on the DexScreener feeds alone.
+   */
+  graduateSource: string | null;
+  /** How far back to pull graduates on each run. */
+  graduateLookbackHours: number;
   topN: number;
   alertCooldownHours: number;
   requestDelayMs: number;
@@ -121,6 +128,7 @@ function parseConfig(options: Record<string, unknown>, monitorId: string): Confi
   const s = section(options, 'scoring');
   const l = section(options, 'limits');
   const a = section(options, 'alerts');
+  const d = section(options, 'discovery');
 
   const weights: Weights = {
     mintRenounced: configNumber(w, 'mint_renounced', ctx, 25),
@@ -156,6 +164,11 @@ function parseConfig(options: Record<string, unknown>, monitorId: string): Confi
     dispersionHolderTarget: configNumber(s, 'dispersion_holder_target', ctx, 2000),
     minCompleteness: configNumber(s, 'min_completeness', ctx, 0.5),
     maxTracked: configNumber(l, 'max_tracked', ctx, 400),
+    graduateSource:
+      typeof d['pumpfun_monitor_id'] === 'string' && d['pumpfun_monitor_id'].trim()
+        ? (d['pumpfun_monitor_id'] as string).trim()
+        : null,
+    graduateLookbackHours: configNumber(d, 'graduate_lookback_hours', ctx, 24 * 14),
     maxEnrichPerRun: configNumber(l, 'max_enrich_per_run', ctx, 25),
     requestDelayMs: configNumber(l, 'request_delay_ms', ctx, 250),
     timeoutMs: optionalNumber(l, 'timeout_ms', monitorId, 20_000),
@@ -203,6 +216,45 @@ const DISCOVERY_FEEDS = [
   `${DEXSCREENER}/token-boosts/top/v1`,
 ];
 
+/**
+ * Graduated pump.fun tokens, from the launch monitor's tables.
+ *
+ * This is the fix for a known bias. DexScreener's only free path to new tokens
+ * is its "latest profiles/boosts" feeds, which list tokens whose developers paid
+ * for visibility — so the universe accumulated from them over-represents exactly
+ * the launches with a marketing budget. Graduates are selected by the market
+ * instead, and by the time a token graduates it has a real pair with real
+ * liquidity, which is what everything downstream here already assumes.
+ *
+ * Pre-graduation launches are deliberately NOT pulled in: at ~70k/day they would
+ * swamp the tracked universe, and none of them have the DEX pair, liquidity, or
+ * age that this monitor's floors are written against.
+ */
+async function discoverGraduates(ctx: AdapterContext, cfg: Config): Promise<string[]> {
+  if (!cfg.graduateSource) return [];
+  try {
+    const result = await ctx.db.query(
+      `select mint from pump_launches
+        where monitor_id = $1
+          and outcome = 'graduated'
+          and graduated_at > now() - ($2 || ' hours')::interval
+        order by graduated_at desc
+        limit $3`,
+      [cfg.graduateSource, cfg.graduateLookbackHours, cfg.maxTracked],
+    );
+    return result.rows.map((r: { mint: string }) => r.mint);
+  } catch (err) {
+    // The launch monitor may not be deployed, in which case its tables do not
+    // exist. That must not take down discovery — this monitor has to keep
+    // working standalone, exactly as it did before.
+    ctx.log.warn('graduate discovery unavailable, continuing with feeds only', {
+      source: cfg.graduateSource,
+      error: (err as Error).message,
+    });
+    return [];
+  }
+}
+
 async function discover(ctx: AdapterContext, cfg: Config): Promise<Set<string>> {
   const found = new Set<string>();
   let failures = 0;
@@ -225,7 +277,16 @@ async function discover(ctx: AdapterContext, cfg: Config): Promise<Set<string>> 
     await sleep(cfg.requestDelayMs);
   }
 
-  ctx.log.info('discovery complete', { discovered: found.size, feeds_failed: failures });
+  const fromFeeds = found.size;
+  const graduates = await discoverGraduates(ctx, cfg);
+  for (const mint of graduates) found.add(mint);
+
+  ctx.log.info('discovery complete', {
+    discovered: found.size,
+    from_feeds: fromFeeds,
+    from_graduates: graduates.length,
+    feeds_failed: failures,
+  });
   return found;
 }
 

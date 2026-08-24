@@ -174,6 +174,11 @@ export function renderDashboard(args: {
   dd { margin:1px 0 0; font-size:14px; font-variant-numeric:tabular-nums; }
   .meta { color:var(--muted); font-size:12px; margin:0; }
   .panel-meta { color:var(--muted); font-size:12px; margin:0 0 10px; }
+  /* stat tiles: a compact card whose whole job is one number */
+  .cards.stats { grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); }
+  .card h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 6px; font-weight:600; }
+  .card p.big { font-size:24px; font-variant-numeric:tabular-nums; margin:0 0 4px; font-weight:600; }
+  .card p.panel-meta { margin:0; }
   code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
   .error { margin:10px 0 0; padding:8px 10px; background:rgba(255,107,107,.1); border-left:3px solid var(--bad); border-radius:4px; font-size:13px; word-break:break-word; }
   ul.records { list-style:none; margin:0; padding:0; border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--panel); }

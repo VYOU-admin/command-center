@@ -59,6 +59,34 @@ async function main(): Promise<void> {
       timer.unref();
 
       await scheduler.stop();
+
+      // Adapters holding a persistent connection need two things on the way
+      // out, in this order. First a final run, which for a streaming source
+      // drains and commits whatever it buffered since the last scheduled drain
+      // — without it a Railway redeploy silently loses those events. Only then
+      // is it safe to close the socket.
+      const streaming = app.monitors.filter(
+        (m) => m.enabled && app.adapters.get(m.source)?.shutdown,
+      );
+
+      for (const monitor of streaming) {
+        try {
+          await scheduler.runMonitor(monitor);
+        } catch (err) {
+          log.error('final drain failed', { monitor_id: monitor.id, ...errorFields(err) });
+        }
+      }
+
+      for (const [type, adapter] of app.adapters) {
+        if (!adapter.shutdown) continue;
+        try {
+          await adapter.shutdown();
+          log.info('adapter shut down', { source: type });
+        } catch (err) {
+          log.error('adapter shutdown failed', { source: type, ...errorFields(err) });
+        }
+      }
+
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await app.pool.end().catch(() => {});
       clearTimeout(timer);
