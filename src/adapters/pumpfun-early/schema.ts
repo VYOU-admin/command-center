@@ -195,6 +195,38 @@ create index if not exists early_snap_outcome_idx
 create index if not exists early_snap_phase_idx
   on early_snapshots (monitor_id, phase, seconds_since_launch);
 
+-- Per-wallet activity in a token's first ten minutes: one row per (mint,
+-- wallet), both sides. Written once, when the ten-minute decision is made.
+create table if not exists early_token_wallets (
+  monitor_id           text        not null,
+  mint                 text        not null,
+  wallet               text        not null,
+  captured_at          timestamptz not null default now(),
+
+  -- Seconds since launch at which this wallet first did anything here.
+  first_seen_seconds   numeric     not null,
+
+  buy_count            integer     not null default 0,
+  buy_sol              numeric     not null default 0,
+  first_buy_seconds    numeric,
+
+  -- Sells matter as much as buys: buying early and dumping into the pump is a
+  -- different behaviour from buying early and holding, and buy data alone
+  -- cannot tell the two apart.
+  sell_count           integer     not null default 0,
+  sell_sol             numeric     not null default 0,
+  first_sell_seconds   numeric,
+
+  primary key (monitor_id, mint, wallet)
+);
+
+-- The lookup wallet statistics are built from: every token one wallet touched.
+create index if not exists early_wallets_wallet_idx
+  on early_token_wallets (wallet, monitor_id);
+
+create index if not exists early_wallets_captured_idx
+  on early_token_wallets (monitor_id, captured_at);
+
 create index if not exists early_snap_market_idx
   on early_snapshots (monitor_id, has_market, seconds_since_launch);
 

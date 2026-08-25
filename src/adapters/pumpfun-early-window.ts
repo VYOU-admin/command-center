@@ -25,6 +25,7 @@ import type { PoolClient } from '../store/db.js';
 import { parseEarlyConfig, type EarlyConfig } from './pumpfun-early/config.js';
 import { SCHEMA } from './pumpfun-early/schema.js';
 import { TradeStream } from './pumpfun-early/trades.js';
+import type { WalletCapture } from './pumpfun-early/wallets.js';
 import {
   Tracker,
   type Decision,
@@ -48,6 +49,7 @@ interface Runtime {
   pendingSnapshots: Snapshot[];
   pendingResolutions: Resolution[];
   pendingDecisions: Decision[];
+  pendingWallets: WalletCapture[];
   socialsQueue: TrackedToken[];
   socialsInFlight: number;
   lastDexRefresh: number;
@@ -73,6 +75,7 @@ function start(ctx: AdapterContext, cfg: EarlyConfig): Runtime {
     pendingSnapshots: [],
     pendingResolutions: [],
     pendingDecisions: [],
+    pendingWallets: [],
     socialsQueue: [],
     socialsInFlight: 0,
     lastDexRefresh: 0,
@@ -128,10 +131,14 @@ function start(ctx: AdapterContext, cfg: EarlyConfig): Runtime {
   // Snapshots are emitted on their own clock, not on the drain schedule: a mark
   // at 15s cannot wait for a drain that runs every 30s.
   const tick = setInterval(() => {
-    const { snapshots, resolved, decided } = tracker.collect(Date.now(), solPrice.current);
+    const { snapshots, resolved, decided, wallets } = tracker.collect(
+      Date.now(),
+      solPrice.current,
+    );
     if (snapshots.length) rt.pendingSnapshots.push(...snapshots);
     if (resolved.length) rt.pendingResolutions.push(...resolved);
     if (decided.length) rt.pendingDecisions.push(...decided);
+    if (wallets.length) rt.pendingWallets.push(...wallets);
     pumpSocials(rt, ctx);
   }, 1000);
   tick.unref();
@@ -358,6 +365,46 @@ async function writeDecisions(
 }
 
 /**
+ * Per-wallet activity for a token's first ten minutes, written once when the
+ * decision is made. ON CONFLICT DO NOTHING because a token is captured exactly
+ * once; a duplicate would mean the hand-off ran twice, which the tracker's
+ * walletsCaptured flag already prevents.
+ */
+async function writeWallets(
+  client: PoolClient,
+  monitorId: string,
+  rows: WalletCapture[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const res = await client.query(
+    `insert into early_token_wallets (
+       monitor_id, mint, wallet, first_seen_seconds,
+       buy_count, buy_sol, first_buy_seconds,
+       sell_count, sell_sol, first_sell_seconds
+     )
+     select $1, * from unnest(
+       $2::text[], $3::text[], $4::numeric[],
+       $5::int[], $6::numeric[], $7::numeric[],
+       $8::int[], $9::numeric[], $10::numeric[]
+     )
+     on conflict (monitor_id, mint, wallet) do nothing`,
+    [
+      monitorId,
+      rows.map((r) => r.mint),
+      rows.map((r) => r.wallet),
+      rows.map((r) => r.firstSeenSeconds),
+      rows.map((r) => r.buyCount),
+      rows.map((r) => r.buySol),
+      rows.map((r) => r.firstBuySeconds),
+      rows.map((r) => r.sellCount),
+      rows.map((r) => r.sellSol),
+      rows.map((r) => r.firstSellSeconds),
+    ],
+  );
+  return res.rowCount ?? 0;
+}
+
+/**
  * Retention.
  *
  * At ~1.6M snapshots a day this table would otherwise grow without bound, so
@@ -476,7 +523,7 @@ async function thinDenseGrid(
   client: PoolClient,
   monitorId: string,
   cfg: EarlyConfig,
-): Promise<{ removed: number; tokens: number }> {
+): Promise<{ removed: number; walletRows: number; tokens: number }> {
   const batch = await client.query<{ mint: string }>(
     `select t.mint from early_tokens t
       where t.monitor_id = $1
@@ -492,7 +539,7 @@ async function thinDenseGrid(
     [monitorId, cfg.densePurgeHours, cfg.retentionBatchTokens],
   );
   const mints = batch.rows.map((r) => r.mint);
-  if (mints.length === 0) return { removed: 0, tokens: 0 };
+  if (mints.length === 0) return { removed: 0, walletRows: 0, tokens: 0 };
 
   const result = await client.query(
     `with candidates as (
@@ -514,13 +561,28 @@ async function thinDenseGrid(
     [monitorId, mints, cfg.fiveMinuteMarkSeconds],
   );
 
+  // Wallet rows for the same tokens go on the same terms. ⚠️ This is the one
+  // place the loser record can be lost: wallet statistics must therefore be
+  // CUMULATIVE, folding each token in once and keeping the running totals,
+  // never rebuilt by rescanning this table. A full rebuild after a prune would
+  // silently forget exactly the failures that identify a bot.
+  const walletsGone = await client.query(
+    `delete from early_token_wallets
+      where monitor_id = $1 and mint = any($2::text[])`,
+    [monitorId, mints],
+  );
+
   await client.query(
     `update early_tokens set dense_pruned = true
       where monitor_id = $1 and mint = any($2::text[])`,
     [monitorId, mints],
   );
 
-  return { removed: result.rowCount ?? 0, tokens: mints.length };
+  return {
+    removed: result.rowCount ?? 0,
+    walletRows: walletsGone.rowCount ?? 0,
+    tokens: mints.length,
+  };
 }
 
 /* ---------------------------------------------------------------- adapter */
@@ -534,6 +596,7 @@ interface Drain {
   snapshots: Snapshot[];
   resolutions: Resolution[];
   decisions: Decision[];
+  wallets: WalletCapture[];
   traded: { mint: string; lastTradeAt: Date }[];
 }
 
@@ -574,12 +637,14 @@ const adapter: SourceAdapter<Drain> = {
       snapshots: rt.pendingSnapshots,
       resolutions: rt.pendingResolutions,
       decisions: rt.pendingDecisions,
+      wallets: rt.pendingWallets,
       traded: rt.tracker.tradedSincePersist(),
     };
     rt.pendingTokens = [];
     rt.pendingSnapshots = [];
     rt.pendingResolutions = [];
     rt.pendingDecisions = [];
+    rt.pendingWallets = [];
 
     const streamStats = rt.trades.snapshotStats();
     const counters = rt.tracker.drainCounters();
@@ -590,6 +655,7 @@ const adapter: SourceAdapter<Drain> = {
       snapshots_with_market: drain.snapshots.filter((s) => s.hasMarket).length,
       resolved: drain.resolutions.length,
       decided: drain.decisions.length,
+      wallet_rows: drain.wallets.length,
       tracked_now: rt.tracker.size,
       ...rt.tracker.phaseCounts(),
       sol_usd: rt.solPrice.current,
@@ -654,6 +720,7 @@ const adapter: SourceAdapter<Drain> = {
     const snapshots = await writeSnapshots(client, ctx.monitorId, drain.snapshots);
     await writeLastTradeAt(client, ctx.monitorId, drain.traded);
     await writeDecisions(client, ctx.monitorId, drain.decisions);
+    const walletRows = await writeWallets(client, ctx.monitorId, drain.wallets);
     await writeResolutions(client, ctx.monitorId, drain.resolutions);
 
     // Paced: the drain runs every 30 seconds, maintenance does not need to.
@@ -665,13 +732,14 @@ const adapter: SourceAdapter<Drain> = {
       if (dense.tokens > 0) {
         ctx.log.info('dense grid thinned', {
           rows_removed: dense.removed,
+          wallet_rows_removed: dense.walletRows,
           tokens_thinned: dense.tokens,
           older_than_hours: drain.cfg.densePurgeHours,
         });
       }
     }
 
-    return tokens + snapshots;
+    return tokens + snapshots + walletRows;
   },
 
   async shutdown() {

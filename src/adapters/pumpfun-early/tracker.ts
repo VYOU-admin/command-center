@@ -12,6 +12,13 @@
 import type { Logger } from '../../logger.js';
 import { buildMarks, type EarlyConfig } from './config.js';
 import { TOTAL_SUPPLY, type Trade } from './trades.js';
+import {
+  applyToWallet,
+  newActivity,
+  toCaptures,
+  type WalletActivity,
+  type WalletCapture,
+} from './wallets.js';
 
 export interface LaunchInfo {
   mint: string;
@@ -65,8 +72,17 @@ export interface TrackedToken extends LaunchInfo {
   sells: number;
   buyVolumeSol: number;
   sellVolumeSol: number;
-  buyers: Set<string>;
-  sellers: Set<string>;
+  /**
+   * Per-wallet activity for the first ten minutes. Replaces the two address
+   * Sets that were kept only to be counted and then discarded: the same memory
+   * now also yields who was there, which is what makes wallet history possible.
+   */
+  wallets: Map<string, WalletActivity>;
+  /** Maintained incrementally — recounting the map per snapshot would dominate. */
+  uniqueBuyers: number;
+  uniqueSellers: number;
+  /** Set once the wallet map has been handed off, so it is never emitted twice. */
+  walletsCaptured: boolean;
   largestBuySol: number;
   /* last known curve state, carried between trades */
   curveSol: number;
@@ -268,8 +284,10 @@ export class Tracker {
       sells: 0,
       buyVolumeSol: 0,
       sellVolumeSol: 0,
-      buyers: new Set(),
-      sellers: new Set(),
+      wallets: new Map(),
+      uniqueBuyers: 0,
+      uniqueSellers: 0,
+      walletsCaptured: false,
       largestBuySol: 0,
       curveSol: 0,
       virtualSol: info.initialVSol ?? 0,
@@ -295,12 +313,26 @@ export class Tracker {
     if (trade.isBuy) {
       t.buys++;
       t.buyVolumeSol += trade.solAmount;
-      t.buyers.add(trade.user);
       if (trade.solAmount > t.largestBuySol) t.largestBuySol = trade.solAmount;
     } else {
       t.sells++;
       t.sellVolumeSol += trade.solAmount;
-      t.sellers.add(trade.user);
+    }
+
+    // Wallet detail is kept only while the map is alive: until the ten-minute
+    // hand-off for a token that gets dropped, and for the whole window for one
+    // that is kept. The unique counters below outlive it either way, so the
+    // snapshot columns behave exactly as before.
+    if (!t.walletsCaptured || t.phase !== 'outcome') {
+      let a = t.wallets.get(trade.user);
+      if (!a) {
+        a = newActivity();
+        t.wallets.set(trade.user, a);
+      }
+      const seconds = (Date.now() - t.launchedAt.getTime()) / 1000;
+      const seen = applyToWallet(a, trade.isBuy, trade.solAmount, seconds);
+      if (seen.firstBuy) t.uniqueBuyers++;
+      if (seen.firstSell) t.uniqueSellers++;
     }
     t.curveSol = trade.realSol;
     t.virtualSol = trade.virtualSol;
@@ -317,10 +349,16 @@ export class Tracker {
   collect(
     now: number,
     solUsd: number | null,
-  ): { snapshots: Snapshot[]; resolved: Resolution[]; decided: Decision[] } {
+  ): {
+    snapshots: Snapshot[];
+    resolved: Resolution[];
+    decided: Decision[];
+    wallets: WalletCapture[];
+  } {
     const snapshots: Snapshot[] = [];
     const resolved: Resolution[] = [];
     const decided: Decision[] = [];
+    const wallets: WalletCapture[] = [];
     const idleMs = this.cfg.deathAfterIdleMinutes * 60_000;
     const outcome = new Set(this.cfg.outcomeMarks);
 
@@ -335,6 +373,16 @@ export class Tracker {
       if (t.phase === 'early' && ageSec >= this.cfg.decisionSeconds) {
         t.decidedAt = new Date(now);
         t.curveSolAtDecision = t.curveSol;
+
+        // Hand off the first ten minutes of wallet activity for EVERY token,
+        // before the branch below decides whether to keep tracking it. Doing it
+        // here is what makes losers available: the tokens that get dropped are
+        // exactly the ones a bot's failures hide in.
+        if (!t.walletsCaptured) {
+          t.walletsCaptured = true;
+          const rows = toCaptures(mint, t.wallets);
+          if (rows.length > 0) wallets.push(...rows);
+        }
         if (t.curveSol > this.cfg.activityFloorSol) {
           t.phase = 'extended';
           t.keepReason = 'activity';
@@ -349,9 +397,9 @@ export class Tracker {
           this.stopped++;
           // Release the heavy state. ~86% of launches land here and are held
           // for six more hours only to emit five outcome rows; keeping their
-          // wallet sets would dominate memory for no analytical gain.
-          t.buyers = new Set();
-          t.sellers = new Set();
+          // wallet map would dominate memory for no analytical gain. The
+          // counters survive, so the snapshot columns stay correct.
+          t.wallets = new Map();
         }
         decided.push({
           mint,
@@ -411,8 +459,8 @@ export class Tracker {
           sells: t.sells,
           buyVolumeSol: t.buyVolumeSol,
           sellVolumeSol: t.sellVolumeSol,
-          uniqueBuyers: t.buyers.size,
-          uniqueSellers: t.sellers.size,
+          uniqueBuyers: t.uniqueBuyers,
+          uniqueSellers: t.uniqueSellers,
           largestBuySol: t.largestBuySol > 0 ? t.largestBuySol : null,
           postGraduation: t.graduated,
           dexLiquidityUsd: t.dexLiquidityUsd,
@@ -444,7 +492,7 @@ export class Tracker {
       }
     }
 
-    return { snapshots, resolved, decided };
+    return { snapshots, resolved, decided, wallets };
   }
 
   /**
