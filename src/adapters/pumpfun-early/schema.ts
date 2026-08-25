@@ -58,6 +58,8 @@ create table if not exists early_tokens (
   tracking_stopped_at timestamptz,
   stop_reason         text,
   snapshot_count      integer   not null default 0,
+  -- When this token last actually traded. Distinguishes "quiet" from "gone".
+  last_trade_at       timestamptz,
 
   primary key (monitor_id, mint)
 );
@@ -111,11 +113,96 @@ create table if not exists early_snapshots (
   dex_liquidity_usd    numeric,
   dex_volume_24h       numeric,
   dex_txns_24h         integer,
-  dex_price_usd        numeric
+  dex_price_usd        numeric,
+
+  -- Which price regime this row belongs to: 'curve' before graduation, 'dex'
+  -- after. Once a token graduates its bonding curve completes and all trading
+  -- moves to the AMM, so price_sol and price_usd freeze at their
+  -- graduation-instant values and stay there forever. Without this column an
+  -- analysis reading price_usd across a graduation sees a flat line where the
+  -- token may in fact have doubled.
+  price_source         text,
+
+  -- The one column a return analysis should read. Carries the DEX price once
+  -- graduated and the curve price before, so it never needs to know the token's
+  -- state.
+  --
+  -- Deliberately NULL when the regime is 'dex' but DexScreener has not reported
+  -- yet, rather than falling back to the frozen curve price. A gap that is
+  -- visible is safer than a stale number that looks live.
+  price_usd_effective  numeric,
+
+  -- False when no trade arrived between this snapshot and the one before it.
+  -- The curve price is carried forward while a token is idle, so a return
+  -- computed across such rows is exactly 0% — not because the price held, but
+  -- because nothing traded. A frozen last print must never read as a flat
+  -- return, and this is what tells the two apart.
+  has_market           boolean
 );
 
 create index if not exists early_snap_mint_idx
   on early_snapshots (monitor_id, mint, seconds_since_launch);
 create index if not exists early_snap_time_idx
   on early_snapshots (monitor_id, snapshot_at desc);
+
+-- Columns added after the tables were live. ADD COLUMN IF NOT EXISTS is
+-- idempotent, so this re-runs harmlessly on every boot alongside the creates.
+alter table early_snapshots add column if not exists price_source        text;
+alter table early_snapshots add column if not exists price_usd_effective numeric;
+alter table early_snapshots add column if not exists has_market          boolean;
+alter table early_tokens    add column if not exists last_trade_at       timestamptz;
+
+create index if not exists early_snap_market_idx
+  on early_snapshots (monitor_id, has_market, seconds_since_launch);
+
+-- BACKFILL. Each statement only touches rows the new column has not reached, so
+-- once it has run there is nothing left to match and re-running costs a scan.
+
+-- price_source follows the graduation regime, exactly as post_graduation
+-- recorded it at the time the row was written.
+update early_snapshots
+   set price_source = case when post_graduation then 'dex' else 'curve' end
+ where price_source is null;
+
+-- The effective price follows the regime, and stays null where the regime says
+-- 'dex' but no DEX price had arrived yet.
+update early_snapshots
+   set price_usd_effective = case
+         when price_source = 'dex' then dex_price_usd
+         else price_usd
+       end
+ where price_usd_effective is null
+   and (price_source = 'curve' or dex_price_usd is not null);
+
+-- has_market is reconstructed by comparing each row's cumulative trade count
+-- with the previous snapshot for the same token. The first snapshot of a token
+-- has no predecessor, so it counts as having a market if it saw any trade at all.
+update early_snapshots s
+   set has_market = c.computed
+  from (
+    select id,
+           case
+             when prev_trades is null then trades > 0
+             else trades > prev_trades
+           end as computed
+      from (
+        select id, trades,
+               lag(trades) over (partition by monitor_id, mint
+                                 order by seconds_since_launch) as prev_trades
+          from early_snapshots
+      ) w
+  ) c
+ where s.id = c.id and s.has_market is null;
+
+-- last_trade_at is reconstructed as the timestamp of the most recent snapshot
+-- at which the trade count actually advanced.
+update early_tokens t
+   set last_trade_at = m.last_at
+  from (
+    select monitor_id, mint, max(snapshot_at) as last_at
+      from early_snapshots
+     where has_market
+     group by monitor_id, mint
+  ) m
+ where t.monitor_id = m.monitor_id and t.mint = m.mint and t.last_trade_at is null;
 `;

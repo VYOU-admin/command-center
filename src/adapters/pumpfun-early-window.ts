@@ -199,7 +199,8 @@ async function writeSnapshots(
        mcap_sol, price_sol, mcap_usd, price_usd, sol_usd,
        trades, buys, sells, buy_volume_sol, sell_volume_sol,
        unique_buyers, unique_sellers, largest_buy_sol,
-       post_graduation, dex_liquidity_usd, dex_volume_24h, dex_txns_24h, dex_price_usd
+       post_graduation, dex_liquidity_usd, dex_volume_24h, dex_txns_24h, dex_price_usd,
+       price_source, price_usd_effective, has_market
      )
      select $1, * from unnest(
        $2::text[], $3::timestamptz[], $4::numeric[],
@@ -207,7 +208,8 @@ async function writeSnapshots(
        $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[], $13::numeric[],
        $14::int[], $15::int[], $16::int[], $17::numeric[], $18::numeric[],
        $19::int[], $20::int[], $21::numeric[],
-       $22::boolean[], $23::numeric[], $24::numeric[], $25::int[], $26::numeric[]
+       $22::boolean[], $23::numeric[], $24::numeric[], $25::int[], $26::numeric[],
+       $27::text[], $28::numeric[], $29::boolean[]
      )`,
     [
       monitorId,
@@ -236,7 +238,29 @@ async function writeSnapshots(
       rows.map((r) => r.dexVolume24h),
       rows.map((r) => r.dexTxns24h),
       rows.map((r) => r.dexPriceUsd),
+      rows.map((r) => r.priceSource),
+      rows.map((r) => r.priceUsdEffective),
+      rows.map((r) => r.hasMarket),
     ],
+  );
+  return res.rowCount ?? 0;
+}
+
+/**
+ * Keep last_trade_at current for tokens that traded since the previous drain.
+ * Bounded to those tokens rather than rewriting the whole tracked set.
+ */
+async function writeLastTradeAt(
+  client: PoolClient,
+  monitorId: string,
+  rows: { mint: string; lastTradeAt: Date }[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const res = await client.query(
+    `update early_tokens t set last_trade_at = u.last_trade_at
+       from unnest($2::text[], $3::timestamptz[]) as u(mint, last_trade_at)
+      where t.monitor_id = $1 and t.mint = u.mint`,
+    [monitorId, rows.map((r) => r.mint), rows.map((r) => r.lastTradeAt)],
   );
   return res.rowCount ?? 0;
 }
@@ -272,6 +296,7 @@ interface Drain {
   tokens: TrackedToken[];
   snapshots: Snapshot[];
   resolutions: Resolution[];
+  traded: { mint: string; lastTradeAt: Date }[];
 }
 
 const adapter: SourceAdapter<Drain> = {
@@ -305,6 +330,7 @@ const adapter: SourceAdapter<Drain> = {
       tokens: rt.pendingTokens,
       snapshots: rt.pendingSnapshots,
       resolutions: rt.pendingResolutions,
+      traded: rt.tracker.tradedSincePersist(),
     };
     rt.pendingTokens = [];
     rt.pendingSnapshots = [];
@@ -317,6 +343,7 @@ const adapter: SourceAdapter<Drain> = {
     ctx.log.info('early window drained', {
       new_tokens: drain.tokens.length,
       snapshots: drain.snapshots.length,
+      snapshots_with_market: drain.snapshots.filter((s) => s.hasMarket).length,
       resolved: drain.resolutions.length,
       tracked_now: rt.tracker.size,
       sol_usd: rt.solPrice.current,
@@ -365,6 +392,7 @@ const adapter: SourceAdapter<Drain> = {
     // Tokens first: a snapshot has no row to belong to otherwise.
     const tokens = await writeTokens(client, ctx.monitorId, dedupe(drain.tokens));
     const snapshots = await writeSnapshots(client, ctx.monitorId, drain.snapshots);
+    await writeLastTradeAt(client, ctx.monitorId, drain.traded);
     await writeResolutions(client, ctx.monitorId, drain.resolutions);
 
     return tokens + snapshots;

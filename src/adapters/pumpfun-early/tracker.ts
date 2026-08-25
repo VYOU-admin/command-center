@@ -40,6 +40,10 @@ export interface TrackedToken extends LaunchInfo {
   /** Marks already emitted, so a snapshot is never written twice. */
   nextMarkIndex: number;
   lastTradeAt: number;
+  /** Cumulative trade count as of the previous snapshot, for has_market. */
+  lastSnapshotTrades: number;
+  /** lastTradeAt as last written to the database, so updates stay bounded. */
+  persistedTradeAt: number | null;
   /* cumulative */
   trades: number;
   buys: number;
@@ -89,6 +93,12 @@ export interface Snapshot {
   dexVolume24h: number | null;
   dexTxns24h: number | null;
   dexPriceUsd: number | null;
+  /** Which price regime produced priceUsdEffective: 'curve' or 'dex'. */
+  priceSource: 'curve' | 'dex';
+  /** The single column return analysis should read. Null when unavailable. */
+  priceUsdEffective: number | null;
+  /** False when no trade arrived since the previous snapshot. */
+  hasMarket: boolean;
 }
 
 export interface Resolution {
@@ -191,6 +201,8 @@ export class Tracker {
       trackingEndsAt: endsAt,
       nextMarkIndex: 0,
       lastTradeAt: Date.now(),
+      lastSnapshotTrades: 0,
+      persistedTradeAt: null,
       trades: 0,
       buys: 0,
       sells: 0,
@@ -257,9 +269,29 @@ export class Tracker {
           this.snapshotsDropped++;
           continue;
         }
+        // A snapshot only has a market if a trade landed since the previous
+        // one. Without this, an idle token's carried-forward price computes a
+        // 0% return that reads as "held flat" when it means "nothing traded".
+        const hasMarket = t.trades > t.lastSnapshotTrades;
+        t.lastSnapshotTrades = t.trades;
+
+        // After graduation the curve is complete and its price is frozen, so
+        // the DEX price is the only live one. Left null rather than falling
+        // back to the stale curve print when DexScreener has not reported yet.
+        const priceSource: 'curve' | 'dex' = t.graduated ? 'dex' : 'curve';
+        const priceUsdEffective =
+          priceSource === 'dex'
+            ? t.dexPriceUsd
+            : solUsd === null
+              ? null
+              : t.priceSol * solUsd;
+
         snapshots.push({
           mint,
           snapshotAt: new Date(now),
+          priceSource,
+          priceUsdEffective,
+          hasMarket,
           secondsSinceLaunch: mark,
           curveSol: t.curveSol,
           virtualSol: t.virtualSol,
@@ -301,6 +333,21 @@ export class Tracker {
     }
 
     return { snapshots, resolved };
+  }
+
+  /**
+   * Tokens whose last trade time has moved since it was last written. Keeps the
+   * per-drain update bounded to tokens that actually traded.
+   */
+  tradedSincePersist(): { mint: string; lastTradeAt: Date }[] {
+    const out: { mint: string; lastTradeAt: Date }[] = [];
+    for (const [mint, t] of this.tracked) {
+      if (t.trades > 0 && t.persistedTradeAt !== t.lastTradeAt) {
+        t.persistedTradeAt = t.lastTradeAt;
+        out.push({ mint, lastTradeAt: new Date(t.lastTradeAt) });
+      }
+    }
+    return out;
   }
 
   /** Tokens still on the curve, for DexScreener enrichment after graduation. */
