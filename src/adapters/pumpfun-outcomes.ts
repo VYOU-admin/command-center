@@ -73,9 +73,16 @@ async function computeVelocitySummaries(
           and l.instrumented
           and l.outcome <> 'pending'
           and l.sample_count > 0
+          -- Also picks up summaries written before snapshots existed. Their raw
+          -- samples are still on disk but are pruned once a summary exists, so
+          -- without this backfill the fixed-time features for the earliest
+          -- cohort — which is where the only graduations so far live — would be
+          -- deleted having never been computed. Self-limiting: once a row has
+          -- snapshots it stops being a candidate.
           and not exists (
             select 1 from pump_velocity_summary v
              where v.monitor_id = $1 and v.mint = l.mint
+               and v.snapshots is not null
           )
         limit $3
      ),
@@ -140,7 +147,14 @@ async function computeVelocitySummaries(
             t.peak_sol, t.total_trades,
             t.peak_sol / nullif(t.total_trades, 0)
        from totals t
-     on conflict (monitor_id, mint) do nothing`,
+     on conflict (monitor_id, mint) do update set
+       snapshots           = excluded.snapshots,
+       observed_to_seconds = excluded.observed_to_seconds,
+       -- Recomputed too, so backfilled rows carry the current SOL levels rather
+       -- than the miscalibrated ones they were first written with.
+       thresholds          = excluded.thresholds,
+       computed_at         = now()
+     where pump_velocity_summary.snapshots is null`,
     [monitorId, cfg.velocityThresholdsSol, cfg.maxRowsPerPass, cfg.snapshotSeconds],
   );
   return res.rowCount ?? 0;
