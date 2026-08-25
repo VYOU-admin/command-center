@@ -25,6 +25,23 @@ import { PumpFunStream, type DrainResult } from './pumpfun/stream.js';
 import { renderPumpFunPanel } from '../web/pumpfun-panel.js';
 
 /**
+ * Collapse repeats of the same mint within one batch, keeping the last.
+ *
+ * Postgres refuses an ON CONFLICT DO UPDATE whose statement targets the same
+ * row twice — "command cannot affect row a second time" — and because the whole
+ * drain is one transaction, that error discards the entire batch: every launch,
+ * every migration, and every curve sample collected since the last drain.
+ *
+ * Duplicates are not hypothetical. A socket reconnect can replay events, and
+ * this cost five batches in production before it was caught.
+ */
+function dedupeByMint<T extends { mint: string }>(rows: T[]): T[] {
+  const byMint = new Map<string, T>();
+  for (const row of rows) byMint.set(row.mint, row);
+  return [...byMint.values()];
+}
+
+/**
  * One stream per monitor id. The adapter module is a singleton loaded once by
  * the registry, so the connection has to live beside it rather than inside a
  * run.
@@ -273,10 +290,24 @@ const adapter: SourceAdapter<DrainResult> = {
     const result = results[0];
     if (!result) return 0;
 
+    const launches = dedupeByMint(result.launches);
+    const migrations = dedupeByMint(result.migrations);
+    const droppedDupes =
+      result.launches.length - launches.length + (result.migrations.length - migrations.length);
+    if (droppedDupes > 0) {
+      ctx.log.info('collapsed duplicate mints within batch', {
+        dropped: droppedDupes,
+        launches: result.launches.length,
+        migrations: result.migrations.length,
+      });
+    }
+
     // Migrations first: a graduation stub must exist before samples try to roll
     // into it, and a launch arriving in the same batch then fills in its t=0.
-    await persistMigrations(client, ctx.monitorId, result.migrations);
-    const newLaunches = await persistLaunches(client, ctx.monitorId, result.launches);
+    await persistMigrations(client, ctx.monitorId, migrations);
+    const newLaunches = await persistLaunches(client, ctx.monitorId, launches);
+    // Samples are append-only with no conflict target, so repeats are harmless
+    // and are left alone.
     await persistSamples(client, ctx.monitorId, result.samples);
 
     return newLaunches;
