@@ -73,15 +73,6 @@ options:
         history: https://mckinleyoil.com/home%20-%20historical%20chart.html
       backfill: true
 
-    - id: firstfuel
-      label: First Fuel Oil
-      kind: vendor
-      enabled: true
-      url: https://www.firstfueloil.com/
-      extract:
-        - anchor: "Today's Oil Pricing"
-          window: 14
-          product: fuel_oil
 
     - id: incredible
       label: Incredible Oil
@@ -171,6 +162,29 @@ options:
     # Kept in the roster with a reason rather than deleted, so the list stays a
     # complete record of what was investigated. The "blocked" kind throws if one
     # is ever enabled, so none can be switched on by accident.
+    - id: firstfuel
+      label: First Fuel Oil
+      kind: blocked
+      enabled: false
+      url: https://www.firstfueloil.com/
+      # The page parses fine and the extract rule below is known good — it was
+      # verified against the live site — but the host returns 403 to Railway
+      # while returning 200 to a residential connection with the identical user
+      # agent. That is their WAF refusing this server, not a parsing problem.
+      #
+      # Getting past it would mean disguising where the request comes from, so
+      # it stays off. The route back in is asking First Fuel to allow the
+      # monitor, not evading the block. If they do, restore kind: vendor and the
+      # rule below.
+      #   extract:
+      #     - anchor: "Today's Oil Pricing"
+      #       window: 14
+      #       product: fuel_oil
+      disabled_reason: >-
+        Host returns HTTP 403 to this server while serving 200 to a residential
+        IP with the same user agent — a WAF block on the datacenter range.
+        Parsing is known good; only the request is refused.
+
     - id: forbes
       label: Forbes Fuel Oil
       kind: blocked

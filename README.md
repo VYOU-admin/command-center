@@ -431,8 +431,8 @@ irreplaceable.
 
 ### Which vendors are scraped, and which are not
 
-Ten sources are live: the CashHeatingOil listing site across seven zips, plus
-nine dealers who publish a price on their own site.
+Nine sources are live: the CashHeatingOil listing site across seven zips, plus
+eight dealers who publish a price on their own site.
 
 Their markup shares nothing — Elementor, Gantry, hand-rolled templates, a 1990s
 frameset — but the rendered *text* is near-identical: an anchor heading followed
@@ -453,6 +453,13 @@ be switched on by accident:
 | Deliver Me Fuel | price is behind a customer login |
 | Federal Oil | no company website; only directories and aggregators |
 | IT Energy | no such Connecticut dealer could be identified |
+| First Fuel Oil | host returns 403 to this server, 200 to a residential IP |
+
+First Fuel is the awkward one: the page parses fine and the rule is known good,
+but their WAF refuses this datacenter range while serving the identical request
+from a home connection. Getting past that would mean disguising where the
+request comes from, so it stays off — the route back in is asking them to allow
+the monitor, not evading the block.
 
 Armstrong is enabled but for **propane only**: their heating oil price renders
 as `$-.--- Please Call`, so there is no number to read, and inventing one from
