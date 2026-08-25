@@ -78,7 +78,21 @@ export function loadEnv(): Env {
     discordChannels,
     port,
     monitorsDir: resolve(process.env.MONITORS_DIR?.trim() || 'monitors'),
-    tickMs: 30_000,
+    // The scheduler wakes on this interval and runs whatever is due. It must be
+    // meaningfully SHORTER than the shortest monitor schedule, not equal to it.
+    //
+    // At 30s it equalled the 30s minimum schedule, and a monitor on that
+    // schedule ran at half rate. Each tick captures `now`, then awaits a
+    // database round-trip before marking the monitor attempted, so the stamp
+    // lands tens of milliseconds after `now`. The following tick therefore
+    // computed an elapsed time a hair under 30,000ms, judged the monitor not
+    // due, and skipped it until the tick after. Measured in production:
+    // pumpfun-early-window drained every 60.0s against a configured 30s.
+    //
+    // A 5s tick leaves that headroom. It only changes when a due monitor is
+    // noticed; isDue still gates every monitor by its own schedule, so nothing
+    // runs more often than its configuration allows.
+    tickMs: 5_000,
     publicUrl,
   };
 }

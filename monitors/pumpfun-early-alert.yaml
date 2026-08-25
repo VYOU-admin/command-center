@@ -1,0 +1,70 @@
+# pump.fun early-activity alert.
+#
+# Alerts when a newly launched token clears an activity filter at its
+# five-minute snapshot. This monitor COLLECTS NOTHING — it reads what
+# pumpfun-early-window already stores, so the filter can be retuned or muted
+# without touching collection and without putting the dataset at risk.
+#
+# Alerts fire ONCE PER TOKEN, EVER. early_alerts has a primary key on
+# (monitor_id, mint) and the alert is recorded before it is sent, so a restart
+# or an overlapping run cannot produce a second message.
+#
+# On boot, only snapshots written after the monitor starts are eligible. A
+# deploy therefore alerts on nothing that already happened.
+
+id: pumpfun-early-alert
+name: Pump.fun Early Alert
+source: pumpfun-early-alert
+enabled: true
+
+# 30s is the spine minimum. The scheduler ticks every 5s, so a 30s schedule
+# genuinely fires at ~30s; when the tick equalled this value the monitor ran at
+# half rate. Alert latency is this schedule plus the collection drain.
+schedule: 30s
+
+alerts:
+  # Resolves to DISCORD_WEBHOOK_CRYPTO_EARLY. Failure and recovery alerts still
+  # go to the system channel regardless of this setting.
+  channel: crypto_early
+
+options:
+  # THE MUTE SWITCH. false stops Discord messages while the monitor keeps
+  # evaluating and keeps writing early_alerts rows, so a muted period is still
+  # measurable later instead of being a hole in the data.
+  enabled: true
+
+  # Which monitor's snapshots to read. Nothing about that monitor is modified.
+  source_monitor_id: pumpfun-early-window
+
+  trigger:
+    # The snapshot this monitor judges. Must be a mark the source actually
+    # writes; 300 is on the 15-second band, so every tracked token has one.
+    mark_seconds: 300
+
+    # MEASURED against 5,801 real five-minute snapshots over 2.50 hours:
+    #   2,320 tokens/hour reach the five-minute mark
+    #   150 cleared both thresholds -> 60.0 alerts/hour
+    #
+    # Sensitivity, so these can be moved on evidence rather than feel:
+    #   min_curve_sol   1 -> 96/hr   5 -> 78/hr   10 -> 60/hr
+    #                  20 -> 46/hr  50 -> 22/hr
+    #   max_buy_share 0.3 -> 44/hr 0.5 -> 56/hr  0.7 -> 60/hr
+    #                 0.9 -> 64/hr  none -> 85/hr
+    min_curve_sol: 10
+
+    # Rejects tokens where a single buy is most of the curve — a curve filled by
+    # one wallet is not the same signal as one filled by many. Relaxing 0.9 to
+    # unlimited adds ~19/hr, which is roughly the single-buy population.
+    # largest_buy_sol is never null above the curve floor (0 of 226 observed);
+    # if it ever is, it is treated as 0 and the token passes this test.
+    max_buy_share: 0.7
+
+  # Bounds how far back a run will look. The boot time takes precedence, so
+  # this never resurrects a backlog — it only limits the scan after a brief
+  # gap. A gap longer than this drops the tokens in it rather than alerting
+  # late on them, which for a five-minute signal is the right trade.
+  lookback_minutes: 30
+
+  # Safety valve. At the thresholds above a run sees ~1 candidate; this only
+  # binds if collection catches up in a burst after an outage.
+  max_alerts_per_run: 50
