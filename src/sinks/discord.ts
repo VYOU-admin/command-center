@@ -20,12 +20,23 @@ const ICONS: Record<AlertLevel, string> = {
   recovery: '🟢',
 };
 
+export interface AlertFile {
+  filename: string;
+  content: string;
+  contentType?: string;
+}
+
 export interface Alert {
   level: AlertLevel;
   title: string;
   description: string;
   fields?: { name: string; value: string; inline?: boolean }[];
+  /** Attachments, sent as multipart. Discord webhooks cap the request at 8MB. */
+  files?: AlertFile[];
 }
+
+/** Discord's default webhook upload ceiling, minus room for the JSON payload. */
+const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
 
 /** How a channel name resolved to a webhook, for logging and /health. */
 export interface ChannelResolution {
@@ -114,12 +125,48 @@ export class DiscordSink {
       ],
     };
 
+    // Attachments go as multipart with the embed in payload_json; without them
+    // a plain JSON post is cheaper and easier to read in logs.
+    let requestBody: string | FormData;
+    let headers: Record<string, string>;
+    const files = (alert.files ?? []).filter((f) => f.content.length > 0);
+
+    if (files.length > 0) {
+      const form = new FormData();
+      form.append('payload_json', JSON.stringify(body));
+      files.forEach((file, i) => {
+        let content = file.content;
+        if (Buffer.byteLength(content) > MAX_ATTACHMENT_BYTES) {
+          // Truncate on a line boundary and say so inside the file itself, so a
+          // clipped attachment can never be mistaken for a complete one.
+          const cut = content.slice(0, MAX_ATTACHMENT_BYTES).lastIndexOf('\n');
+          content =
+            content.slice(0, cut > 0 ? cut : MAX_ATTACHMENT_BYTES) +
+            '\n# TRUNCATED: attachment exceeded Discord\'s 8MB webhook limit\n';
+          log.warn('alert attachment truncated', {
+            filename: file.filename,
+            original_bytes: Buffer.byteLength(file.content),
+          });
+        }
+        form.append(
+          `files[${i}]`,
+          new Blob([content], { type: file.contentType ?? 'text/plain' }),
+          file.filename,
+        );
+      });
+      requestBody = form;
+      headers = {}; // fetch sets the multipart boundary itself
+    } else {
+      requestBody = JSON.stringify(body);
+      headers = { 'content-type': 'application/json' };
+    }
+
     try {
       const response = await fetch(webhookUrl, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(10_000),
+        headers,
+        body: requestBody,
+        signal: AbortSignal.timeout(30_000),
       });
 
       if (!response.ok) {
@@ -136,6 +183,9 @@ export class DiscordSink {
         alert_level: alert.level,
         channel: key,
         via: resolution.via,
+        ...(files.length
+          ? { attachments: files.map((f) => `${f.filename} (${Buffer.byteLength(f.content)}B)`) }
+          : {}),
       });
       return true;
     } catch (err) {

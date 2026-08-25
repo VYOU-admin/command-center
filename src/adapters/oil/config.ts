@@ -9,12 +9,27 @@
  */
 
 import { configNumber, section } from '../types.js';
+import type { ExtractRule } from './vendor.js';
 
 export interface SourceConfig {
-  /** Stable key stored on every row. Also selects the parser. */
+  /** Stable key stored on every row. */
   id: string;
   label: string;
+  /**
+   * Which scrape routine to use. Keyed by shape rather than by company, so a
+   * vendor whose page has the common "anchor then prices" layout is added in
+   * YAML with no new code.
+   */
+  kind: string;
   enabled: boolean;
+  /** Why a source is off, shown at boot and on the dashboard. */
+  disabledReason: string | null;
+  /** Public page to link the company name to in alerts. */
+  siteUrl: string | null;
+  /** Company name shown in alerts. Defaults to the label. */
+  company: string;
+  /** Text-anchored extraction rules, for kind: vendor. */
+  extract: ExtractRule[];
   url: string;
   /** Extra URLs the parser needs, e.g. a frameset's inner frames. */
   extraUrls: Record<string, string>;
@@ -24,8 +39,26 @@ export interface SourceConfig {
   backfill: boolean;
 }
 
+export interface CompanyBlurb {
+  company: string;
+  /** Distinctive phrase, matched case- and whitespace-insensitively. */
+  phrase: string;
+}
+
 export interface OilConfig {
   sources: SourceConfig[];
+  /**
+   * Identifies a company on listing sites that hide the dealer name. Matched on
+   * a distinctive phrase rather than the whole paragraph, so the vendor editing
+   * the rest of their blurb does not silently drop the tag.
+   */
+  companyBlurbs: CompanyBlurb[];
+  /** Hours of full-resolution rows kept before collapsing. */
+  retentionFullHours: number;
+  /** Rows to delete per maintenance pass. */
+  retentionMaxRowsPerPass: number;
+  /** Hours of history the attached CSV covers. */
+  csvWindowHours: number;
   userAgent: string;
   timeoutMs: number;
   /** Pause between HTTP requests. These are small business sites. */
@@ -102,10 +135,48 @@ export function parseOilConfig(
         })
       : [];
 
+    const rawExtract = s['extract'];
+    const extract: ExtractRule[] = Array.isArray(rawExtract)
+      ? rawExtract.map((e, j) => {
+          if (typeof e !== 'object' || e === null || Array.isArray(e)) {
+            throw new Error(`${ctx}: sources[${i}].extract[${j}] must be a mapping`);
+          }
+          const r = e as Record<string, unknown>;
+          const anchor = r['anchor'];
+          if (typeof anchor !== 'string' || anchor.trim() === '') {
+            throw new Error(`${ctx}: sources[${i}].extract[${j}].anchor is required`);
+          }
+          const dgm = r['default_gallon_min'];
+          return {
+            anchor: anchor.trim(),
+            window: configNumber(r, 'window', `${ctx} sources[${i}].extract[${j}]`, 20),
+            product: typeof r['product'] === 'string' ? (r['product'] as string) : 'fuel_oil',
+            defaultGallonMin: typeof dgm === 'number' ? dgm : null,
+          };
+        })
+      : [];
+
+    const label = str(s, 'label', id);
+    const kind = str(s, 'kind', 'vendor');
+    const enabled = s['enabled'] !== false;
+
+    if (enabled && kind === 'vendor' && extract.length === 0) {
+      throw new Error(
+        `${ctx}: sources[${i}] ("${id}") is an enabled vendor source but declares no ` +
+          `extract rules, so it would scrape nothing`,
+      );
+    }
+
     return {
       id,
-      label: str(s, 'label', id),
-      enabled: s['enabled'] !== false,
+      label,
+      kind,
+      enabled,
+      disabledReason:
+        typeof s['disabled_reason'] === 'string' ? (s['disabled_reason'] as string).trim() : null,
+      siteUrl: typeof s['site_url'] === 'string' ? (s['site_url'] as string).trim() : url,
+      company: str(s, 'company', label),
+      extract,
       url,
       extraUrls,
       zips,
@@ -129,8 +200,35 @@ export function parseOilConfig(
     throw new Error(`${ctx}: alerts.timezone is not a valid IANA zone: ${timezone}`);
   }
 
+  const rawBlurbs = options['company_blurbs'];
+  const companyBlurbs: CompanyBlurb[] = Array.isArray(rawBlurbs)
+    ? rawBlurbs.map((b, i) => {
+        if (typeof b !== 'object' || b === null || Array.isArray(b)) {
+          throw new Error(`${ctx}: company_blurbs[${i}] must be a mapping`);
+        }
+        const r = b as Record<string, unknown>;
+        if (typeof r['company'] !== 'string' || typeof r['phrase'] !== 'string') {
+          throw new Error(`${ctx}: company_blurbs[${i}] needs string company and phrase`);
+        }
+        const phrase = (r['phrase'] as string).trim();
+        if (phrase.length < 12) {
+          throw new Error(
+            `${ctx}: company_blurbs[${i}].phrase is only ${phrase.length} characters; too short ` +
+              `to identify a company without false positives`,
+          );
+        }
+        return { company: (r['company'] as string).trim(), phrase };
+      })
+    : [];
+
+  const r = section(options, 'retention');
+
   return {
     sources,
+    companyBlurbs,
+    retentionFullHours: configNumber(r, 'full_resolution_hours', ctx, 48),
+    retentionMaxRowsPerPass: configNumber(r, 'max_rows_per_pass', ctx, 20000),
+    csvWindowHours: configNumber(a, 'csv_window_hours', ctx, 24),
     userAgent: str(
       options,
       'user_agent',

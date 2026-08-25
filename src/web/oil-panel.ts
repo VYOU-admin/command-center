@@ -17,6 +17,8 @@ import { escapeHtml } from './views.js';
 
 interface CurrentRow {
   source: string;
+  company: string | null;
+  product: string;
   zip: string | null;
   city: string | null;
   payment_type: string | null;
@@ -60,8 +62,8 @@ export async function renderOilPanel(ctx: PanelContext): Promise<string> {
     // comparison quantity, from the most recent scrape of each.
     ctx.db.query(
       `with latest as (
-         select distinct on (source, coalesce(zip,''), coalesce(payment_type,''))
-                source, zip, city, payment_type, gallon_min, gallon_max,
+         select distinct on (coalesce(company, source), coalesce(zip,''), coalesce(payment_type,''), product)
+                source, company, product, zip, city, payment_type, gallon_min, gallon_max,
                 price_per_gallon, gallon_minimum, surcharge_note,
                 price_date, delivery_date, dealer_id, observed_at
            from oil_observations
@@ -69,7 +71,7 @@ export async function renderOilPanel(ctx: PanelContext): Promise<string> {
             and (gallon_min is null
                  or (gallon_min <= $2 and (gallon_max is null or gallon_max >= $2)))
             and observed_at > now() - interval '2 days'
-          order by source, coalesce(zip,''), coalesce(payment_type,''),
+          order by coalesce(company, source), coalesce(zip,''), coalesce(payment_type,''), product,
                    observed_at desc, price_per_gallon asc
        ),
        dealer_counts as (
@@ -81,7 +83,7 @@ export async function renderOilPanel(ctx: PanelContext): Promise<string> {
        select l.*, coalesce(d.dealers, 0)::int as dealers
          from latest l
          left join dealer_counts d on d.source = l.source and d.zk = coalesce(l.zip,'')
-        order by l.source, l.zip nulls first, l.payment_type nulls first`,
+        order by l.product, l.price_per_gallon asc, coalesce(l.company, l.source)`,
       [ctx.monitorId, compareGallons],
     ),
     // History: cheapest covering quote per source per day, plus any vendor
@@ -92,9 +94,11 @@ export async function renderOilPanel(ctx: PanelContext): Promise<string> {
         where monitor_id = $1 and price_date > now() - ($2 || ' days')::interval
         group by 1,2
        union all
-       select date_trunc('day', observed_at)::date as d, source, min(price_per_gallon) p
+       select date_trunc('day', observed_at)::date as d, coalesce(company, source) as source,
+              min(price_per_gallon) p
          from oil_observations
         where monitor_id = $1 and observed_at > now() - ($2 || ' days')::interval
+          and product = 'fuel_oil'
           and (gallon_min is null
                or (gallon_min <= $3 and (gallon_max is null or gallon_max >= $3)))
         group by 1,2
@@ -146,9 +150,10 @@ export async function renderOilPanel(ctx: PanelContext): Promise<string> {
             ? `${r.gallon_minimum} gal minimum`
             : '';
       return (
-        `<article class="card"><h3>${escapeHtml(r.source)}${where ? ` · ${escapeHtml(where)}` : ''}${escapeHtml(pay)}</h3>` +
+        `<article class="card"><h3>${escapeHtml(r.company ?? r.source)}${escapeHtml(pay)}` +
+        `${r.product !== 'fuel_oil' ? ` <span style="opacity:.6">${escapeHtml(r.product)}</span>` : ''}</h3>` +
         `<p class="big">${usd(n(r.price_per_gallon))}<span style="font-size:13px;font-weight:400"> /gal</span></p>` +
-        `<p class="panel-meta">${escapeHtml(where || band)}</p>` +
+        `<p class="panel-meta">${escapeHtml(where || r.source)}</p>` +
         `<p class="panel-meta">` +
         [
           band && where ? escapeHtml(band) : '',

@@ -27,7 +27,16 @@ import { SCHEMA } from './oil/schema.js';
 import { createFetcher } from './oil/fetch.js';
 import { SCRAPERS, scrapeMcKinleyHistory, type Observation } from './oil/sources.js';
 import { renderOilPanel } from '../web/oil-panel.js';
-import { buildChangeAlert, buildDigestAlert, buildSourceFailureAlert, diffPrices, localParts, type PriceKey } from './oil/alerts.js';
+import {
+  buildChangeAlert,
+  buildCsv,
+  buildDigestAlert,
+  buildSourceFailureAlert,
+  diffPrices,
+  localParts,
+  type CsvRow,
+  type PriceKey,
+} from './oil/alerts.js';
 
 interface SourceResult {
   source: SourceConfig;
@@ -52,7 +61,7 @@ async function scrapeAll(ctx: AdapterContext, cfg: OilConfig): Promise<SourceRes
   // Sequential on purpose. Running these in parallel would defeat the shared
   // request spacing and hit several small sites at once.
   for (const source of cfg.sources.filter((s) => s.enabled)) {
-    const scraper = SCRAPERS[source.id];
+    const scraper = SCRAPERS[source.kind];
     if (!scraper) {
       results.push({
         source,
@@ -60,13 +69,13 @@ async function scrapeAll(ctx: AdapterContext, cfg: OilConfig): Promise<SourceRes
         observations: [],
         history: [],
         notes: {},
-        error: `no scraper implemented for source "${source.id}"`,
+        error: `no scraper for kind "${source.kind}" (source "${source.id}")`,
       });
       continue;
     }
 
     try {
-      const out = await scraper(source, fetcher, ctx.log);
+      const out = await scraper(source, fetcher, ctx.log, cfg.companyBlurbs);
       if (out.observations.length === 0) {
         throw new Error('scrape produced no observations');
       }
@@ -113,18 +122,19 @@ async function writeObservations(
   if (rows.length === 0) return 0;
   const result = await client.query(
     `insert into oil_observations (
-       monitor_id, source, zip, city, state, listing_id, dealer_id, listing_position,
+       monitor_id, source, company, zip, city, state, listing_id, dealer_id, listing_position,
        product, payment_type, gallon_min, gallon_max, price_per_gallon,
        gallon_minimum, surcharge_note, price_date, delivery_date, price_updated_on
      )
      select $1, * from unnest(
-       $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::int[],
-       $9::text[], $10::text[], $11::int[], $12::int[], $13::numeric[],
-       $14::int[], $15::text[], $16::date[], $17::date[], $18::date[]
+       $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::int[],
+       $10::text[], $11::text[], $12::int[], $13::int[], $14::numeric[],
+       $15::int[], $16::text[], $17::date[], $18::date[], $19::date[]
      )`,
     [
       monitorId,
       rows.map((r) => r.source),
+      rows.map((r) => r.company),
       rows.map((r) => r.zip),
       rows.map((r) => r.city),
       rows.map((r) => r.state),
@@ -197,6 +207,90 @@ export function keyOf(r: PriceKey): string {
     r.product,
     r.gallon_min ?? (r as { gallonMin?: number | null }).gallonMin ?? '',
   ].join('|');
+}
+
+/**
+ * Rolling window for the attachment: every check, every quote, ordered by
+ * timestamp then price so the cheapest option sits at the top of each block.
+ */
+async function csvRows(
+  client: PoolClient,
+  monitorId: string,
+  hours: number,
+): Promise<CsvRow[]> {
+  const result = await client.query(
+    `select observed_at, company, source, zip,
+            case when gallon_min is null then null
+                 when gallon_max is null then gallon_min || '+'
+                 else gallon_min || '-' || gallon_max end as band,
+            payment_type, price_per_gallon
+       from oil_observations
+      where monitor_id = $1 and observed_at > now() - ($2 || ' hours')::interval
+      order by observed_at desc, price_per_gallon asc`,
+    [monitorId, hours],
+  );
+  return result.rows as CsvRow[];
+}
+
+/**
+ * Retention. Prices move about once a day but are sampled every 15 minutes, so
+ * roughly 95 of every 96 rows per quote restate the previous one.
+ *
+ * Recent rows are kept whole, because that is what the attached CSV reads and
+ * what you want when investigating something that just happened. Past that
+ * horizon each quote keeps, per day: the first row of every distinct price run,
+ * the daily high, the daily low, and the day's last row. Everything else is
+ * redundant — a price with a start and an end is a step function, so the runs
+ * that remain reconstruct the series exactly rather than approximating it.
+ *
+ * `oil_price_history` is never touched: it is the vendor's own daily series
+ * back to 2008, already one row per day, and irreplaceable.
+ */
+async function pruneObservations(
+  client: PoolClient,
+  monitorId: string,
+  cfg: OilConfig,
+): Promise<number> {
+  const result = await client.query(
+    `with candidates as (
+       select id, observed_at, price_per_gallon,
+              (observed_at at time zone $4)::date as local_day,
+              source, coalesce(zip,'') zk, coalesce(dealer_id,'') dk,
+              coalesce(payment_type,'') pk, product, coalesce(gallon_min,-1) gk
+         from oil_observations
+        where monitor_id = $1
+          and observed_at < now() - ($2 || ' hours')::interval
+     ),
+     marked as (
+       select id,
+              price_per_gallon,
+              lag(price_per_gallon) over w as prev_price,
+              row_number() over (partition by source, zk, dk, pk, product, gk, local_day
+                                 order by observed_at desc) as rn_last,
+              -- Pick the specific low and high ROWS. Comparing each row's price
+              -- against the day's min and max instead protects every row on a
+              -- day that only saw two prices, which is most days — the first
+              -- version of this deleted nothing at all.
+              row_number() over (partition by source, zk, dk, pk, product, gk, local_day
+                                 order by price_per_gallon asc, observed_at asc) as rn_low,
+              row_number() over (partition by source, zk, dk, pk, product, gk, local_day
+                                 order by price_per_gallon desc, observed_at asc) as rn_high
+         from candidates
+       window w as (partition by source, zk, dk, pk, product, gk order by observed_at)
+     ),
+     doomed as (
+       select id from marked
+        where prev_price is not null
+          and price_per_gallon = prev_price   -- not a change point
+          and rn_last <> 1                    -- not the day's last row
+          and rn_low <> 1                     -- not the row holding the daily low
+          and rn_high <> 1                    -- not the row holding the daily high
+        limit $3
+     )
+     delete from oil_observations o using doomed d where o.id = d.id`,
+    [monitorId, cfg.retentionFullHours, cfg.retentionMaxRowsPerPass, cfg.timezone],
+  );
+  return result.rowCount ?? 0;
 }
 
 async function updateSourceState(
@@ -275,10 +369,10 @@ const adapter: SourceAdapter<ScrapeRun> = {
   validate(options, monitorId) {
     const cfg = parseOilConfig(options, monitorId);
     for (const source of cfg.sources) {
-      if (source.enabled && !SCRAPERS[source.id]) {
+      if (source.enabled && !SCRAPERS[source.kind]) {
         throw new Error(
-          `monitor "${monitorId}": source "${source.id}" is enabled but no scraper ` +
-            `exists for it. Available: ${Object.keys(SCRAPERS).join(', ')}`,
+          `monitor "${monitorId}": source "${source.id}" has kind "${source.kind}" but no ` +
+            `scraper exists for it. Available kinds: ${Object.keys(SCRAPERS).join(', ')}`,
         );
       }
     }
@@ -341,11 +435,17 @@ const adapter: SourceAdapter<ScrapeRun> = {
     const lastDigestStr = (alertState.rows[0]?.last_digest_on as string | undefined) ?? null;
     const digestDue = localHour >= cfg.digestHour && lastDigestStr !== localDate;
 
+    // The CSV is only built when something will actually carry it.
+    const csv =
+      changes.length > 0 || digestDue
+        ? buildCsv(await csvRows(client, ctx.monitorId, cfg.csvWindowHours))
+        : null;
+
     if (changes.length > 0) {
-      ctx.queueAlert(buildChangeAlert(cfg, observations, changes, failed));
+      ctx.queueAlert(buildChangeAlert(cfg, changes, failed, csv, cfg.csvWindowHours));
     }
     if (digestDue) {
-      ctx.queueAlert(buildDigestAlert(cfg, observations, failed, localDate));
+      ctx.queueAlert(buildDigestAlert(cfg, observations, failed, localDate, csv));
     }
 
     await client.query(
@@ -358,7 +458,10 @@ const adapter: SourceAdapter<ScrapeRun> = {
       [ctx.monitorId, changes.length > 0, digestDue, localDate, changes.length],
     );
 
+    const pruned = await pruneObservations(client, ctx.monitorId, cfg);
+
     ctx.log.info('oil scrape stored', {
+      rows_pruned: pruned,
       sources_ok: results.filter((r) => r.ok).map((r) => r.source.id),
       sources_failed: failed.map((r) => r.source.id),
       observations: stored,

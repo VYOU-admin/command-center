@@ -33,6 +33,56 @@ function key(o: Observation): string {
   return [o.source, o.zip ?? '', o.dealerId ?? '', o.paymentType ?? '', o.product, o.gallonMin ?? ''].join('|');
 }
 
+const usdFixed = (n: number): string => `$${n.toFixed(3).replace(/0$/, '')}`;
+
+/** Company name as a markdown link, when the source declares a site. */
+function linked(o: Observation, sources: SourceConfig[]): string {
+  const name = o.company ?? o.source;
+  const src = sources.find((s) => s.id === o.source);
+  const url = src?.siteUrl;
+  return url ? `[${name}](${url})` : name;
+}
+
+function bandLabel(o: Observation): string {
+  if (o.gallonMin === null) return '';
+  return o.gallonMax ? `${o.gallonMin}-${o.gallonMax}gal` : `${o.gallonMin}+gal`;
+}
+
+/**
+ * CSV of the recent window: every check, every quote, cheapest first inside each
+ * timestamp. The alert body is deliberately short, so this carries the full
+ * picture for anyone who wants it.
+ */
+export function buildCsv(rows: CsvRow[]): string {
+  const header = 'timestamp,company,source,zip,gallon_band,payment_type,price_per_gallon';
+  const esc = (v: string | null): string => {
+    const s = v ?? '';
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const body = rows.map((r) =>
+    [
+      r.observed_at.toISOString(),
+      esc(r.company),
+      esc(r.source),
+      esc(r.zip),
+      esc(r.band),
+      esc(r.payment_type),
+      Number(r.price_per_gallon).toFixed(3),
+    ].join(','),
+  );
+  return [header, ...body].join('\n') + '\n';
+}
+
+export interface CsvRow {
+  observed_at: Date;
+  company: string | null;
+  source: string;
+  zip: string | null;
+  band: string | null;
+  payment_type: string | null;
+  price_per_gallon: string | number;
+}
+
 /**
  * A change is a price that moved OR a quote that did not exist before. A quote
  * that disappeared is deliberately not treated as a change: dealers drop off
@@ -160,36 +210,60 @@ function failureField(failed: { source: SourceConfig; error: string | null }[]):
 
 export function buildChangeAlert(
   cfg: OilConfig,
-  observations: Observation[],
   changes: PriceChange[],
   failed: { source: SourceConfig; error: string | null }[],
+  csv: string | null,
+  csvHours: number,
 ): Alert {
-  const changed = new Map(changes.map((c) => [key(c.observation), c]));
+  // Body is ONLY what moved: company, old -> new, direction, delta. The full
+  // picture is the attachment, so the message stays readable on a phone even
+  // when a dozen dealers reprice at once.
+  const lines = changes
+    .sort((a, b) => Math.abs(b.to - (b.from ?? b.to)) - Math.abs(a.to - (a.from ?? a.to)))
+    .map((c) => {
+      const name = linked(c.observation, cfg.sources);
+      const band = bandLabel(c.observation);
+      const pay = c.observation.paymentType ? ` ${c.observation.paymentType}` : '';
+      const where = c.observation.zip ? ` ${c.observation.zip}` : '';
+      const tail = [band, pay.trim(), where.trim()].filter(Boolean).join(' · ');
+      if (c.from === null) return `🆕 ${name} — ${usdFixed(c.to)}${tail ? `  _${tail}_` : ''}`;
+      const delta = c.to - c.from;
+      const arrow = delta > 0 ? '🔺' : '🔻';
+      return (
+        `${arrow} ${name} — ${usdFixed(c.from)} → **${usdFixed(c.to)}** ` +
+        `(${delta > 0 ? '+' : ''}${delta.toFixed(3).replace(/0$/, '')})` +
+        (tail ? `  _${tail}_` : '')
+      );
+    });
 
-  const detail = changes
-    .slice(0, 20)
-    .map((c) =>
-      c.from === null
-        ? `• ${label(c.observation)} — new at ${usd(c.to)}`
-        : `• ${label(c.observation)} — ${usd(c.from)} → ${usd(c.to)} (${c.to > c.from ? '+' : ''}${(c.to - c.from).toFixed(2)})`,
-    )
-    .join('\n');
-  const more = changes.length > 20 ? `\n…and ${changes.length - 20} more` : '';
-
-  const sources = new Set(changes.map((c) => c.observation.source));
+  // Discord caps a description at 4096 characters.
+  let body = '';
+  let shown = 0;
+  for (const line of lines) {
+    if (body.length + line.length + 1 > 3900) break;
+    body += (body ? '\n' : '') + line;
+    shown++;
+  }
+  if (shown < lines.length) {
+    body += `\n…and ${lines.length - shown} more — see the attached CSV`;
+  }
 
   return {
     level: 'warning',
-    title: `Oil prices changed — ${changes.length} quote${changes.length === 1 ? '' : 's'} moved`,
-    description:
-      `${changes.length} quote${changes.length === 1 ? '' : 's'} changed across ` +
-      `${sources.size} source${sources.size === 1 ? '' : 's'} since the last scrape. ` +
-      `Headline prices below are the cheapest quote covering ${cfg.compareGallons} gallons.`,
-    fields: [
-      ...priceListFields(cfg, observations, changed),
-      { name: 'What moved', value: (detail + more).slice(0, 1024) || '—', inline: false },
-      ...failureField(failed),
-    ],
+    title: `Oil prices changed — ${changes.length} quote${changes.length === 1 ? '' : 's'}`,
+    description: body || 'No changes.',
+    fields: failureField(failed),
+    ...(csv
+      ? {
+          files: [
+            {
+              filename: `oil-prices-${csvHours}h.csv`,
+              content: csv,
+              contentType: 'text/csv',
+            },
+          ],
+        }
+      : {}),
   };
 }
 
@@ -198,16 +272,53 @@ export function buildDigestAlert(
   observations: Observation[],
   failed: { source: SourceConfig; error: string | null }[],
   localDate: string,
+  csv: string | null,
 ): Alert {
-  const empty = new Map<string, PriceChange>();
+  // Unlike the change alert, this one is meant to be read cold, so it carries
+  // the full ranked list rather than only what moved.
+  const covering = observations.filter(
+    (o) =>
+      o.product === 'fuel_oil' &&
+      (o.gallonMin === null ||
+        (o.gallonMin <= cfg.compareGallons &&
+          (o.gallonMax === null || o.gallonMax >= cfg.compareGallons))),
+  );
+
+  const best = new Map<string, Observation>();
+  for (const o of covering) {
+    const k = `${o.company ?? o.source}|${o.paymentType ?? ''}`;
+    const cur = best.get(k);
+    if (!cur || o.pricePerGallon < cur.pricePerGallon) best.set(k, o);
+  }
+
+  const ranked = [...best.values()].sort((a, b) => a.pricePerGallon - b.pricePerGallon);
+  const lines = ranked.map((o, i) => {
+    const pay = o.paymentType ? ` _${o.paymentType}_` : '';
+    const where = o.zip ? ` _${o.zip}_` : '';
+    return `\`${String(i + 1).padStart(2)}\` ${usdFixed(o.pricePerGallon)}  ${linked(o, cfg.sources)}${pay}${where}`;
+  });
+
+  let body = `Every source, cheapest first, at ${cfg.compareGallons} gallons.\n\n`;
+  for (const line of lines) {
+    if (body.length + line.length + 1 > 3900) {
+      body += `\n…${lines.length - lines.indexOf(line)} more in the attached CSV`;
+      break;
+    }
+    body += line + '\n';
+  }
+
   return {
     level: 'recovery',
     title: `Daily oil price digest — ${localDate}`,
-    description:
-      `Current prices from every source, sent once a day whether or not anything ` +
-      `moved. Headline prices are the cheapest quote covering ${cfg.compareGallons} gallons; ` +
-      `every gallon band is stored in full.`,
-    fields: [...priceListFields(cfg, observations, empty), ...failureField(failed)],
+    description: body,
+    fields: failureField(failed),
+    ...(csv
+      ? {
+          files: [
+            { filename: `oil-prices-${cfg.csvWindowHours}h.csv`, content: csv, contentType: 'text/csv' },
+          ],
+        }
+      : {}),
   };
 }
 

@@ -1,14 +1,9 @@
 # Home heating oil prices.
 #
-# Scrapes several small business sites and stores every quoted price,
-# append-only — every scrape writes a row for every source and every gallon
-# band whether or not anything moved. The unchanged rows ARE the history: a
-# table that only recorded changes could not tell you whether a price held
-# steady or simply was not checked.
-#
-# Sources fail independently. One site changing its HTML does not stop the
-# others storing, and a source that keeps failing alerts on its own to the
-# system channel rather than hiding inside a run that looks successful.
+# Scrapes CT-area dealers and the CashHeatingOil listing site every 15 minutes,
+# append-only. Sources fail independently: one site changing its HTML does not
+# stop the others storing, and a source that keeps failing alerts on its own to
+# the system channel rather than hiding inside a run that looks successful.
 
 id: oil-prices
 name: Oil Prices
@@ -17,76 +12,237 @@ enabled: true
 schedule: 15m
 
 options:
-  # Says who we are and how to reach us. These are small businesses; an honest
-  # user agent is the least the monitor owes them.
   user_agent: "command-center-oil-monitor/1.0 (+https://github.com/VYOU-admin/command-center)"
 
-  # Gallon quantity the dashboard and alerts normalise to. 150 is the only
-  # quantity every source quotes cleanly: it clears McKinley's 150 minimum with
-  # no surcharge and sits inside a real cashheatingoil band, so no number has to
-  # be derived or estimated to make the comparison.
+  # Quantity the dashboard and the daily digest normalise to. 150 is the only
+  # figure nearly every source quotes cleanly, so no number has to be derived.
   compare_gallons: 150
 
+  # CashHeatingOil hides dealer names, so a listing is identified by its own
+  # blurb. Matched on a distinctive phrase rather than the whole paragraph, so
+  # the dealer editing the rest of it does not silently drop the tag.
+  company_blurbs:
+    - company: FJBOil
+      phrase: "friendly prompt service and great prices"
+
+  # RETENTION. Prices move about once a day but are sampled every 15 minutes, so
+  # ~95 of every 96 rows per quote restate the one before it.
+  #
+  # Recent rows are kept whole because that is what the attached CSV reads.
+  # Older rows keep, per quote per day: the first row of each distinct price run,
+  # the daily high, the daily low, and the day's last row. A price with a start
+  # and an end is a step function, so what survives reconstructs the series
+  # exactly rather than approximating it.
+  #
+  # oil_price_history — McKinley's own daily series back to 2008 — is never
+  # touched by this and cannot be.
+  retention:
+    full_resolution_hours: 48
+    max_rows_per_pass: 20000
+
   sources:
+    # ---------------------------------------------------------------- listings
+    - id: cashheatingoil
+      label: CashHeatingOil
+      kind: cashheatingoil
+      enabled: true
+      # The zip -> slug is resolved by POSTing the site's own lookup form and
+      # following the redirect, never by guessing that 06716 means "wolcott".
+      url: https://www.cashheatingoil.com/cod_oil_prices.php
+      site_url: https://www.cashheatingoil.com/
+      # Quoted: YAML reads an unquoted 06716 as the number 6716.
+      zips:
+        - "06010" # Bristol
+        - "06716" # Wolcott
+        - "06457" # Middletown
+        - "06492" # Wallingford
+        - "06786" # Terryville
+        - "06770" # Naugatuck
+        - "06705" # Waterbury
+
+    # ------------------------------------------------------------- direct sites
     - id: mckinley
       label: McKinley Oil
+      kind: mckinley
       enabled: true
       url: https://mckinleyoil.com/
-      # The site is a 1990s frameset: the homepage contains no prices at all,
-      # only <frame> tags. The price and the historical table live in separate
-      # child documents, whose filenames contain spaces and must stay encoded.
+      site_url: https://mckinleyoil.com/
+      # A 1990s frameset: the homepage holds no prices, only <frame> tags.
       extra_urls:
         today: https://mckinleyoil.com/home-todays%20price.html
         history: https://mckinleyoil.com/home%20-%20historical%20chart.html
-      # Pull the vendor's published history once, on the first successful run,
-      # then never again. It reaches back to 2008.
       backfill: true
 
-    - id: cashheatingoil
-      label: CashHeatingOil
+    - id: firstfuel
+      label: First Fuel Oil
+      kind: vendor
       enabled: true
-      # The zip -> URL slug is resolved by POSTing the site's own lookup form
-      # and following its redirect, not by guessing that 06716 means "wolcott".
-      # A guess would break silently the day a slug differs from the town name.
-      url: https://www.cashheatingoil.com/cod_oil_prices.php
-      # Quoted: YAML reads an unquoted 06716 as the number 6716.
-      zips:
-        - "06716" # Wolcott CT
-        - "06010" # Bristol CT
+      url: https://www.firstfueloil.com/
+      extract:
+        - anchor: "Today's Oil Pricing"
+          window: 14
+          product: fuel_oil
 
+    - id: incredible
+      label: Incredible Oil
+      kind: vendor
+      enabled: true
+      url: https://www.incredibleoil.com/
+      extract:
+        - anchor: "Today's Heating Oil Prices"
+          window: 16
+          product: fuel_oil
+
+    - id: purplefuels
+      label: PurpleFuels
+      kind: vendor
+      enabled: true
+      url: https://www.purplefuels.com/heating-oil/pricing
+      site_url: https://www.purplefuels.com/
+      extract:
+        - anchor: "Straight-forward pricing"
+          window: 22
+          product: fuel_oil
+
+    - id: phillips
+      label: Phillips Oil
+      kind: vendor
+      enabled: true
+      url: https://phillipsoilllc.com/
+      extract:
+        - anchor: "Heating Oil Prices"
+          window: 20
+          product: fuel_oil
+        - anchor: "Propane Prices"
+          window: 26
+          product: propane
+
+    - id: pricerite
+      label: PriceRite Oil
+      kind: vendor
+      enabled: true
+      url: http://www.priceriteoil.net/
+      extract:
+        - anchor: "TODAY'S PRICE IS"
+          window: 4
+          product: fuel_oil
+          default_gallon_min: 100
+        - anchor: "Propane Price:"
+          window: 8
+          product: propane
+
+    - id: dime
+      label: Dime Oil
+      kind: vendor
+      enabled: true
+      url: https://www.dimeoilco.com/
+      extract:
+        - anchor: "Today's Price:"
+          window: 3
+          product: fuel_oil
+          default_gallon_min: 100
+
+    - id: omni
+      label: OMNI Energy
+      kind: vendor
+      enabled: true
+      url: https://myomnienergy.com/heating-fuel/
+      site_url: https://myomnienergy.com/
+      extract:
+        # Note the curly apostrophe — this is the site's own text.
+        - anchor: "Today’s Price is"
+          window: 2
+          product: fuel_oil
+          default_gallon_min: 100
+
+    - id: armstrong
+      label: Armstrong Oil & Propane
+      kind: vendor
+      enabled: true
+      url: https://armstrongoilandpropane.com/
+      # Heating oil is published as "$-.--- Please Call", so only propane has an
+      # actual number. Captured as propane rather than pretending it is oil.
+      extract:
+        - anchor: "Today's Propane Pricing"
+          window: 28
+          product: propane
+
+    # ------------------------------------------------------- cannot be scraped
+    # Kept in the roster with a reason rather than deleted, so the list stays a
+    # complete record of what was investigated. The "blocked" kind throws if one
+    # is ever enabled, so none can be switched on by accident.
     - id: forbes
       label: Forbes Fuel Oil
-      # DISABLED. forbesfueloil.com serves a BotStopper proof-of-work challenge
-      # on every path, including /wp-json/ and the sitemap, so reading the price
-      # means defeating an access control the owner deliberately installed
-      # rather than just parsing a public page. Left off pending that decision;
-      # the scraper throws if enabled so it can never be turned on by accident.
+      kind: blocked
       enabled: false
       url: https://forbesfueloil.com/
+      disabled_reason: >-
+        Serves a BotStopper proof-of-work challenge on every path, including
+        /wp-json/ and the sitemap. Reading it means defeating an access control
+        the owner installed, not parsing a public page.
+
+    - id: hurricane
+      label: Hurricane Energy
+      kind: blocked
+      enabled: false
+      url: https://hurricaneenergyct.com/get-price
+      disabled_reason: >-
+        No price in the served HTML. The page embeds a third-party
+        api.dropletfuel.com widget, so the price belongs to that service rather
+        than to this site.
+
+    - id: tonys
+      label: Tony's Oil
+      kind: blocked
+      enabled: false
+      url: https://www.tonysoil.com/order/
+      disabled_reason: >-
+        Price is rendered client-side; the served HTML shows only "Loading...".
+        Reading it would need a headless browser.
+
+    - id: delivermefuel
+      label: Deliver Me Fuel (Hitchcock)
+      kind: blocked
+      enabled: false
+      url: https://www.delivermefuel.com/
+      disabled_reason: >-
+        Prices are behind a customer account — the site offers a quote only
+        after registration and login.
+
+    - id: federal
+      label: Federal Oil
+      kind: blocked
+      enabled: false
+      url: https://www.bbb.org/us/ct/ansonia/profile/fuel-oil/federal-oil-llc-0111-87088359
+      disabled_reason: >-
+        No company website found; the business appears only in directories and
+        price aggregators, which are not the vendor's own published price.
+
+    - id: it-energy
+      label: IT Energy
+      kind: blocked
+      enabled: false
+      url: https://example.invalid/
+      disabled_reason: >-
+        No Connecticut heating oil company by this name could be identified.
+        Needs a website or exact business name to proceed.
 
   limits:
     timeout_ms: 25000
-    # Space between HTTP requests, applied across the whole run rather than per
-    # source. A full scrape is 3 requests, so this run touches these sites
-    # roughly 288 times a day in total.
-    request_delay_ms: 3000
+    # Applied across the whole run, not per source. A full scrape is ~15
+    # requests, so all these sites together see ~1440 hits a day between them.
+    request_delay_ms: 4000
     max_retries: 2
 
   alerts:
-    # Hour and zone for the daily digest. All three vendors are in Connecticut,
-    # and a named zone handles DST rather than drifting twice a year.
     digest_hour: 7
     timezone: America/New_York
-    # Consecutive failures of ONE source before it alerts. The spine counts
-    # failures per monitor; this counts them per source, so a single broken
-    # scraper cannot hide inside otherwise-successful runs.
     source_failure_alert_after: 3
+    # Hours of history in the CSV attached to each alert.
+    csv_window_hours: 24
 
 alerts:
-  # Spine-level: consecutive failures of the monitor as a whole, which now means
-  # every source failing at once. Goes to the system channel.
   discord_on_consecutive_failures: 3
-  # Price change and digest alerts.
   channel: oil
 
 dashboard:

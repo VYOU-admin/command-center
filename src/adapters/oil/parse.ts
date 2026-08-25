@@ -232,6 +232,9 @@ export interface CashHeatingOilListing {
   priceUpdatedOn: string | null;
   cash: GallonBand[];
   credit: GallonBand[];
+  /** Free-text description the dealer writes. On this site the dealer name is
+   * hidden, so this is the only human-readable identifier available. */
+  blurb: string | null;
 }
 
 export interface CashHeatingOilPage {
@@ -321,6 +324,14 @@ export function parseCashHeatingOil(html: string, zip: string): CashHeatingOilPa
     const credit = creditTable ? bandsFrom(creditTable[1]!, S, 'credit') : [];
 
     const updated = labelled(block, 'Price Updated on');
+    // Everything between the "Same Day Charges" row and the price tables is the
+    // dealer's own prose.
+    const blurbSource = block.split(/paywithcash/i)[0] ?? block;
+    const blurb =
+      decodeEntities(blurbSource.replace(/<[^>]+>/g, ' '))
+        .replace(/\s+/g, ' ')
+        .trim() || null;
+
     listings.push({
       position: i + 1,
       listingId: hidden(block, 'listingid') ?? idMatch?.[1] ?? null,
@@ -335,6 +346,7 @@ export function parseCashHeatingOil(html: string, zip: string): CashHeatingOilPa
       priceUpdatedOn: updated ? longDate(updated, S, 'price updated on') : null,
       cash,
       credit,
+      blurb,
     });
   });
 

@@ -6,7 +6,7 @@
  */
 
 import type { Logger } from '../../logger.js';
-import type { SourceConfig } from './config.js';
+import type { CompanyBlurb, SourceConfig } from './config.js';
 import type { Fetcher } from './fetch.js';
 import {
   ParseError,
@@ -14,9 +14,11 @@ import {
   parseMcKinleyHistory,
   parseMcKinleyToday,
 } from './parse.js';
+import { extractBands } from './vendor.js';
 
 export interface Observation {
   source: string;
+  company: string | null;
   zip: string | null;
   city: string | null;
   state: string | null;
@@ -46,7 +48,11 @@ export type ScrapeFn = (
   source: SourceConfig,
   fetcher: Fetcher,
   log: Logger,
+  blurbs: CompanyBlurb[],
 ) => Promise<ScrapeOutput>;
+
+/** Collapse whitespace and case so a reflowed blurb still matches. */
+const normalise = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').trim();
 
 /* --------------------------------------------------------------- mckinley */
 
@@ -64,6 +70,7 @@ const scrapeMcKinley: ScrapeFn = async (source, fetcher, log) => {
   const observations: Observation[] = [
     {
       source: source.id,
+      company: source.company,
       zip: null,
       city: null,
       state: null,
@@ -105,9 +112,54 @@ export const scrapeMcKinleyHistory = async (
   return rows;
 };
 
+/* ------------------------------------------------------------------ vendor */
+
+/**
+ * Any vendor whose page is an anchor heading followed by prices. All the
+ * site-specific knowledge lives in the YAML extract rules, so a new company
+ * with this shape needs no code.
+ */
+const scrapeVendor: ScrapeFn = async (source, fetcher, log) => {
+  const html = await fetcher.get(source.url);
+  const observations: Observation[] = [];
+
+  for (const rule of source.extract) {
+    const bands = extractBands(html, rule, source.id);
+    for (const band of bands) {
+      observations.push({
+        source: source.id,
+        company: source.company,
+        zip: null,
+        city: null,
+        state: null,
+        listingId: null,
+        dealerId: null,
+        listingPosition: null,
+        product: band.product,
+        paymentType: null,
+        gallonMin: band.gallonMin,
+        gallonMax: band.gallonMax,
+        pricePerGallon: band.pricePerGallon,
+        gallonMinimum: rule.defaultGallonMin,
+        surchargeNote: null,
+        priceDate: null,
+        deliveryDate: null,
+        priceUpdatedOn: null,
+      });
+    }
+    log.info('vendor bands parsed', {
+      source: source.id,
+      product: rule.product,
+      bands: bands.length,
+    });
+  }
+
+  return { observations, history: [], notes: { bands: observations.length } };
+};
+
 /* -------------------------------------------------------- cashheatingoil */
 
-const scrapeCashHeatingOil: ScrapeFn = async (source, fetcher, log) => {
+const scrapeCashHeatingOil: ScrapeFn = async (source, fetcher, log, blurbs) => {
   if (source.zips.length === 0) {
     throw new ParseError(source.id, 'at least one zip is required');
   }
@@ -131,6 +183,18 @@ const scrapeCashHeatingOil: ScrapeFn = async (source, fetcher, log) => {
     const page = parseCashHeatingOil(html, zip);
 
     for (const listing of page.listings) {
+      // This site hides dealer names, so the only identifier a human can use is
+      // the listing's own blurb. Matching a distinctive phrase rather than the
+      // whole paragraph means the vendor can edit the rest of it without the
+      // tag silently disappearing.
+      const blurb = normalise(listing.blurb ?? '');
+      const matched = blurbs.find((b) => blurb.includes(normalise(b.phrase)));
+      const company = matched
+        ? matched.company
+        : listing.dealerId
+          ? `${source.label} #${listing.dealerId}`
+          : `${source.label} pos${listing.position}`;
+
       if (listing.cash.length === 0 && listing.credit.length === 0) {
         emptyDealers.push(`${zip}:${listing.dealerId ?? listing.position}`);
         continue;
@@ -142,6 +206,7 @@ const scrapeCashHeatingOil: ScrapeFn = async (source, fetcher, log) => {
         for (const band of bands) {
           observations.push({
             source: source.id,
+            company,
             zip,
             city: page.city,
             state: page.state,
@@ -167,26 +232,35 @@ const scrapeCashHeatingOil: ScrapeFn = async (source, fetcher, log) => {
   }
 
   if (emptyDealers.length > 0) notes['dealers_listing_no_prices'] = emptyDealers;
+  notes['tagged_companies'] = [
+    ...new Set(observations.map((o) => o.company).filter((c) => c && !c.includes('#'))),
+  ];
   return { observations, history: [], notes };
 };
 
-/* ------------------------------------------------------------------ forbes */
+/* ----------------------------------------------------------------- blocked */
 
-const scrapeForbes: ScrapeFn = async (source) => {
-  // Deliberately not implemented. forbesfueloil.com serves a BotStopper
-  // proof-of-work challenge on every path, including /wp-json/ and the sitemap,
-  // so reading it means defeating an access control the owner installed rather
-  // than simply parsing a public page. Left disabled pending that decision, so
-  // that turning it on is never an accident.
+/**
+ * Sources that exist but cannot be scraped — a bot challenge we will not defeat,
+ * a price behind a login, a price rendered only by client-side JavaScript, or no
+ * public site at all. They stay in the config with their reason recorded so the
+ * roster is complete and visible, and this throws if one is ever enabled, so it
+ * cannot be switched on by accident.
+ */
+const scrapeBlocked: ScrapeFn = async (source) => {
   throw new ParseError(
     source.id,
-    'not implemented: the site serves a proof-of-work bot challenge site-wide. ' +
-      'Enabling this source requires deciding how to handle that challenge.',
+    `not scrapeable: ${source.disabledReason ?? 'no reason recorded'}`,
   );
 };
 
+/**
+ * Keyed by SHAPE, not by company. `vendor` covers every site whose page is an
+ * anchor followed by prices, which is most of them.
+ */
 export const SCRAPERS: Record<string, ScrapeFn> = {
   mckinley: scrapeMcKinley,
   cashheatingoil: scrapeCashHeatingOil,
-  forbes: scrapeForbes,
+  vendor: scrapeVendor,
+  blocked: scrapeBlocked,
 };

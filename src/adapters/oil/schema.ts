@@ -32,6 +32,10 @@ create table if not exists oil_observations (
   dealer_id       text,
   listing_position integer,
 
+  -- Display name. For direct vendors this is the company. On cashheatingoil the
+  -- dealer name is hidden, so it is derived from the listing blurb where that
+  -- identifies a known company, and falls back to the dealer id.
+  company         text,
   product         text        not null default 'fuel_oil',
   payment_type    text,
   gallon_min      integer,
@@ -95,4 +99,10 @@ create table if not exists oil_alert_state (
   last_digest_on    date,
   last_change_count integer
 );
+
+-- Added after the table was already live; idempotent, so it re-runs each boot.
+alter table oil_observations add column if not exists company text;
+
+create index if not exists oil_obs_company_idx
+  on oil_observations (monitor_id, company, observed_at desc);
 `;

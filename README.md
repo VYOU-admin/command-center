@@ -388,22 +388,78 @@ and would fire a false alert.
 ### Alerts
 
 One alert per scrape, across all sources, not one per site — the question is
-"did anything move anywhere". Nothing moving is silent. A daily digest goes out
-at 07:00 `America/New_York` whether or not anything changed, in a named zone so
-it does not drift twice a year.
+"did anything move anywhere". Nothing moving is silent.
 
-Discord caps embeds at 25 fields and 1024 characters each, and a scrape is well
-over a hundred gallon bands, so the message leads with a comparable headline
-price per source and then lists what actually moved. Everything is in Postgres
-regardless.
+The change alert body is **only what moved**: company, old → new, direction, and
+the delta. Company names link to the vendor. Everything else — the full ranked
+list, every gallon band, every check — rides along as a CSV attachment covering
+a rolling 24 hours, cheapest first within each timestamp. Discord webhooks cap a
+request at 8MB, so an oversize attachment is truncated on a line boundary with
+the truncation written into the file itself; a clipped CSV can never be mistaken
+for a complete one.
 
-### Forbes is not enabled
+The daily digest at 07:00 `America/New_York` is different on purpose. It is
+meant to be read cold, so it carries the full ranked list rather than a diff,
+and it fires whether or not anything moved.
 
-`forbesfueloil.com` serves a BotStopper proof-of-work challenge on every path,
-including `/wp-json/` and the sitemap. Reading it means defeating an access
-control the owner deliberately installed rather than parsing a public page, so
-the source ships disabled and its scraper throws if enabled, to make sure it is
-never turned on by accident.
+On listing sites the dealer name is hidden, so a company is identified by a
+distinctive phrase from its own blurb — matched on the phrase rather than the
+whole paragraph, so the dealer editing the rest of it does not silently drop the
+tag. `FJBOil` is currently tagged this way across all seven zips, under three
+different dealer ids.
+
+### Retention
+
+Prices move about once a day but are sampled every 15 minutes, so roughly 95 of
+every 96 rows per quote restate the one before it.
+
+Rows inside the last 48 hours are kept whole — that is what the attached CSV
+reads, and what you want when investigating something that just happened. Past
+that horizon each quote keeps, per day: the first row of every distinct price
+run, the row holding the daily high, the row holding the daily low, and the
+day's last row.
+
+Nothing is lost by dropping the rest. A price with a start and an end is a step
+function, so the surviving change points reconstruct the series *exactly* rather
+than approximating it, and the daily extremes are kept as rows in their own
+right. Measured reduction on a synthetic day: 47 rows to 3, with both distinct
+prices preserved.
+
+`oil_price_history` — McKinley's own daily series back to 2008 — is never
+touched by this and cannot be; it is keyed by date, already one row per day, and
+irreplaceable.
+
+### Which vendors are scraped, and which are not
+
+Ten sources are live: the CashHeatingOil listing site across seven zips, plus
+nine dealers who publish a price on their own site.
+
+Their markup shares nothing — Elementor, Gantry, hand-rolled templates, a 1990s
+frameset — but the rendered *text* is near-identical: an anchor heading followed
+by gallon quantities and prices. So extraction is anchored on text and described
+in YAML, and a new vendor with that shape is added without touching code. Text
+also survives the change these sites actually make, which is a theme update.
+
+Six are in the config but disabled, each with its reason recorded. They stay
+listed rather than deleted so the roster remains a complete record of what was
+investigated, and the `blocked` kind throws if one is ever enabled so none can
+be switched on by accident:
+
+| source | why not |
+| ------ | ------- |
+| Forbes Fuel Oil | BotStopper proof-of-work challenge on every path |
+| Hurricane Energy | price comes from a third-party `api.dropletfuel.com` widget |
+| Tony's Oil | price rendered client-side; served HTML says "Loading…" |
+| Deliver Me Fuel | price is behind a customer login |
+| Federal Oil | no company website; only directories and aggregators |
+| IT Energy | no such Connecticut dealer could be identified |
+
+Armstrong is enabled but for **propane only**: their heating oil price renders
+as `$-.--- Please Call`, so there is no number to read, and inventing one from
+their propane table would be worse than recording nothing.
+
+Nothing here defeats a bot protection. Forbes is the only source that has one,
+and it is off.
 
 ## Designing against silent failure
 
