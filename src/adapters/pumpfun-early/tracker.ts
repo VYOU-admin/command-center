@@ -10,7 +10,7 @@
  */
 
 import type { Logger } from '../../logger.js';
-import type { EarlyConfig } from './config.js';
+import { buildMarks, type EarlyConfig } from './config.js';
 import { TOTAL_SUPPLY, type Trade } from './trades.js';
 
 export interface LaunchInfo {
@@ -27,8 +27,21 @@ export interface LaunchInfo {
   initialVSol: number | null;
 }
 
+/**
+ * 'early'    — inside the first 10 minutes; every launch is here.
+ * 'extended' — kept past the decision mark, full state, snapshots on the grid.
+ * 'outcome'  — dropped at the decision mark, but still emits the forced outcome
+ *              marks so the death rule cannot decide the outcome horizon.
+ */
+export type Phase = 'early' | 'extended' | 'outcome';
+
 export interface TrackedToken extends LaunchInfo {
-  sampleReason: 'random' | 'graduate';
+  sampleReason: 'all' | 'graduate';
+  phase: Phase;
+  /** Why it survived the decision mark: 'activity' | 'control' | null. */
+  keepReason: string | null;
+  decidedAt: Date | null;
+  curveSolAtDecision: number | null;
   socialsFetched: boolean;
   hasTelegram: boolean | null;
   hasTwitter: boolean | null;
@@ -37,6 +50,8 @@ export interface TrackedToken extends LaunchInfo {
   graduated: boolean;
   graduatedAt: Date | null;
   trackingEndsAt: number;
+  /** Marks for this token, regenerated if its horizon extends on graduation. */
+  marks: number[];
   /** Marks already emitted, so a snapshot is never written twice. */
   nextMarkIndex: number;
   lastTradeAt: number;
@@ -71,6 +86,9 @@ export interface Snapshot {
   mint: string;
   snapshotAt: Date;
   secondsSinceLaunch: number;
+  phase: Phase;
+  /** A forced mark, written regardless of trading state. Never pruned. */
+  isOutcomeMark: boolean;
   curveSol: number;
   virtualSol: number;
   tokenReserves: number;
@@ -101,12 +119,29 @@ export interface Snapshot {
   hasMarket: boolean;
 }
 
+/**
+ * The 10-minute decision, written when it is made rather than when the token
+ * resolves six hours later. Which arm a token is in — kept on activity, kept as
+ * a control, or dropped — is the comparison the control group exists to make,
+ * and a restart before resolution would otherwise lose it. The snapshot 'phase'
+ * column cannot substitute: both kept arms are 'extended'.
+ */
+export interface Decision {
+  mint: string;
+  keepReason: string | null;
+  decidedAt: Date;
+  curveSolAtDecision: number;
+}
+
 export interface Resolution {
   mint: string;
   died: boolean;
   diedAt: Date | null;
   stopReason: string;
   snapshotCount: number;
+  keepReason: string | null;
+  curveSolAtDecision: number | null;
+  decidedAt: Date | null;
 }
 
 /**
@@ -127,58 +162,78 @@ export class Tracker {
   private readonly tracked = new Map<string, TrackedToken>();
   /** Launch times for every launch seen, so a graduate's age is known. */
   private readonly launchSeen = new Map<string, LaunchInfo>();
-  private readonly marks: number[];
   private deniedByCap = 0;
   private snapshotsDropped = 0;
+  private graduationsUntracked = 0;
+  private keptActivity = 0;
+  private keptControl = 0;
+  private stopped = 0;
 
   constructor(
     private readonly cfg: EarlyConfig,
-    marks: number[],
     private readonly log: Logger,
-  ) {
-    this.marks = marks;
-  }
+  ) {}
 
   get size(): number {
     return this.tracked.size;
   }
 
-  /** Remember every launch; only some become tracked. */
+  /**
+   * EVERY launch is tracked from t=0. There is no sampling here — the
+   * program-wide subscription already receives these trades, so what to keep is
+   * decided at the 10-minute mark once the token has shown what it does.
+   *
+   * This is also what makes a graduate's early features real: by the time it
+   * graduates it has been recorded from second zero, so nothing is back-filled.
+   */
   noteLaunch(info: LaunchInfo): TrackedToken | null {
     this.launchSeen.set(info.mint, info);
-    // Bound the memory: a launch older than the window can never be adopted.
-    if (this.launchSeen.size > 40_000) {
-      const cutoff = Date.now() - this.cfg.windowMinutes * 60_000;
+    if (this.launchSeen.size > 60_000) {
+      const cutoff = Date.now() - this.cfg.windowMinutes * 60_000 * 2;
       for (const [mint, seen] of this.launchSeen) {
         if (seen.launchedAt.getTime() < cutoff) this.launchSeen.delete(mint);
       }
     }
-    if (stableUnitHash(info.mint) >= this.cfg.sampleRate) return null;
-    return this.adopt(info, 'random');
+    return this.adopt(info, 'all');
   }
 
-  /** Graduates are tracked in full, for whatever remains of their window. */
+  /**
+   * A graduate is tracked for six hours from GRADUATION, not from launch, so
+   * the interesting part of its life is not cut off by a window that started
+   * before it became tradeable.
+   *
+   * It is never adopted here. Every launch is already tracked from t=0, so a
+   * graduate we witnessed launching already holds genuine early snapshots. One
+   * whose launch predates this monitor is skipped rather than adopted with
+   * back-filled marks — that back-fill is what made earlier graduate features
+   * unusable.
+   */
   noteGraduation(mint: string, at: Date): TrackedToken | null {
-    const existing = this.tracked.get(mint);
-    if (existing) {
-      existing.graduated = true;
-      existing.graduatedAt = at;
-      return existing;
+    const t = this.tracked.get(mint);
+    if (!t) {
+      this.graduationsUntracked++;
+      return null;
     }
-    if (!this.cfg.trackGraduates) return null;
-    const seen = this.launchSeen.get(mint);
-    // Without a launch time there is no age, and every snapshot's
-    // seconds_since_launch would be a guess. Skip rather than invent one.
-    if (!seen) return null;
-    const adopted = this.adopt(seen, 'graduate');
-    if (adopted) {
-      adopted.graduated = true;
-      adopted.graduatedAt = at;
+    t.graduated = true;
+    t.graduatedAt = at;
+    if (!this.cfg.trackGraduates) return t;
+
+    // Extend the window to graduation + the full tracking period, and promote
+    // it out of 'outcome' if the decision mark had already dropped it.
+    const extended = at.getTime() + this.cfg.windowMinutes * 60_000;
+    if (extended > t.trackingEndsAt) {
+      t.trackingEndsAt = extended;
+      const horizon = (extended - t.launchedAt.getTime()) / 1000;
+      t.marks = buildMarks(this.cfg, horizon);
     }
-    return adopted;
+    if (t.phase === 'outcome') {
+      t.phase = 'extended';
+      t.keepReason = 'graduated';
+    }
+    return t;
   }
 
-  private adopt(info: LaunchInfo, reason: 'random' | 'graduate'): TrackedToken | null {
+  private adopt(info: LaunchInfo, reason: 'all' | 'graduate'): TrackedToken | null {
     if (this.tracked.has(info.mint)) return this.tracked.get(info.mint)!;
     const endsAt = info.launchedAt.getTime() + this.cfg.windowMinutes * 60_000;
     if (endsAt <= Date.now()) return null; // window already over
@@ -191,6 +246,11 @@ export class Tracker {
     const t: TrackedToken = {
       ...info,
       sampleReason: reason,
+      phase: 'early',
+      keepReason: null,
+      decidedAt: null,
+      curveSolAtDecision: null,
+      marks: buildMarks(this.cfg, this.cfg.windowMinutes * 60),
       socialsFetched: false,
       hasTelegram: null,
       hasTwitter: null,
@@ -254,30 +314,69 @@ export class Tracker {
    * Emit every snapshot now due, and resolve tokens whose window has closed or
    * which have gone quiet long enough to call dead.
    */
-  collect(now: number, solUsd: number | null): { snapshots: Snapshot[]; resolved: Resolution[] } {
+  collect(
+    now: number,
+    solUsd: number | null,
+  ): { snapshots: Snapshot[]; resolved: Resolution[]; decided: Decision[] } {
     const snapshots: Snapshot[] = [];
     const resolved: Resolution[] = [];
+    const decided: Decision[] = [];
     const idleMs = this.cfg.deathAfterIdleMinutes * 60_000;
+    const outcome = new Set(this.cfg.outcomeMarks);
 
     for (const [mint, t] of this.tracked) {
       const ageMs = now - t.launchedAt.getTime();
+      const ageSec = ageMs / 1000;
 
-      while (t.nextMarkIndex < this.marks.length && this.marks[t.nextMarkIndex]! * 1000 <= ageMs) {
-        const mark = this.marks[t.nextMarkIndex]!;
+      // THE DECISION. Every launch is recorded for the first ten minutes; at
+      // that point the token has shown whether anything is happening, and only
+      // then is it decided what to keep. Sampling before this point would throw
+      // away the early history of tokens that later turn out to matter.
+      if (t.phase === 'early' && ageSec >= this.cfg.decisionSeconds) {
+        t.decidedAt = new Date(now);
+        t.curveSolAtDecision = t.curveSol;
+        if (t.curveSol > this.cfg.activityFloorSol) {
+          t.phase = 'extended';
+          t.keepReason = 'activity';
+          this.keptActivity++;
+        } else if (stableUnitHash(mint) < this.cfg.controlRate) {
+          t.phase = 'extended';
+          t.keepReason = 'control';
+          this.keptControl++;
+        } else {
+          t.phase = 'outcome';
+          t.keepReason = null;
+          this.stopped++;
+          // Release the heavy state. ~86% of launches land here and are held
+          // for six more hours only to emit five outcome rows; keeping their
+          // wallet sets would dominate memory for no analytical gain.
+          t.buyers = new Set();
+          t.sellers = new Set();
+        }
+        decided.push({
+          mint,
+          keepReason: t.keepReason,
+          decidedAt: t.decidedAt,
+          curveSolAtDecision: t.curveSolAtDecision,
+        });
+      }
+
+      while (t.nextMarkIndex < t.marks.length && t.marks[t.nextMarkIndex]! <= ageSec) {
+        const mark = t.marks[t.nextMarkIndex]!;
         t.nextMarkIndex++;
+        const isOutcome = outcome.has(mark);
+        // Marks inside the first ten minutes are UNCONDITIONAL. Every launch is
+        // recorded there and the decision at 600s must not retroactively erase
+        // them — which it would if a delayed drain let a token cross the
+        // decision mark before its early marks had been emitted.
+        const isEarlyWindow = mark <= this.cfg.decisionSeconds;
+        if (t.phase === 'outcome' && !isOutcome && !isEarlyWindow) continue;
         if (snapshots.length >= this.cfg.maxBufferedSnapshots) {
           this.snapshotsDropped++;
           continue;
         }
-        // A snapshot only has a market if a trade landed since the previous
-        // one. Without this, an idle token's carried-forward price computes a
-        // 0% return that reads as "held flat" when it means "nothing traded".
         const hasMarket = t.trades > t.lastSnapshotTrades;
         t.lastSnapshotTrades = t.trades;
-
-        // After graduation the curve is complete and its price is frozen, so
-        // the DEX price is the only live one. Left null rather than falling
-        // back to the stale curve print when DexScreener has not reported yet.
         const priceSource: 'curve' | 'dex' = t.graduated ? 'dex' : 'curve';
         const priceUsdEffective =
           priceSource === 'dex'
@@ -289,10 +388,15 @@ export class Tracker {
         snapshots.push({
           mint,
           snapshotAt: new Date(now),
+          secondsSinceLaunch: mark,
+          // Label by the mark's own position, not the token's current phase: a
+          // 90-second row is an early-window row even if it was written after
+          // the token had already been dropped.
+          phase: isEarlyWindow ? 'early' : t.phase,
+          isOutcomeMark: isOutcome,
           priceSource,
           priceUsdEffective,
           hasMarket,
-          secondsSinceLaunch: mark,
           curveSol: t.curveSol,
           virtualSol: t.virtualSol,
           tokenReserves: t.tokenReserves,
@@ -318,21 +422,29 @@ export class Tracker {
         });
       }
 
+      // Tracking ends only at the window's end, or when a token that has
+      // already been dropped goes quiet. A token still inside its window is
+      // never released early, because its outcome marks are still owed.
       const windowOver = now >= t.trackingEndsAt;
-      const wentQuiet = now - t.lastTradeAt >= idleMs;
-      if (windowOver || wentQuiet) {
+      const exhausted = t.nextMarkIndex >= t.marks.length;
+      const quietAndDropped =
+        t.phase === 'outcome' && now - t.lastTradeAt >= idleMs && exhausted;
+      if (windowOver || quietAndDropped) {
         resolved.push({
           mint,
-          died: wentQuiet && !windowOver,
-          diedAt: wentQuiet && !windowOver ? new Date(t.lastTradeAt + idleMs) : null,
+          died: now - t.lastTradeAt >= idleMs,
+          diedAt: now - t.lastTradeAt >= idleMs ? new Date(t.lastTradeAt + idleMs) : null,
           stopReason: windowOver ? 'window_complete' : 'idle',
           snapshotCount: t.nextMarkIndex,
+          keepReason: t.keepReason,
+          curveSolAtDecision: t.curveSolAtDecision,
+          decidedAt: t.decidedAt,
         });
         this.tracked.delete(mint);
       }
     }
 
-    return { snapshots, resolved };
+    return { snapshots, resolved, decided };
   }
 
   /**
@@ -359,10 +471,28 @@ export class Tracker {
     return this.tracked.get(mint);
   }
 
-  drainCounters(): { deniedByCap: number; snapshotsDropped: number } {
-    const out = { deniedByCap: this.deniedByCap, snapshotsDropped: this.snapshotsDropped };
+  drainCounters(): Record<string, number> {
+    const out = {
+      deniedByCap: this.deniedByCap,
+      snapshotsDropped: this.snapshotsDropped,
+      graduationsUntracked: this.graduationsUntracked,
+      keptActivity: this.keptActivity,
+      keptControl: this.keptControl,
+      stoppedAtDecision: this.stopped,
+    };
     this.deniedByCap = 0;
     this.snapshotsDropped = 0;
+    this.graduationsUntracked = 0;
+    this.keptActivity = 0;
+    this.keptControl = 0;
+    this.stopped = 0;
     return out;
+  }
+
+  /** Live phase mix, for the drain log. */
+  phaseCounts(): Record<string, number> {
+    const c: Record<string, number> = { early: 0, extended: 0, outcome: 0 };
+    for (const t of this.tracked.values()) c[t.phase] = (c[t.phase] ?? 0) + 1;
+    return c;
   }
 }

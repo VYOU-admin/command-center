@@ -60,6 +60,14 @@ create table if not exists early_tokens (
   snapshot_count      integer   not null default 0,
   -- When this token last actually traded. Distinguishes "quiet" from "gone".
   last_trade_at       timestamptz,
+  -- Outcome of the 10-minute decision: 'activity', 'control', 'graduated',
+  -- or null if the token was dropped to outcome-marks-only.
+  keep_reason         text,
+  decided_at          timestamptz,
+  curve_sol_at_decision numeric,
+  -- Set once this token's snapshots have been collapsed by retention, so a
+  -- maintenance pass never re-examines a token it has already finished with.
+  snapshots_pruned    boolean   not null default false,
 
   primary key (monitor_id, mint)
 );
@@ -137,7 +145,15 @@ create table if not exists early_snapshots (
   -- computed across such rows is exactly 0% — not because the price held, but
   -- because nothing traded. A frozen last print must never read as a flat
   -- return, and this is what tells the two apart.
-  has_market           boolean
+  has_market           boolean,
+
+  -- 'early' (first 10 minutes, every launch), 'extended' (kept past the
+  -- decision mark), or 'outcome' (dropped, but still owed its forced marks).
+  phase                text,
+  -- A forced mark written regardless of trading state. Retention never prunes
+  -- these: they are the outcome variable, and the death rule must not decide
+  -- the outcome horizon.
+  is_outcome_mark      boolean     not null default false
 );
 
 create index if not exists early_snap_mint_idx
@@ -151,6 +167,24 @@ alter table early_snapshots add column if not exists price_source        text;
 alter table early_snapshots add column if not exists price_usd_effective numeric;
 alter table early_snapshots add column if not exists has_market          boolean;
 alter table early_tokens    add column if not exists last_trade_at       timestamptz;
+alter table early_snapshots add column if not exists phase               text;
+alter table early_snapshots add column if not exists is_outcome_mark     boolean not null default false;
+alter table early_tokens    add column if not exists keep_reason         text;
+alter table early_tokens    add column if not exists decided_at          timestamptz;
+alter table early_tokens    add column if not exists curve_sol_at_decision numeric;
+alter table early_tokens    add column if not exists snapshots_pruned    boolean not null default false;
+
+-- Finds the next batch of tokens due for collapsing in one index scan, rather
+-- than sequentially scanning every token ever launched.
+create index if not exists early_tokens_prune_idx
+  on early_tokens (monitor_id, launched_at)
+  where not snapshots_pruned;
+
+create index if not exists early_snap_outcome_idx
+  on early_snapshots (monitor_id, is_outcome_mark, seconds_since_launch)
+  where is_outcome_mark;
+create index if not exists early_snap_phase_idx
+  on early_snapshots (monitor_id, phase, seconds_since_launch);
 
 create index if not exists early_snap_market_idx
   on early_snapshots (monitor_id, has_market, seconds_since_launch);

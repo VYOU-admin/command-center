@@ -1,3 +1,21 @@
+# DISABLED 2026-08-25.
+#
+# Superseded by pumpfun-early-window, which now records EVERY launch from t=0
+# rather than a sample, carries buyer and seller identity that this monitor's
+# accountSubscribe design structurally cannot provide, and takes launches from
+# the same program-wide log subscription as trades instead of a second feed.
+#
+# This monitor's per-token accountSubscribe approach is also the one bounded by
+# the RPC's 100-concurrent-subscription cap, which is what motivated the
+# program-wide design in the first place. It had additionally been failing 508
+# of 1,245 runs before the outage that prompted this change.
+#
+# ALL TABLES ARE KEPT: pump_launches, pump_curve_samples, pump_velocity_summary
+# and pump_deployer_stats are untouched and remain queryable. Existing analyses
+# stay reproducible; only new collection stops.
+#
+# pumpfun-outcomes still reads these tables and is deliberately left running so
+# tokens already in flight can resolve. It should be disabled once they have.
 # pump.fun launch stream.
 #
 # PURPOSE: logging and dataset building. This monitor ranks nothing and signals
@@ -20,7 +38,7 @@
 id: pumpfun-launches
 name: Pump.fun Launches
 source: pumpfun-launches
-enabled: true
+enabled: false
 
 # Drain interval. Shorter means less data at risk if the process dies between
 # drains; the shutdown hook performs a final drain on SIGTERM either way.
@@ -38,6 +56,17 @@ options:
   # Public RPC works and needs no key. Swap in a provider URL for more headroom;
   # the concurrent-subscription cap below is the thing that would change.
   rpc_url: wss://api.mainnet-beta.solana.com
+
+  # Liveness for the long-lived sockets, measured by DATA ARRIVING rather than
+  # by socket state. A half-open socket — the peer gone without sending a FIN,
+  # routine behind cloud NAT — stays readyState OPEN forever and never fires a
+  # close event, so a reconnect-on-close design never recovers from it. The
+  # pump.fun launch feed sat dead this way for 4.7 hours in production while
+  # reporting itself connected. After this many seconds of silence the socket is
+  # force-closed and reconnected. Both streams here are orders of magnitude
+  # busier than this threshold, so it cannot fire on a merely quiet period.
+  stream_silence_reconnect_seconds: 120
+
 
   sampling:
     # SLOT ARITHMETIC — retune these together. They trade against one capped

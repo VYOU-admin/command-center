@@ -98,8 +98,10 @@ export async function renderEarlyWindowPanel(ctx: PanelContext): Promise<string>
 
   const totals = await ctx.db.query(
     `select count(*)::int tracked,
-            count(*) filter (where sample_reason = 'random')::int random,
-            count(*) filter (where sample_reason = 'graduate')::int graduate,
+            count(*) filter (where keep_reason = 'activity')::int kept_activity,
+            count(*) filter (where keep_reason = 'control')::int kept_control,
+            count(*) filter (where decided_at is not null and keep_reason is null)::int dropped,
+            count(*) filter (where decided_at is null)::int undecided,
             count(*) filter (where graduated)::int graduated,
             count(*) filter (where died)::int died,
             count(*) filter (where tracking_stopped_at is null)::int still_tracking,
@@ -117,15 +119,25 @@ export async function renderEarlyWindowPanel(ctx: PanelContext): Promise<string>
 
   const header =
     `<h2 class="section">${escapeHtml(ctx.monitorName)}</h2>` +
-    `<p class="panel-meta">Tokens tracked in the last 24h, measured from their price at ` +
-    `<strong>5 minutes</strong> — not from launch, which would fold in the deployer's own ` +
-    `opening buy. Collection only: nothing here is scored, filtered or alerted on.</p>`;
+    `<p class="panel-meta">Every launch is tracked from t=0 for ten minutes; at ten minutes ` +
+    `tokens above the activity floor are kept for six hours, along with a random control arm. ` +
+    `Returns below are measured from each token's price at <strong>5 minutes</strong> — not from ` +
+    `launch, which would fold in the deployer's own opening buy. Collection only: nothing here ` +
+    `is scored, filtered or alerted on.</p>`;
 
   const summary =
     `<div class="cards stats">` +
     ([
-      ['Tracked (24h)', String(t.tracked ?? 0), `${t.random ?? 0} sampled · ${t.graduate ?? 0} graduates`],
-      ['Still tracking', String(t.still_tracking ?? 0), 'window open'],
+      [
+        'Launches tracked (24h)',
+        String(t.tracked ?? 0),
+        `every launch from t=0 · ${t.undecided ?? 0} inside the first 10 min`,
+      ],
+      [
+        'Kept past 10 min',
+        String((t.kept_activity ?? 0) + (t.kept_control ?? 0)),
+        `${t.kept_activity ?? 0} on activity · ${t.kept_control ?? 0} control · ${t.dropped ?? 0} dropped`,
+      ],
       ['Graduated', String(t.graduated ?? 0), `${t.died ?? 0} died`],
       ['Snapshots (24h)', Number(t.snapshots ?? 0).toLocaleString('en-US'), `${t.mcap_missing ?? 0} missing mcap`],
     ] as [string, string, string][])

@@ -40,44 +40,109 @@ options:
   pumpportal_url: wss://pumpportal.fun/api/data
   program_id: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
 
+  # Liveness for the long-lived sockets, measured by DATA ARRIVING rather than
+  # by socket state. A half-open socket — the peer gone without sending a FIN,
+  # routine behind cloud NAT — stays readyState OPEN forever and never fires a
+  # close event, so a reconnect-on-close design never recovers from it. The
+  # pump.fun launch feed sat dead this way for 4.7 hours in production while
+  # reporting itself connected. After this many seconds of silence the socket is
+  # force-closed and reconnected. Both streams here are orders of magnitude
+  # busier than this threshold, so it cannot fire on a merely quiet period.
+  stream_silence_reconnect_seconds: 120
+
   # How long each token is followed, and when it is given up on early.
   window_minutes: 360
   death_after_idle_minutes: 60
 
   sampling:
-    # CONCURRENCY MATH, from measured production rates:
+    # THERE IS NO SAMPLING AT LAUNCH. Every new launch is tracked from t=0 for
+    # the first ten minutes. The program-wide subscription already receives
+    # those trades, so this is a storage decision rather than a subscription
+    # one, and sampling earlier would discard the early history of exactly the
+    # tokens that later turn out to matter.
     #
-    #   launch rate           31.4/min average (38.1 peak hour, 13.7 trough)
-    #   migrations            46.4/hour
+    # At ten minutes the token has shown what it does, and only then is it
+    # decided what to keep:
     #
-    #   sampled concurrent  = 31.4 x 0.05 x 360 min  =  565   (686 at peak)
-    #   graduate concurrent = 0.77/min x ~357 min    =  276
-    #                                          total ~  830   (~950 peak)
+    #   curve SOL > activity_floor_sol  -> kept for the full six hours
+    #   otherwise, control_rate at random -> kept for six hours as a control
+    #   everything else                 -> stops, but still owes its outcome marks
     #
-    # With one program-wide subscription there is no per-token cap to exceed, so
-    # 5% is comfortable. The limit below is a memory and write-volume guard, not
-    # an upstream constraint.
-    #
-    # Membership is a hash of the mint, not a coin flip, so the sample is
-    # reproducible months later and "was this token sampled" stays answerable.
-    rate: 0.05
-    # Every graduating token is followed for whatever remains of its six hours,
-    # on top of the random sample. A graduate whose launch we never saw is
-    # skipped rather than tracked from an assumed age.
+    # Measured: 9.0% of tokens clear a 1 SOL floor at ten minutes, so roughly
+    # 13.6% survive the cut once the 5% control is added.
+    decision_seconds: 600
+    activity_floor_sol: 1
+
+    # The control arm exists so the floor itself can be evaluated. Without it
+    # the dataset could only ever describe tokens the floor already liked.
+    # Membership is a hash of the mint, not a coin flip, so it stays
+    # reproducible and auditable months later.
+    control_rate: 0.05
+
+    # Graduates are tracked for six hours from GRADUATION rather than from
+    # launch, so the interesting part of their life is not cut off by a window
+    # that started before they were tradeable. They are never adopted at
+    # graduation: every launch is already tracked from t=0, so a graduate holds
+    # genuine early snapshots. Back-filling those marks is what made earlier
+    # graduate features unusable.
     track_graduates: true
 
-  # Snapshot cadence: dense near launch, thinning out. 135 marks in total.
-  #   every 15s to 5 min   ->  20 marks
-  #   every 60s to 1 hour  ->  55 marks
-  #   every 5 min to 6 hr  ->  60 marks
-  # A token that dies early simply stops producing marks.
+  # Snapshot cadence: densest where the signal was actually found.
+  #   every 15s to  5 min  ->  20 marks   } the first ten minutes, written for
+  #   every 30s to 10 min  ->  10 marks   } EVERY launch
+  #   every 60s to  1 hour ->  50 marks   } only for tokens kept at the decision
+  #   every  5m to  6 hour ->  60 marks   }
+  #
+  # ROW ESTIMATE at the measured 22.1 launches/min (31,885/day):
+  #   every launch, first 10 min   31,885 x 30  =  956,550
+  #   kept 13.6%, 10 min -> 6h      4,321 x 110 =  475,310
+  #   outcome marks for the rest   27,564 x  5  =  137,820
+  #   graduates, 6h from grad          853 x 120 = 102,360
+  #                                        total ~ 1.67M rows/day
+  # At ~687 bytes/row incl. indexes that is ~1.1 GB/day, which is why the
+  # retention block below is not optional.
   cadence:
     - until_seconds: 300
       every_seconds: 15
+    - until_seconds: 600
+      every_seconds: 30
     - until_seconds: 3600
       every_seconds: 60
     - until_seconds: 21600
       every_seconds: 300
+
+  # Written for EVERY tracked token at these ages whether or not it is still
+  # trading, and flagged so retention never removes them. Without these the
+  # death rule decides the outcome horizon: a token that stopped trading simply
+  # had no rows at +2h, which made the outcome unmeasurable rather than bad.
+  outcome_marks_seconds: [1800, 3600, 7200, 10800, 21600]
+
+  # RETENTION. Same shape as the pump.fun monitor: keep what reconstructs the
+  # series, drop the repetition.
+  #
+  # Never pruned, at any age:
+  #   - the first ten minutes (decision_seconds), the entire feature set
+  #   - outcome marks, the outcome variable
+  #   - any row where a trade actually happened
+  #   - the first row of every distinct price run
+  #
+  # What goes is the middle: carried-forward duplicates between ten minutes and
+  # six hours on tokens that had already stopped trading.
+  #
+  # Each pass claims a bounded batch of tokens, collapses only their rows, and
+  # marks them done, so a token is examined exactly once in its life and the
+  # cost of a pass does not grow with the table. Finding carried-forward
+  # duplicates needs a window function per token, and a window function cannot
+  # stop early — a pass written against "every row older than N days" would sort
+  # millions of rows every time to delete a few thousand.
+  #
+  # 500 tokens every 10 minutes clears 72,000/day against ~32,000 launches/day,
+  # so the batch keeps ahead of the inflow with room for a backlog.
+  retention:
+    full_resolution_days: 3
+    batch_tokens: 500
+    interval_minutes: 10
+    max_rows_per_pass: 50000
 
   enrichment:
     # SOL/USD, for the derived USD columns. The rate used is stored on every
@@ -89,9 +154,11 @@ options:
     dex_batch_size: 30
 
   limits:
-    # Guard on memory and write volume. Expected steady state is ~830; this
-    # leaves room for a burst without silently dropping tokens.
-    max_concurrent_tracked: 2000
+    # Every launch is now held for six hours so its outcome marks can be
+    # written, so the steady state is ~22/min x 360 min = ~8,000 tokens. Heavy
+    # per-token state (the wallet sets) is released at the decision mark for the
+    # ~86% that stop, so most of those are small records.
+    max_concurrent_tracked: 20000
     max_buffered_snapshots: 50000
     metadata_timeout_ms: 5000
     metadata_concurrency: 6
@@ -99,6 +166,12 @@ options:
     # Trades run at ~37/second platform-wide, so minutes of silence means broken
     # even while the socket reports itself connected.
     silence_fail_after_seconds: 300
+    # Zero launches decoded for this long WHILE trades keep arriving. A dead
+    # socket is handled by stream_silence_reconnect_seconds above and recovers
+    # itself; this is the failure a reconnect cannot fix, where the stream is
+    # healthy but pump.fun has changed the CreateEvent layout. It reuses the
+    # monitor's existing failure alert rather than adding a second one.
+    launch_silence_fail_seconds: 300
 
 alerts:
   # Failure and recovery only, to the system channel. This monitor never raises

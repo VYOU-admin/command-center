@@ -9,9 +9,17 @@ export interface EarlyConfig {
   rpcUrl: string;
   /** pump.fun program, subscribed to program-wide for all trade events. */
   programId: string;
-  /** Fraction of new launches drawn at random at the create event. */
-  sampleRate: number;
-  /** Track every graduating token for whatever remains of its window. */
+  /**
+   * Fraction of BELOW-FLOOR tokens kept as a control past the decision mark.
+   * Every launch is tracked from t=0 regardless; this only governs what
+   * survives the 10-minute cut.
+   */
+  controlRate: number;
+  /** Seconds after launch at which the keep/stop decision is made. */
+  decisionSeconds: number;
+  /** Curve SOL at the decision mark above which a token is kept in full. */
+  activityFloorSol: number;
+  /** Track every graduating token for 6h from GRADUATION, not from launch. */
   trackGraduates: boolean;
   /** How long a token is followed after launch. */
   windowMinutes: number;
@@ -23,6 +31,26 @@ export interface EarlyConfig {
   cadence: { untilSeconds: number; everySeconds: number }[];
   metadataTimeoutMs: number;
   metadataConcurrency: number;
+  /**
+   * Ages, in seconds since launch, at which a snapshot is written for every
+   * tracked token whether or not it is still trading. These exist so the death
+   * rule cannot decide the outcome horizon.
+   */
+  outcomeMarks: number[];
+  /** Days of full-resolution snapshots kept before the middle is collapsed. */
+  retentionFullDays: number;
+  /** Rows deleted per maintenance pass. */
+  retentionMaxRowsPerPass: number;
+  /** Tokens collapsed per maintenance pass. Bounds the work, not the backlog. */
+  retentionBatchTokens: number;
+  /** Minutes between maintenance passes. The drain runs far more often. */
+  retentionIntervalMinutes: number;
+  /**
+   * Silence, in seconds, after which a long-lived socket is force-closed and
+   * reconnected. Liveness is measured by data arriving, not by socket state: a
+   * half-open socket reports itself connected forever and never fires close.
+   */
+  streamSilenceReconnectSeconds: number;
   /** How often the SOL/USD rate is refreshed from DexScreener. */
   solPriceRefreshSeconds: number;
   /** How often graduated tokens are enriched from DexScreener. */
@@ -32,6 +60,13 @@ export interface EarlyConfig {
   maxBufferedSnapshots: number;
   /** Fail the run if no trade event has arrived in this long. */
   silenceFailAfterSeconds: number;
+  /**
+   * Seconds of ZERO decoded launches, while the stream is otherwise delivering,
+   * after which the monitor fails. The watchdog recovers a dead socket on its
+   * own, but a stream that is talking normally and yielding no creates means the
+   * event layout moved — which no reconnect can fix and a human has to see.
+   */
+  launchSilenceFailSeconds: number;
 }
 
 function str(o: Record<string, unknown>, k: string, d: string): string {
@@ -54,8 +89,10 @@ export function parseEarlyConfig(
     if (!/^wss?:\/\//.test(v)) throw new Error(`${ctx}: options.${k} must be a ws:// or wss:// URL`);
   }
 
-  const sampleRate = configNumber(s, 'rate', ctx, 0.05);
-  if (sampleRate > 1) throw new Error(`${ctx}: sampling.rate must be between 0 and 1`);
+  const controlRate = configNumber(s, 'control_rate', ctx, 0.05);
+  if (controlRate > 1) throw new Error(`${ctx}: sampling.control_rate must be between 0 and 1`);
+  const decisionSeconds = configNumber(s, 'decision_seconds', ctx, 600);
+  const activityFloorSol = configNumber(s, 'activity_floor_sol', ctx, 1);
 
   const rawCadence = options['cadence'];
   const cadence = Array.isArray(rawCadence) && rawCadence.length
@@ -73,6 +110,7 @@ export function parseEarlyConfig(
       })
     : [
         { untilSeconds: 300, everySeconds: 15 },
+        { untilSeconds: 600, everySeconds: 30 },
         { untilSeconds: 3600, everySeconds: 60 },
         { untilSeconds: 21600, everySeconds: 300 },
       ];
@@ -91,11 +129,36 @@ export function parseEarlyConfig(
     );
   }
 
+  const rawOutcome = options['outcome_marks_seconds'];
+  const outcomeMarks = Array.isArray(rawOutcome) && rawOutcome.length
+    ? rawOutcome.map((v, i) => {
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+          throw new Error(`${ctx}: outcome_marks_seconds[${i}] must be positive`);
+        }
+        return v;
+      })
+    : [1800, 3600, 7200, 10800, 21600];
+
+  const r = section(options, 'retention');
+
   return {
     pumpportalUrl,
     rpcUrl,
     programId: str(options, 'program_id', '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'),
-    sampleRate,
+    controlRate,
+    decisionSeconds,
+    activityFloorSol,
+    outcomeMarks,
+    retentionFullDays: configNumber(r, 'full_resolution_days', ctx, 3),
+    retentionMaxRowsPerPass: configNumber(r, 'max_rows_per_pass', ctx, 50000),
+    retentionBatchTokens: configNumber(r, 'batch_tokens', ctx, 500),
+    streamSilenceReconnectSeconds: configNumber(
+      options as Record<string, unknown>,
+      'stream_silence_reconnect_seconds',
+      ctx,
+      120,
+    ),
+    retentionIntervalMinutes: configNumber(r, 'interval_minutes', ctx, 10),
     trackGraduates: s['track_graduates'] !== false,
     windowMinutes,
     deathAfterIdleMinutes: configNumber(options, 'death_after_idle_minutes', ctx, 60),
@@ -109,18 +172,34 @@ export function parseEarlyConfig(
     timeoutMs: configNumber(l, 'timeout_ms', ctx, 20000),
     maxBufferedSnapshots: configNumber(l, 'max_buffered_snapshots', ctx, 50000),
     silenceFailAfterSeconds: configNumber(l, 'silence_fail_after_seconds', ctx, 300),
+    launchSilenceFailSeconds: configNumber(l, 'launch_silence_fail_seconds', ctx, 300),
   };
 }
 
-/** Snapshot marks in seconds, built once from the cadence. */
-export function buildMarks(cfg: EarlyConfig): number[] {
+/**
+ * Snapshot marks in seconds since launch, up to `horizon`.
+ *
+ * Generated against a horizon rather than a fixed array because a token that
+ * graduates late is tracked for six hours from GRADUATION, which can run past
+ * six hours from launch. The final cadence band simply repeats to cover it.
+ */
+export function buildMarks(cfg: EarlyConfig, horizonSeconds: number): number[] {
   const marks: number[] = [];
   let from = 0;
   for (const step of cfg.cadence) {
-    for (let t = from + step.everySeconds; t <= step.untilSeconds; t += step.everySeconds) {
-      marks.push(t);
-    }
+    const until = Math.min(step.untilSeconds, horizonSeconds);
+    for (let t = from + step.everySeconds; t <= until; t += step.everySeconds) marks.push(t);
     from = step.untilSeconds;
+    if (from >= horizonSeconds) break;
   }
+  // Extend with the last band so a late graduation is still covered.
+  const last = cfg.cadence[cfg.cadence.length - 1]!;
+  for (let t = Math.max(from, last.untilSeconds) + last.everySeconds; t <= horizonSeconds; t += last.everySeconds) {
+    marks.push(t);
+  }
+  for (const m of cfg.outcomeMarks) {
+    if (m <= horizonSeconds && !marks.includes(m)) marks.push(m);
+  }
+  marks.sort((a, b) => a - b);
   return marks;
 }

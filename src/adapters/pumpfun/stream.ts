@@ -24,6 +24,7 @@
  */
 
 import type { Logger } from '../../logger.js';
+import { SilenceWatchdog } from '../ws-watchdog.js';
 import type { StreamConfig } from './config.js';
 
 export interface LaunchEvent {
@@ -204,10 +205,27 @@ export class PumpFunStream {
   private startedAt = 0;
   private readonly timers = new Set<NodeJS.Timeout>();
 
+  private readonly pumpWatchdog: SilenceWatchdog;
+  private readonly rpcWatchdog: SilenceWatchdog;
+
   constructor(
     private readonly cfg: StreamConfig,
     private readonly log: Logger,
-  ) {}
+  ) {
+    const ms = cfg.streamSilenceReconnectSeconds * 1000;
+    this.pumpWatchdog = new SilenceWatchdog(ms, 'pumpportal', log, (silent) =>
+      this.forceReconnect('pumpportal', silent),
+    );
+    // Guarded: the RPC socket carries per-token subscriptions, so with no slots
+    // armed it is silent by design rather than broken.
+    this.rpcWatchdog = new SilenceWatchdog(
+      ms,
+      'rpc',
+      log,
+      (silent) => this.forceReconnect('rpc', silent),
+      () => this.slots.size > 0,
+    );
+  }
 
   start(): void {
     if (this.started) return;
@@ -215,6 +233,8 @@ export class PumpFunStream {
     this.startedAt = Date.now();
     this.connectPump();
     this.connectRpc();
+    this.pumpWatchdog.start();
+    this.rpcWatchdog.start();
     const sweep = setInterval(() => this.recycleExpiredSlots(), 15_000);
     sweep.unref();
     this.timers.add(sweep);
@@ -222,6 +242,8 @@ export class PumpFunStream {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.pumpWatchdog.stop();
+    this.rpcWatchdog.stop();
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
     for (const ws of [this.pump, this.rpc]) {
@@ -263,20 +285,51 @@ export class PumpFunStream {
 
     ws.onopen = () => {
       this.pumpBackoff = 0;
+      this.pumpWatchdog.reset();
       this.log.info('pumpportal connected');
       ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
       ws.send(JSON.stringify({ method: 'subscribeMigration' }));
     };
-    ws.onmessage = (event) => this.onPumpMessage(event.data);
+    ws.onmessage = (event) => {
+      this.pumpWatchdog.notify();
+      this.onPumpMessage(event.data);
+    };
     ws.onerror = (event) => {
       this.log.warn('pumpportal socket error', {
         error: (event as unknown as { message?: string }).message ?? 'unknown',
       });
     };
     ws.onclose = (event) => {
-      if (this.pump === ws) this.pump = null;
+      // A socket the watchdog already abandoned must not reconnect again.
+      if (this.pump !== ws) return;
+      this.pump = null;
       this.schedulePumpReconnect(`code ${event.code} ${event.reason}`);
     };
+  }
+
+  /**
+   * Abandon a socket that has stopped delivering and reconnect without waiting
+   * for a close event that may never come. Handlers are detached first so the
+   * dead socket cannot schedule a second reconnect if it does eventually close.
+   */
+  private forceReconnect(what: 'pumpportal' | 'rpc', silentMs: number): void {
+    const ws = what === 'pumpportal' ? this.pump : this.rpc;
+    if (what === 'pumpportal') this.pump = null;
+    else this.rpc = null;
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch {
+        /* already gone */
+      }
+    }
+    const detail = `silent for ${Math.round(silentMs / 1000)}s`;
+    if (what === 'pumpportal') this.schedulePumpReconnect(detail);
+    else this.scheduleWsReconnect('rpc', detail);
   }
 
   private scheduleWsReconnect(what: 'pumpportal' | 'rpc', detail: unknown): void {
@@ -512,6 +565,7 @@ export class PumpFunStream {
 
     ws.onopen = () => {
       this.rpcBackoff = 0;
+      this.rpcWatchdog.reset();
       this.log.info('rpc connected', { active_slots: this.slots.size });
       // Slots outlive the socket; re-arm whatever is still inside its window.
       this.subToCurve.clear();
@@ -527,14 +581,19 @@ export class PumpFunStream {
         this.sendSubscribe(slot);
       }
     };
-    ws.onmessage = (event) => this.onRpcMessage(event.data);
+    ws.onmessage = (event) => {
+      this.rpcWatchdog.notify();
+      this.onRpcMessage(event.data);
+    };
     ws.onerror = (event) => {
       this.log.warn('rpc socket error', {
         error: (event as unknown as { message?: string }).message ?? 'unknown',
       });
     };
     ws.onclose = (event) => {
-      if (this.rpc === ws) this.rpc = null;
+      // A socket the watchdog already abandoned must not reconnect again.
+      if (this.rpc !== ws) return;
+      this.rpc = null;
       // Code 1013 means we exceeded the concurrent-subscription cap. That is a
       // configuration error rather than a transient fault, so say so plainly.
       if (event.code === 1013) {

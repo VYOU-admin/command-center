@@ -8,6 +8,7 @@
  */
 
 import type { Logger } from '../../logger.js';
+import { SilenceWatchdog } from '../ws-watchdog.js';
 import type { EarlyConfig } from './config.js';
 import type { LaunchInfo, TrackedToken } from './tracker.js';
 
@@ -43,19 +44,27 @@ export class LaunchFeed {
   private readonly timers = new Set<NodeJS.Timeout>();
   private launches = 0;
   private migrations = 0;
+  private readonly watchdog: SilenceWatchdog;
 
   constructor(
     private readonly url: string,
     private readonly log: Logger,
     private readonly handlers: LaunchFeedHandlers,
-  ) {}
+    silenceReconnectMs = 120_000,
+  ) {
+    this.watchdog = new SilenceWatchdog(silenceReconnectMs, 'launch feed', log, (ms) =>
+      this.forceReconnect(`silent for ${Math.round(ms / 1000)}s`),
+    );
+  }
 
   start(): void {
     this.connect();
+    this.watchdog.start();
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.watchdog.stop();
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
     try {
@@ -69,11 +78,42 @@ export class LaunchFeed {
     return this.ws?.readyState === 1;
   }
 
-  drainCounters(): { launches: number; migrations: number } {
-    const out = { launches: this.launches, migrations: this.migrations };
+  drainCounters(): { launches: number; migrations: number; forcedReconnects: number } {
+    const out = {
+      launches: this.launches,
+      migrations: this.migrations,
+      forcedReconnects: this.watchdog.tripCount,
+    };
     this.launches = 0;
     this.migrations = 0;
     return out;
+  }
+
+  /** Milliseconds since the last frame of any kind, or null before the first. */
+  silentForMs(): number | null {
+    return this.watchdog.silentForMs();
+  }
+
+  /**
+   * Abandon the current socket and reconnect without waiting for a close event
+   * that may never come. Handlers are detached first so the dead socket cannot
+   * schedule a second reconnect if it does eventually close.
+   */
+  private forceReconnect(detail: string): void {
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch {
+        /* already gone */
+      }
+    }
+    this.reconnect(detail);
   }
 
   private connect(): void {
@@ -89,11 +129,15 @@ export class LaunchFeed {
 
     ws.onopen = () => {
       this.backoff = 0;
+      this.watchdog.reset();
       this.log.info('launch feed connected');
       ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
       ws.send(JSON.stringify({ method: 'subscribeMigration' }));
     };
     ws.onmessage = (event) => {
+      // Liveness is measured on ANY frame, control frames included: the
+      // question is whether the peer is still talking, not what it said.
+      this.watchdog.notify();
       let d: Record<string, unknown>;
       try {
         d = JSON.parse(String(event.data)) as Record<string, unknown>;
@@ -132,7 +176,9 @@ export class LaunchFeed {
       });
     };
     ws.onclose = (event) => {
-      if (this.ws === ws) this.ws = null;
+      // A socket the watchdog already abandoned must not reconnect again.
+      if (this.ws !== ws) return;
+      this.ws = null;
       this.reconnect(`code ${event.code} ${event.reason}`);
     };
   }

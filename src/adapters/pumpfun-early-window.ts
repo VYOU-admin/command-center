@@ -22,11 +22,17 @@
 
 import type { AdapterContext, PanelContext, SourceAdapter } from './types.js';
 import type { PoolClient } from '../store/db.js';
-import { buildMarks, parseEarlyConfig, type EarlyConfig } from './pumpfun-early/config.js';
+import { parseEarlyConfig, type EarlyConfig } from './pumpfun-early/config.js';
 import { SCHEMA } from './pumpfun-early/schema.js';
 import { TradeStream } from './pumpfun-early/trades.js';
-import { Tracker, type Resolution, type Snapshot, type TrackedToken } from './pumpfun-early/tracker.js';
-import { LaunchFeed, SolPrice, enrichGraduates, fetchSocials } from './pumpfun-early/feeds.js';
+import {
+  Tracker,
+  type Decision,
+  type Resolution,
+  type Snapshot,
+  type TrackedToken,
+} from './pumpfun-early/tracker.js';
+import { SolPrice, enrichGraduates, fetchSocials } from './pumpfun-early/feeds.js';
 import { renderEarlyWindowPanel } from '../web/early-window-panel.js';
 
 /** Long enough for the sockets to open before a missing connection is a fault. */
@@ -36,15 +42,17 @@ interface Runtime {
   cfg: EarlyConfig;
   tracker: Tracker;
   trades: TradeStream;
-  feed: LaunchFeed;
   solPrice: SolPrice;
   /** Tokens newly adopted, awaiting their row in early_tokens. */
   pendingTokens: TrackedToken[];
   pendingSnapshots: Snapshot[];
   pendingResolutions: Resolution[];
+  pendingDecisions: Decision[];
   socialsQueue: TrackedToken[];
   socialsInFlight: number;
   lastDexRefresh: number;
+  /** When retention last ran. Maintenance is paced independently of the drain. */
+  lastPrune: number;
   timer: NodeJS.Timeout | null;
 }
 
@@ -54,8 +62,7 @@ function start(ctx: AdapterContext, cfg: EarlyConfig): Runtime {
   const existing = runtimes.get(ctx.monitorId);
   if (existing) return existing;
 
-  const marks = buildMarks(cfg);
-  const tracker = new Tracker(cfg, marks, ctx.log);
+  const tracker = new Tracker(cfg, ctx.log);
   const solPrice = new SolPrice(cfg, ctx.log);
 
   const rt: Runtime = {
@@ -65,46 +72,66 @@ function start(ctx: AdapterContext, cfg: EarlyConfig): Runtime {
     pendingTokens: [],
     pendingSnapshots: [],
     pendingResolutions: [],
+    pendingDecisions: [],
     socialsQueue: [],
     socialsInFlight: 0,
     lastDexRefresh: 0,
+    lastPrune: 0,
     timer: null,
     trades: null as unknown as TradeStream,
-    feed: null as unknown as LaunchFeed,
   };
 
-  rt.feed = new LaunchFeed(cfg.pumpportalUrl, ctx.log, {
-    onLaunch: (info) => {
-      const adopted = tracker.noteLaunch(info);
-      if (adopted) {
-        rt.pendingTokens.push(adopted);
-        if (adopted.uri) rt.socialsQueue.push(adopted);
-      }
+  // ONE subscription, one dependency. Launches, graduations and trades all
+  // arrive as events on the same program-wide log subscription, so there is no
+  // second feed to go silently dead — which is exactly what happened when this
+  // monitor took launches from PumpPortal instead.
+  rt.trades = new TradeStream(
+    cfg.rpcUrl,
+    cfg.programId,
+    ctx.log,
+    (trade) => tracker.applyTrade(trade),
+    cfg.streamSilenceReconnectSeconds * 1000,
+    {
+      onCreate: (created) => {
+        const adopted = tracker.noteLaunch({
+          mint: created.mint,
+          deployer: created.user,
+          name: created.name,
+          symbol: created.symbol,
+          uri: created.uri,
+          bondingCurve: created.bondingCurve,
+          pool: 'pump',
+          signature: null,
+          launchedAt: new Date(),
+          // The creation instant, BEFORE the deployer's own opening buy. That
+          // buy arrives moments later as an ordinary trade on this stream and
+          // is measured there rather than folded into the starting value.
+          initialMcapSol: created.mcapSol,
+          initialVSol: created.virtualSol,
+        });
+        if (adopted) {
+          rt.pendingTokens.push(adopted);
+          if (adopted.uri) rt.socialsQueue.push(adopted);
+        }
+      },
+      // A graduate is never adopted here — every launch is already tracked from
+      // t=0, so it already holds genuine early snapshots. This only extends its
+      // window to six hours from graduation and records the outcome.
+      onMigration: (mint) => {
+        tracker.noteGraduation(mint, new Date());
+      },
     },
-    onGraduation: (mint, at) => {
-      const adopted = tracker.noteGraduation(mint, at);
-      // A graduate adopted here was not previously tracked, so it still needs
-      // its row; one already tracked just had its outcome updated in place.
-      if (adopted && adopted.sampleReason === 'graduate' && adopted.nextMarkIndex === 0) {
-        if (!rt.pendingTokens.includes(adopted)) rt.pendingTokens.push(adopted);
-        if (adopted.uri) rt.socialsQueue.push(adopted);
-      }
-    },
-  });
-
-  rt.trades = new TradeStream(cfg.rpcUrl, cfg.programId, ctx.log, (trade) =>
-    tracker.applyTrade(trade),
   );
 
-  rt.feed.start();
   rt.trades.start();
 
   // Snapshots are emitted on their own clock, not on the drain schedule: a mark
   // at 15s cannot wait for a drain that runs every 30s.
   const tick = setInterval(() => {
-    const { snapshots, resolved } = tracker.collect(Date.now(), solPrice.current);
+    const { snapshots, resolved, decided } = tracker.collect(Date.now(), solPrice.current);
     if (snapshots.length) rt.pendingSnapshots.push(...snapshots);
     if (resolved.length) rt.pendingResolutions.push(...resolved);
+    if (decided.length) rt.pendingDecisions.push(...decided);
     pumpSocials(rt, ctx);
   }, 1000);
   tick.unref();
@@ -112,9 +139,12 @@ function start(ctx: AdapterContext, cfg: EarlyConfig): Runtime {
 
   runtimes.set(ctx.monitorId, rt);
   ctx.log.info('early-window monitor started', {
-    sample_rate: cfg.sampleRate,
+    tracking: 'every launch from t=0',
+    decision_seconds: cfg.decisionSeconds,
+    activity_floor_sol: cfg.activityFloorSol,
+    control_rate: cfg.controlRate,
     window_minutes: cfg.windowMinutes,
-    marks: marks.length,
+    outcome_marks: cfg.outcomeMarks,
     max_concurrent: cfg.maxConcurrentTracked,
   });
   return rt;
@@ -200,7 +230,7 @@ async function writeSnapshots(
        trades, buys, sells, buy_volume_sol, sell_volume_sol,
        unique_buyers, unique_sellers, largest_buy_sol,
        post_graduation, dex_liquidity_usd, dex_volume_24h, dex_txns_24h, dex_price_usd,
-       price_source, price_usd_effective, has_market
+       price_source, price_usd_effective, has_market, phase, is_outcome_mark
      )
      select $1, * from unnest(
        $2::text[], $3::timestamptz[], $4::numeric[],
@@ -209,7 +239,7 @@ async function writeSnapshots(
        $14::int[], $15::int[], $16::int[], $17::numeric[], $18::numeric[],
        $19::int[], $20::int[], $21::numeric[],
        $22::boolean[], $23::numeric[], $24::numeric[], $25::int[], $26::numeric[],
-       $27::text[], $28::numeric[], $29::boolean[]
+       $27::text[], $28::numeric[], $29::boolean[], $30::text[], $31::boolean[]
      )`,
     [
       monitorId,
@@ -241,6 +271,8 @@ async function writeSnapshots(
       rows.map((r) => r.priceSource),
       rows.map((r) => r.priceUsdEffective),
       rows.map((r) => r.hasMarket),
+      rows.map((r) => r.phase),
+      rows.map((r) => r.isOutcomeMark),
     ],
   );
   return res.rowCount ?? 0;
@@ -275,9 +307,13 @@ async function writeResolutions(
     `update early_tokens t set
        died = u.died, died_at = u.died_at,
        tracking_stopped_at = now(), stop_reason = u.stop_reason,
-       snapshot_count = u.snapshot_count
-     from unnest($2::text[], $3::boolean[], $4::timestamptz[], $5::text[], $6::int[])
-            as u(mint, died, died_at, stop_reason, snapshot_count)
+       snapshot_count = u.snapshot_count,
+       keep_reason = u.keep_reason, decided_at = u.decided_at,
+       curve_sol_at_decision = u.curve_sol_at_decision
+     from unnest($2::text[], $3::boolean[], $4::timestamptz[], $5::text[], $6::int[],
+                 $7::text[], $8::timestamptz[], $9::numeric[])
+            as u(mint, died, died_at, stop_reason, snapshot_count,
+                 keep_reason, decided_at, curve_sol_at_decision)
      where t.monitor_id = $1 and t.mint = u.mint`,
     [
       monitorId,
@@ -286,16 +322,134 @@ async function writeResolutions(
       rows.map((r) => r.diedAt),
       rows.map((r) => r.stopReason),
       rows.map((r) => r.snapshotCount),
+      rows.map((r) => r.keepReason),
+      rows.map((r) => r.decidedAt),
+      rows.map((r) => r.curveSolAtDecision),
     ],
   );
+}
+
+/**
+ * The 10-minute decision, recorded when it is made. Written separately from the
+ * resolution because six hours separate the two, and a restart in between would
+ * otherwise leave no record of which arm the token was in.
+ */
+async function writeDecisions(
+  client: PoolClient,
+  monitorId: string,
+  rows: Decision[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  await client.query(
+    `update early_tokens t set
+       keep_reason = u.keep_reason, decided_at = u.decided_at,
+       curve_sol_at_decision = u.curve_sol_at_decision
+     from unnest($2::text[], $3::text[], $4::timestamptz[], $5::numeric[])
+            as u(mint, keep_reason, decided_at, curve_sol_at_decision)
+     where t.monitor_id = $1 and t.mint = u.mint`,
+    [
+      monitorId,
+      rows.map((r) => r.mint),
+      rows.map((r) => r.keepReason),
+      rows.map((r) => r.decidedAt),
+      rows.map((r) => r.curveSolAtDecision),
+    ],
+  );
+}
+
+/**
+ * Retention.
+ *
+ * At ~1.6M snapshots a day this table would otherwise grow without bound, so
+ * older rows are collapsed the same way the pump.fun monitor collapses its
+ * curve samples: keep the shape, drop the repetition.
+ *
+ * Three classes of row are never touched, because they are the analysis:
+ *
+ *   1. The first ten minutes. Every launch is recorded densely there, and that
+ *      window is the entire feature set — it is the reason for the redesign.
+ *   2. Outcome marks. They are the outcome variable, and they exist precisely
+ *      so that a token going quiet cannot erase its own result.
+ *   3. Rows where a trade actually happened (has_market), and the first row of
+ *      every distinct price run. A price with a start and an end is a step
+ *      function, so these reconstruct the series exactly rather than
+ *      approximating it.
+ *
+ * What goes is the middle: repeated carried-forward prices between ten minutes
+ * and six hours on tokens that had already stopped trading.
+ *
+ * WHY THIS IS BATCHED BY TOKEN. Finding carried-forward duplicates needs a
+ * window function over each token's series, and a window function cannot stop
+ * early — so a pass written against "every row older than N days" would sort
+ * millions of rows on every run to delete a few thousand. Instead each pass
+ * claims a bounded batch of tokens, collapses only their rows, and marks them
+ * done. A token is examined exactly once in its life, so the cost of a pass is
+ * fixed no matter how large the table grows.
+ */
+async function pruneSnapshots(
+  client: PoolClient,
+  monitorId: string,
+  cfg: EarlyConfig,
+): Promise<{ pruned: number; tokens: number }> {
+  // Claim a batch. A token is due once it is older than the full-resolution
+  // window; tracking has necessarily stopped by then, since the window is six
+  // hours and the retention floor is days.
+  const batch = await client.query<{ mint: string }>(
+    `select mint from early_tokens
+      where monitor_id = $1 and not snapshots_pruned
+        and launched_at < now() - ($2 || ' days')::interval
+      order by launched_at
+      limit $3`,
+    [monitorId, cfg.retentionFullDays, cfg.retentionBatchTokens],
+  );
+  const mints = batch.rows.map((r) => r.mint);
+  if (mints.length === 0) return { pruned: 0, tokens: 0 };
+
+  const result = await client.query(
+    `with candidates as (
+       select id, price_usd_effective, has_market,
+              lag(price_usd_effective) over (
+                partition by mint order by seconds_since_launch
+              ) as prev_price
+         from early_snapshots
+        where monitor_id = $1 and mint = any($2::text[])
+          and not is_outcome_mark
+          and seconds_since_launch > $3
+     ),
+     doomed as (
+       select id from candidates
+        where has_market is not true
+          and prev_price is not null
+          and price_usd_effective is not distinct from prev_price
+        limit $4
+     )
+     delete from early_snapshots s using doomed d where s.id = d.id`,
+    [monitorId, mints, cfg.decisionSeconds, cfg.retentionMaxRowsPerPass],
+  );
+
+  // Mark the batch done regardless of how many rows it yielded — a token with
+  // nothing to collapse is finished with too, and re-examining it every pass is
+  // exactly the cost this design exists to avoid.
+  await client.query(
+    `update early_tokens set snapshots_pruned = true
+      where monitor_id = $1 and mint = any($2::text[])`,
+    [monitorId, mints],
+  );
+
+  return { pruned: result.rowCount ?? 0, tokens: mints.length };
 }
 
 /* ---------------------------------------------------------------- adapter */
 
 interface Drain {
+  cfg: EarlyConfig;
+  /** Whether this drain should also run a retention pass. Decided in fetch(),
+   *  which owns the runtime clock; persist() must not reach for runtime state. */
+  prune: boolean;
   tokens: TrackedToken[];
   snapshots: Snapshot[];
   resolutions: Resolution[];
+  decisions: Decision[];
   traded: { mint: string; lastTradeAt: Date }[];
 }
 
@@ -326,18 +480,24 @@ const adapter: SourceAdapter<Drain> = {
       }
     }
 
+    const pruneDue = now - rt.lastPrune >= cfg.retentionIntervalMinutes * 60_000;
+    if (pruneDue) rt.lastPrune = now;
+
     const drain: Drain = {
+      cfg,
+      prune: pruneDue,
       tokens: rt.pendingTokens,
       snapshots: rt.pendingSnapshots,
       resolutions: rt.pendingResolutions,
+      decisions: rt.pendingDecisions,
       traded: rt.tracker.tradedSincePersist(),
     };
     rt.pendingTokens = [];
     rt.pendingSnapshots = [];
     rt.pendingResolutions = [];
+    rt.pendingDecisions = [];
 
     const streamStats = rt.trades.snapshotStats();
-    const feedStats = rt.feed.drainCounters();
     const counters = rt.tracker.drainCounters();
 
     ctx.log.info('early window drained', {
@@ -345,21 +505,23 @@ const adapter: SourceAdapter<Drain> = {
       snapshots: drain.snapshots.length,
       snapshots_with_market: drain.snapshots.filter((s) => s.hasMarket).length,
       resolved: drain.resolutions.length,
+      decided: drain.decisions.length,
       tracked_now: rt.tracker.size,
+      ...rt.tracker.phaseCounts(),
       sol_usd: rt.solPrice.current,
-      launches_seen: feedStats.launches,
-      migrations_seen: feedStats.migrations,
+      launches_seen: streamStats.launches,
+      migrations_seen: streamStats.migrations,
       ...streamStats,
       ...counters,
     });
 
-    if (counters.deniedByCap > 0) {
+    if ((counters.deniedByCap ?? 0) > 0) {
       ctx.log.warn('tokens not tracked: concurrency cap reached', {
         denied: counters.deniedByCap,
         cap: cfg.maxConcurrentTracked,
       });
     }
-    if (counters.snapshotsDropped > 0) {
+    if ((counters.snapshotsDropped ?? 0) > 0) {
       ctx.log.warn('snapshots dropped: buffer full', { dropped: counters.snapshotsDropped });
     }
     if (streamStats.undecodable > 0) {
@@ -375,11 +537,25 @@ const adapter: SourceAdapter<Drain> = {
       throw new Error(
         `no pump.fun trade events for ${Math.round(silentFor)}s ` +
           `(threshold ${cfg.silenceFailAfterSeconds}s) [trades=${streamStats.connected ? 'up' : 'down'} ` +
-          `launches=${rt.feed.connected ? 'up' : 'down'}]`,
+          `launches=${streamStats.launches}]`,
       );
     }
     if (!streamStats.connected && silentFor > CONNECT_GRACE_SECONDS) {
       throw new Error('trade stream is not connected');
+    }
+
+    // Launches now ride the trade subscription, so a socket fault shows up as
+    // trade silence above and the watchdog reconnects on its own. This catches
+    // the case a reconnect CANNOT fix: the stream delivering normally while
+    // yielding no creates, which means pump.fun changed the event layout.
+    const sinceLaunch = streamStats.secondsSinceLastLaunch;
+    const launchReference = sinceLaunch ?? silentFor;
+    if (launchReference > cfg.launchSilenceFailSeconds && streamStats.trades > 0) {
+      throw new Error(
+        `no pump.fun launches decoded for ${Math.round(launchReference)}s ` +
+          `(threshold ${cfg.launchSilenceFailSeconds}s) while the stream delivered ` +
+          `${streamStats.trades} trades — the CreateEvent layout has probably moved`,
+      );
     }
 
     return [drain];
@@ -393,7 +569,14 @@ const adapter: SourceAdapter<Drain> = {
     const tokens = await writeTokens(client, ctx.monitorId, dedupe(drain.tokens));
     const snapshots = await writeSnapshots(client, ctx.monitorId, drain.snapshots);
     await writeLastTradeAt(client, ctx.monitorId, drain.traded);
+    await writeDecisions(client, ctx.monitorId, drain.decisions);
     await writeResolutions(client, ctx.monitorId, drain.resolutions);
+
+    // Paced: the drain runs every 30 seconds, maintenance does not need to.
+    if (drain.prune) {
+      const { pruned, tokens } = await pruneSnapshots(client, ctx.monitorId, drain.cfg);
+      if (tokens > 0) ctx.log.info('snapshots pruned', { pruned, tokens_collapsed: tokens });
+    }
 
     return tokens + snapshots;
   },
@@ -402,7 +585,6 @@ const adapter: SourceAdapter<Drain> = {
     for (const rt of runtimes.values()) {
       if (rt.timer) clearInterval(rt.timer);
       await rt.trades.stop();
-      await rt.feed.stop();
     }
     runtimes.clear();
   },

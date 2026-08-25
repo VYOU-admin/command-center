@@ -10,6 +10,12 @@
 import { configNumber, section } from '../types.js';
 
 export interface StreamConfig {
+  /**
+   * Silence, in seconds, after which a long-lived socket is force-closed and
+   * reconnected. Liveness is measured by data arriving, not by socket state: a
+   * half-open socket reports itself connected forever and never fires close.
+   */
+  streamSilenceReconnectSeconds: number;
   /** PumpPortal data socket. Free tier needs no API key. */
   pumpportalUrl: string;
   /** Solana JSON-RPC websocket, for bonding-curve account subscriptions. */
@@ -107,6 +113,12 @@ export function parseStreamConfig(
     );
   }
 
+  const streamSilenceReconnectSeconds = configNumber(
+    options,
+    'stream_silence_reconnect_seconds',
+    ctx,
+    120,
+  );
   const controlSampleRate = configNumber(s, 'control_sample_rate', ctx, 0.1);
   if (controlSampleRate > 1) {
     throw new Error(`${ctx}: sampling.control_sample_rate must be between 0 and 1`);
@@ -120,6 +132,7 @@ export function parseStreamConfig(
     instrumentMcapSolAbove: configNumber(s, 'instrument_mcap_sol_above', ctx, 32),
     instrumentIfTelegram: s['instrument_if_telegram'] !== false,
     controlSampleRate,
+    streamSilenceReconnectSeconds,
     metadataTimeoutMs: configNumber(l, 'metadata_timeout_ms', ctx, 5000),
     metadataConcurrency: configNumber(l, 'metadata_concurrency', ctx, 6),
     maxBufferedEvents: configNumber(l, 'max_buffered_events', ctx, 20000),
