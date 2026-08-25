@@ -221,6 +221,31 @@ So `pump_curve_samples` stores a per-token `trade_seq` alongside `real_sol`, and
 each configured level. Which one carries the signal is then a question the
 dataset can answer rather than one the schema has already assumed.
 
+### Level features leak; time features don't
+
+Level-based features cannot answer the question they look like they answer.
+"Trades to reach 85 SOL" does not predict graduation, because reaching 85 SOL
+*is* graduating — the first pass at this data showed graduated tokens with
+`peak_sol` of exactly 85.01 at p50, p75, p90 and max, which is the threshold
+restating itself. Anything computed from it measures the outcome definition.
+
+`pump_velocity_summary.snapshots` is the counterpart that does not leak: curve
+state at a *fixed age* — SOL, cumulative trades, price, and market cap at 30s,
+60s and 120s. A fixed-time cut cannot encode the outcome, and it is also the
+only shape that answers return-from-entry, which needs a price at a time rather
+than a time at a price.
+
+Snapshots past where observation stopped come back flagged `censored` with null
+values, and `observed_to_seconds` records how far each token was actually
+watched. Both exist so that not-looked-at never reads as flatlined.
+
+Price and market cap are SOL-denominated. A return measured against SOL isolates
+the token's own move from whatever SOL did in the same minutes; going to USD
+later needs only a rate at the timestamp, while the reverse loses precision.
+Deriving them needs the token side of the curve, so the decoder reads
+`virtual_token_reserves` and `token_total_supply` as well as the SOL reserves —
+samples written before that landed have null price and cannot be backfilled.
+
 [marino]: https://arxiv.org/abs/2602.14860
 
 ### Sampling, and why there is a control group
@@ -232,12 +257,16 @@ row; a subset gets a bonding-curve subscription:
 - **initial mcap above the 30 SOL default** — the strongest t=0 predictor in the
   survival literature (Cox HR 4.51)
 - **an advertised Telegram** — an 8.94x graduation lift ([GRW study][grw])
-- **a random 6% of everything else** — the control group
+- **a random 15% of everything else** — the control group
 
 The control group is not optional. Instrumenting only tokens that pass a filter
 produces a dataset that can describe those tokens and nothing else, which makes
 the filter unfalsifiable: you could never measure what it threw away. Membership
 is a hash of the mint rather than a coin flip, so it stays reproducible.
+
+The observation window is 3 minutes rather than longer specifically to fund that
+control group — the snapshots are taken at 30/60/120s, so a longer window bought
+tail nobody reads at the cost of slots that answer whether the filter works.
 
 [grw]: https://arxiv.org/abs/2607.02823
 

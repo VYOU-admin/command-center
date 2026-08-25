@@ -62,6 +62,10 @@ export interface CurveSample {
   ageSeconds: number;
   realSol: number;
   virtualSol: number;
+  /** SOL per whole token at this moment. Null if the curve reported no tokens. */
+  priceSol: number | null;
+  /** Fully-diluted value in SOL. Denominated in SOL deliberately — see schema. */
+  mcapSol: number | null;
   complete: boolean;
 }
 
@@ -82,18 +86,58 @@ export interface StreamStats {
   reconnects: number;
 }
 
-/** Curve account layout: 8-byte discriminator, then five u64s, then `complete`. */
+/**
+ * Curve account layout: 8-byte discriminator, then five u64s, then `complete`.
+ *
+ *   8  virtual_token_reserves
+ *  16  virtual_sol_reserves
+ *  24  real_token_reserves
+ *  32  real_sol_reserves
+ *  40  token_total_supply
+ *  48  complete
+ */
+const OFF_VIRTUAL_TOKEN = 8;
 const OFF_VIRTUAL_SOL = 16;
 const OFF_REAL_SOL = 32;
+const OFF_TOTAL_SUPPLY = 40;
 const OFF_COMPLETE = 48;
 const LAMPORTS = 1e9;
 
-function decodeCurve(base64: string): { realSol: number; virtualSol: number; complete: boolean } | null {
+interface CurveState {
+  realSol: number;
+  virtualSol: number;
+  /** SOL per whole token, from the virtual reserves the curve prices against. */
+  priceSol: number | null;
+  /** Fully-diluted value in SOL: price x total supply. */
+  mcapSol: number | null;
+  complete: boolean;
+}
+
+/**
+ * Price needs the token side of the curve, not just the SOL side.
+ *
+ * Both reserves are raw base units on different scales — SOL in lamports (1e9),
+ * tokens in their own decimals (1e6 on pump.fun) — but the decimals cancel in
+ * `supply / tokenReserves`, so market cap needs no decimals constant and cannot
+ * drift if pump.fun ever changes them. Price does need the token scale, and is
+ * derived from mcap rather than assuming it.
+ */
+function decodeCurve(base64: string): CurveState | null {
   const buf = Buffer.from(base64, 'base64');
   if (buf.length < OFF_COMPLETE + 1) return null;
+
+  const virtualTokens = Number(buf.readBigUInt64LE(OFF_VIRTUAL_TOKEN));
+  const virtualSolLamports = Number(buf.readBigUInt64LE(OFF_VIRTUAL_SOL));
+  const totalSupply = Number(buf.readBigUInt64LE(OFF_TOTAL_SUPPLY));
+
+  const virtualSol = virtualSolLamports / LAMPORTS;
+  const mcapSol = virtualTokens > 0 ? virtualSol * (totalSupply / virtualTokens) : null;
+
   return {
-    virtualSol: Number(buf.readBigUInt64LE(OFF_VIRTUAL_SOL)) / LAMPORTS,
+    virtualSol,
     realSol: Number(buf.readBigUInt64LE(OFF_REAL_SOL)) / LAMPORTS,
+    priceSol: mcapSol !== null && totalSupply > 0 ? mcapSol / (totalSupply / 1e6) : null,
+    mcapSol,
     complete: buf.readUInt8(OFF_COMPLETE) === 1,
   };
 }
@@ -560,6 +604,8 @@ export class PumpFunStream {
       ageSeconds: (now - slot.launchedAt) / 1000,
       realSol: state.realSol,
       virtualSol: state.virtualSol,
+      priceSol: state.priceSol,
+      mcapSol: state.mcapSol,
       complete: state.complete,
     });
 

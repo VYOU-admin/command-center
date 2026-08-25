@@ -61,6 +61,8 @@ export interface OutcomeConfig {
   unobservedDeathAfterHours: number;
   /** SOL levels at which trades-taken and seconds-taken are recorded. */
   velocityThresholdsSol: number[];
+  /** Token ages, in seconds, at which curve state is snapshotted. */
+  snapshotSeconds: number[];
   /** Keep full per-trade samples this long, then collapse to a summary. */
   rawSampleRetentionDays: number;
   /** Graduates are 0.2% of rows, so they keep full fidelity far longer. */
@@ -142,15 +144,31 @@ export function parseOutcomeConfig(
         }
         return v;
       })
-    : [1, 5, 10, 30];
+    : [10, 25, 50];
   if (velocityThresholdsSol.length === 0) {
     throw new Error(`${ctx}: velocity_thresholds_sol must list at least one SOL level`);
+  }
+
+  const rawSnapshots = options['snapshot_seconds'];
+  const snapshotSeconds = Array.isArray(rawSnapshots)
+    ? rawSnapshots.map((v, i) => {
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+          throw new Error(
+            `${ctx}: snapshot_seconds[${i}] must be a positive number, got ${String(v)}`,
+          );
+        }
+        return v;
+      })
+    : [30, 60, 120];
+  if (snapshotSeconds.length === 0) {
+    throw new Error(`${ctx}: snapshot_seconds must list at least one age`);
   }
 
   return {
     deathAfterIdleMinutes: configNumber(options, 'death_after_idle_minutes', ctx, 60),
     unobservedDeathAfterHours: configNumber(options, 'unobserved_death_after_hours', ctx, 24),
     velocityThresholdsSol,
+    snapshotSeconds,
     rawSampleRetentionDays: configNumber(r, 'raw_sample_days', ctx, 30),
     graduateSampleRetentionDays: configNumber(r, 'graduate_sample_days', ctx, 180),
     deadSampleRetentionDays: configNumber(r, 'dead_sample_days', ctx, 7),

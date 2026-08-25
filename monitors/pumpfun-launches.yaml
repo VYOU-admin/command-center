@@ -44,26 +44,24 @@ options:
     # resource: concurrent bonding-curve subscriptions, hard-limited to 100 by
     # the RPC. Figures below are MEASURED off the live stream, not estimated.
     #
-    #   launch rate                    ~48.7/min typical, 76/min observed
-    #   instrumented share             ~29% of launches (measured in prod)
-    #   steady-state concurrent slots  43-61
-    #   PEAK concurrent slots          89   <-- measured, during a burst
+    # SLOT BUDGET. Measured at a 4-minute window: median 38 concurrent, p90 56,
+    # PEAK 78 of 95, zero denials. Peak runs about 2x median, so bursts are what
+    # size this, not the average.
     #
-    # The peak is what sizes this, not the average. At a 5-minute window the
-    # peak reached 89 of 95 available slots — 94% utilisation, with the next
-    # burst spilling over.
+    # Shortened to 3 minutes to buy slots for a larger control group. That costs
+    # nothing this monitor is currently measuring: the snapshots are taken at
+    # 30/60/120s, so 180s of observation covers all of them with 50% margin, and
+    # the 4th minute was contributing tail that no configured feature reads.
     #
-    # Spilling over is not a crash: instrument() refuses to exceed the cap, so
-    # the connection is never at risk of a 1013 close. The cost is subtler and
-    # worse for the dataset. Denied tokens are silently not sampled, and denial
-    # happens precisely when launch rate is highest — so the missing tokens are
-    # not a random subset, they are correlated with platform activity. That is a
-    # confound baked into the data rather than a gap visible in it.
+    # Freed ~25% of slot-time (projected peak 78 -> ~59), which is then spent on
+    # control_sample_rate below. Projected peak after both changes: ~79 of 95.
     #
-    # Hence 4 minutes: peak drops to ~71, leaving real burst headroom.
-    # Denials are logged as "curve subscription slots exhausted" — if that
-    # appears, shorten this further or lower control_sample_rate.
-    dense_window_minutes: 4
+    # Denials are not a crash — instrument() refuses to exceed the cap, so the
+    # connection is never at risk of a 1013 close. The cost is subtler: a denied
+    # token is silently unsampled, and denial happens precisely when launch rate
+    # is highest, so the gap correlates with platform activity instead of being
+    # random. Watch for "curve subscription slots exhausted" in the logs.
+    dense_window_minutes: 3
 
     # Initial market cap above the 30 SOL platform default is the strongest
     # single t=0 predictor in the survival literature (Cox HR 4.51), so these
@@ -79,7 +77,17 @@ options:
     # tokens the filter already liked, and the filter itself would be
     # unfalsifiable. Membership is a hash of the mint, not a coin flip, so it is
     # reproducible months later.
-    control_sample_rate: 0.06
+    #
+    # Raised from 0.06 to 0.15 (~2.5x), funded by the shorter window above.
+    # At ~48.7 launches/min this samples ~6/min, or ~8,000/day, which at the
+    # platform's ~0.2% base rate should yield on the order of 15 control
+    # graduations per day — enough that within a week the filtered and control
+    # arms can be compared with something better than an anecdote.
+    #
+    # This is the single most important number here for answering "is the
+    # filter doing anything", because that question can only be answered
+    # against launches the filter rejected.
+    control_sample_rate: 0.15
 
   # Age at which a launch enters the graduation-rate cohort. Must match
   # pumpfun-outcomes' unobserved_death_after_hours: that is when a token we

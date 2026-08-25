@@ -29,7 +29,28 @@ options:
   # is about TRADES — reaching a level in fewer trades predicts graduation —
   # while elapsed time is the intuitive reading of velocity. Both are stored so
   # the dataset can settle which one carries the signal.
-  velocity_thresholds_sol: [1, 5, 10, 30]
+  #
+  # Raised from [1, 5, 10, 30]. Those levels measured nothing: the deployer's
+  # own opening buy is typically 1-3 SOL, so 1, 5 and 10 SOL were all crossed on
+  # trade #1 by the median token in BOTH the graduated and dead groups. A
+  # threshold below the opening buy reports the dev's own purchase, not
+  # anything the market did.
+  #
+  # Kept below the ~85 SOL graduation point on purpose. A threshold at or near
+  # it would leak the outcome, since reaching 85 SOL is graduating.
+  velocity_thresholds_sol: [10, 25, 50]
+
+  # Token ages at which curve state is snapshotted: SOL on curve, cumulative
+  # trades, price, and market cap.
+  #
+  # Fixed-time snapshots are the leakage-free counterpart to the level-based
+  # thresholds above, and they are what makes return-from-entry questions
+  # answerable at all — "what would buying at t=60s have returned" needs a price
+  # at a time, not a time at a price.
+  #
+  # Must stay inside the launch monitor's dense_window_minutes, or snapshots
+  # land past where observation stopped and come back flagged censored.
+  snapshot_seconds: [30, 60, 120]
 
   # RETENTION. Graduations are ~0.2% of rows, so keeping them at full fidelity
   # costs almost nothing, while tokens that died without ever trading are both

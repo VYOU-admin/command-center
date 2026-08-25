@@ -119,10 +119,11 @@ async function persistSamples(
 
   await client.query(
     `insert into pump_curve_samples
-       (monitor_id, mint, observed_at, trade_seq, age_seconds, real_sol, virtual_sol, complete)
+       (monitor_id, mint, observed_at, trade_seq, age_seconds, real_sol, virtual_sol,
+        price_sol, mcap_sol, complete)
      select $1, * from unnest(
        $2::text[], $3::timestamptz[], $4::int[], $5::numeric[],
-       $6::numeric[], $7::numeric[], $8::boolean[]
+       $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[], $10::boolean[]
      )`,
     [
       monitorId,
@@ -132,6 +133,8 @@ async function persistSamples(
       samples.map((s) => s.ageSeconds),
       samples.map((s) => s.realSol),
       samples.map((s) => s.virtualSol),
+      samples.map((s) => s.priceSol),
+      samples.map((s) => s.mcapSol),
       samples.map((s) => s.complete),
     ],
   );

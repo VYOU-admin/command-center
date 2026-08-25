@@ -88,6 +88,13 @@ create table if not exists pump_curve_samples (
   age_seconds  numeric,
   real_sol     numeric,
   virtual_sol  numeric,
+  -- Price and market cap are SOL-denominated, not USD, and deliberately so:
+  -- a return measured against SOL isolates the token's own move from whatever
+  -- SOL did over the same minutes. Converting to USD later needs only a SOL
+  -- price at the timestamp; recovering the SOL-denominated move from a USD
+  -- figure needs the same rate and loses precision doing it.
+  price_sol    numeric,
+  mcap_sol     numeric,
   complete     boolean     not null default false
 );
 
@@ -112,6 +119,21 @@ create table if not exists pump_velocity_summary (
   monitor_id    text not null,
   mint          text not null,
   thresholds    jsonb,
+  -- Fixed-time state: [{t, sol, trades, price_sol, mcap_sol, censored}, ...]
+  --
+  -- This exists because level-based features leak the outcome. "Trades to reach
+  -- 85 SOL" cannot predict graduation, because reaching 85 SOL IS graduating —
+  -- comparing groups on it measures the definition, not a signal. A snapshot at
+  -- a fixed age does not leak, and it is also the only shape that supports
+  -- "what would entering at t have returned", since that question needs a price
+  -- at a time rather than a time at a price.
+  --
+  -- The censored flag marks a snapshot whose timestamp is past where observation
+  -- stopped. Those must read as unknown, never as zero.
+  snapshots     jsonb,
+  -- How far into the token's life observation actually reached. Every snapshot
+  -- and threshold has to be read against this or absence looks like failure.
+  observed_to_seconds numeric,
   peak_sol      numeric,
   total_trades  integer,
   sol_per_trade numeric,
@@ -135,4 +157,15 @@ create table if not exists pump_deployer_stats (
 
 create index if not exists pump_deployer_rate_idx
   on pump_deployer_stats (monitor_id, graduation_rate desc nulls last, graduations desc);
+
+-- Columns added after the tables were already live. ADD COLUMN IF NOT EXISTS is
+-- idempotent, so this is safe to re-run on every boot alongside the creates.
+--
+-- Rows written before this deploy have null price_sol/mcap_sol and cannot be
+-- backfilled: the raw account state carried the token reserves that price is
+-- derived from, and only the SOL side was decoded and kept.
+alter table pump_curve_samples    add column if not exists price_sol numeric;
+alter table pump_curve_samples    add column if not exists mcap_sol  numeric;
+alter table pump_velocity_summary add column if not exists snapshots jsonb;
+alter table pump_velocity_summary add column if not exists observed_to_seconds numeric;
 `;

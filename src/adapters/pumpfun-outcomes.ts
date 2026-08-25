@@ -92,25 +92,56 @@ async function computeVelocitySummaries(
      ),
      totals as (
        select s.mint,
-              max(s.real_sol)  as peak_sol,
-              max(s.trade_seq) as total_trades
+              max(s.real_sol)    as peak_sol,
+              max(s.trade_seq)   as total_trades,
+              max(s.age_seconds) as observed_to
          from pump_curve_samples s
          join cand c on c.mint = s.mint
         where s.monitor_id = $1
         group by s.mint
+     ),
+     snaps as (
+       select c.mint, sn.sec, x.real_sol, x.trade_seq, x.price_sol, x.mcap_sol,
+              -- Observation stops when the subscription slot is recycled. A
+              -- snapshot past that point is unknown, not zero, and mislabelling
+              -- it would read as "the token flatlined" when we simply stopped
+              -- watching.
+              (t.observed_to < sn.sec) as censored
+         from cand c
+        cross join unnest($4::numeric[]) as sn(sec)
+         join totals t on t.mint = c.mint
+         left join lateral (
+           select s.real_sol, s.trade_seq, s.price_sol, s.mcap_sol
+             from pump_curve_samples s
+            where s.monitor_id = $1 and s.mint = c.mint and s.age_seconds <= sn.sec
+            order by s.age_seconds desc
+            limit 1
+         ) x on true
      )
      insert into pump_velocity_summary
-       (monitor_id, mint, thresholds, peak_sol, total_trades, sol_per_trade)
+       (monitor_id, mint, thresholds, snapshots, observed_to_seconds,
+        peak_sol, total_trades, sol_per_trade)
      select $1, t.mint,
             (select jsonb_agg(
                       jsonb_build_object('sol', c.sol, 'trades', c.trades, 'seconds', c.seconds)
                       order by c.sol)
                from crossed c where c.mint = t.mint),
+            (select jsonb_agg(
+                      jsonb_build_object(
+                        't', s.sec,
+                        'sol', case when s.censored then null else s.real_sol end,
+                        'trades', case when s.censored then null else s.trade_seq end,
+                        'price_sol', case when s.censored then null else s.price_sol end,
+                        'mcap_sol', case when s.censored then null else s.mcap_sol end,
+                        'censored', s.censored)
+                      order by s.sec)
+               from snaps s where s.mint = t.mint),
+            t.observed_to,
             t.peak_sol, t.total_trades,
             t.peak_sol / nullif(t.total_trades, 0)
        from totals t
      on conflict (monitor_id, mint) do nothing`,
-    [monitorId, cfg.velocityThresholdsSol, cfg.maxRowsPerPass],
+    [monitorId, cfg.velocityThresholdsSol, cfg.maxRowsPerPass, cfg.snapshotSeconds],
   );
   return res.rowCount ?? 0;
 }
