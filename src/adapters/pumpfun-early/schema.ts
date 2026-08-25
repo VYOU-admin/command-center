@@ -173,6 +173,15 @@ alter table early_tokens    add column if not exists keep_reason         text;
 alter table early_tokens    add column if not exists decided_at          timestamptz;
 alter table early_tokens    add column if not exists curve_sol_at_decision numeric;
 alter table early_tokens    add column if not exists snapshots_pruned    boolean not null default false;
+-- Set once the dense early grid has been thinned for a token that turned out
+-- uninteresting. Separate from snapshots_pruned: that flag tracks the
+-- carried-forward collapse, this one the second tier.
+alter table early_tokens    add column if not exists dense_pruned        boolean not null default false;
+
+-- Finds the next batch due for dense thinning in one index scan.
+create index if not exists early_tokens_dense_prune_idx
+  on early_tokens (monitor_id, launched_at)
+  where not dense_pruned;
 
 -- Finds the next batch of tokens due for collapsing in one index scan, rather
 -- than sequentially scanning every token ever launched.

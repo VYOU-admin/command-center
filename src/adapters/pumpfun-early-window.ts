@@ -439,6 +439,90 @@ async function pruneSnapshots(
   return { pruned: result.rowCount ?? 0, tokens: mints.length };
 }
 
+/**
+ * Retention, second tier: thin the dense early grid.
+ *
+ * WHY THIS EXISTS. The first tier collapses carried-forward duplicates between
+ * ten minutes and six hours. Measured against the real table that is only ~17%
+ * of the rows, while the dense sub-minute grid inside the first ten minutes is
+ * ~80%. A policy that protects 80% of the volume cannot bound growth no matter
+ * how its day threshold is tuned, which is exactly how a 500 MB volume filled
+ * in ten hours at ~90,000 rows/hour.
+ *
+ * WHAT IS THINNED, AND ONLY THIS. A token qualifies only when every one of the
+ * following is true, so the thinning can never touch a token that turned out to
+ * matter:
+ *
+ *   - it was DROPPED at the ten-minute decision (decided, no keep_reason), so
+ *     it is neither an activity keeper nor part of the random control arm
+ *   - it never graduated
+ *   - it never traded at all (last_trade_at is null, which the tracker only
+ *     writes for tokens with at least one trade)
+ *   - it never produced an alert
+ *   - it is older than dense_purge_hours
+ *
+ * WHAT SURVIVES EVEN THEN — the protect list:
+ *
+ *   - the five-minute mark, the entry point every return is measured from
+ *   - every outcome mark, the outcome variable itself
+ *   - the first row of each distinct price run, so the series still
+ *     reconstructs exactly as a step function rather than approximately
+ *   - every row of every token that appears in early_alerts, without exception
+ *
+ * A token is examined once and marked, so a pass costs the same however large
+ * the table grows.
+ */
+async function thinDenseGrid(
+  client: PoolClient,
+  monitorId: string,
+  cfg: EarlyConfig,
+): Promise<{ removed: number; tokens: number }> {
+  const batch = await client.query<{ mint: string }>(
+    `select t.mint from early_tokens t
+      where t.monitor_id = $1
+        and not t.dense_pruned
+        and t.launched_at < now() - ($2 || ' hours')::interval
+        and t.decided_at is not null
+        and t.keep_reason is null
+        and not t.graduated
+        and t.last_trade_at is null
+        and not exists (select 1 from early_alerts a where a.mint = t.mint)
+      order by t.launched_at
+      limit $3`,
+    [monitorId, cfg.densePurgeHours, cfg.retentionBatchTokens],
+  );
+  const mints = batch.rows.map((r) => r.mint);
+  if (mints.length === 0) return { removed: 0, tokens: 0 };
+
+  const result = await client.query(
+    `with candidates as (
+       select id, seconds_since_launch, is_outcome_mark, price_usd_effective,
+              lag(price_usd_effective) over (
+                partition by mint order by seconds_since_launch
+              ) as prev_price
+         from early_snapshots
+        where monitor_id = $1 and mint = any($2::text[])
+     ),
+     doomed as (
+       select id from candidates
+        where seconds_since_launch <> $3
+          and not is_outcome_mark
+          and prev_price is not null
+          and price_usd_effective is not distinct from prev_price
+     )
+     delete from early_snapshots s using doomed d where s.id = d.id`,
+    [monitorId, mints, cfg.fiveMinuteMarkSeconds],
+  );
+
+  await client.query(
+    `update early_tokens set dense_pruned = true
+      where monitor_id = $1 and mint = any($2::text[])`,
+    [monitorId, mints],
+  );
+
+  return { removed: result.rowCount ?? 0, tokens: mints.length };
+}
+
 /* ---------------------------------------------------------------- adapter */
 
 interface Drain {
@@ -576,6 +660,15 @@ const adapter: SourceAdapter<Drain> = {
     if (drain.prune) {
       const { pruned, tokens } = await pruneSnapshots(client, ctx.monitorId, drain.cfg);
       if (tokens > 0) ctx.log.info('snapshots pruned', { pruned, tokens_collapsed: tokens });
+
+      const dense = await thinDenseGrid(client, ctx.monitorId, drain.cfg);
+      if (dense.tokens > 0) {
+        ctx.log.info('dense grid thinned', {
+          rows_removed: dense.removed,
+          tokens_thinned: dense.tokens,
+          older_than_hours: drain.cfg.densePurgeHours,
+        });
+      }
     }
 
     return tokens + snapshots;

@@ -43,6 +43,15 @@ export interface EarlyConfig {
   retentionMaxRowsPerPass: number;
   /** Tokens collapsed per maintenance pass. Bounds the work, not the backlog. */
   retentionBatchTokens: number;
+  /**
+   * Hours after launch at which the dense early grid is thinned for tokens that
+   * turned out uninteresting. The first tier only collapses carried-forward
+   * duplicates in the mid-window, which is a small minority of the rows; the
+   * dense sub-minute grid is the bulk, so without this growth is unbounded.
+   */
+  densePurgeHours: number;
+  /** The mark the dense thinning always preserves. Kept in sync with the alert. */
+  fiveMinuteMarkSeconds: number;
   /** Minutes between maintenance passes. The drain runs far more often. */
   retentionIntervalMinutes: number;
   /**
@@ -152,6 +161,8 @@ export function parseEarlyConfig(
     retentionFullDays: configNumber(r, 'full_resolution_days', ctx, 3),
     retentionMaxRowsPerPass: configNumber(r, 'max_rows_per_pass', ctx, 50000),
     retentionBatchTokens: configNumber(r, 'batch_tokens', ctx, 500),
+    densePurgeHours: configNumber(r, 'dense_purge_hours', ctx, 24),
+    fiveMinuteMarkSeconds: configNumber(r, 'protect_mark_seconds', ctx, 300),
     streamSilenceReconnectSeconds: configNumber(
       options as Record<string, unknown>,
       'stream_silence_reconnect_seconds',

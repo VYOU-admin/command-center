@@ -139,6 +139,30 @@ options:
   # 500 tokens every 10 minutes clears 72,000/day against ~32,000 launches/day,
   # so the batch keeps ahead of the inflow with room for a backlog.
   retention:
+    # TIER 2 — the one that actually bounds growth.
+    #
+    # Tier 1 below only collapses carried-forward duplicates between ten
+    # minutes and six hours. Measured against the real table that is ~17% of
+    # the rows, while the dense sub-minute grid inside the first ten minutes is
+    # ~80%. A policy protecting 80% of the volume cannot bound growth however
+    # its day threshold is tuned — which is how a 500 MB volume filled in ten
+    # hours at ~90,000 rows/hour.
+    #
+    # After this many hours the dense grid is thinned, but ONLY for a token
+    # that was dropped at the ten-minute decision, never graduated, never
+    # traded at all, and never produced an alert. Anything that turned out to
+    # matter is untouched.
+    #
+    # Survives even then: the five-minute mark, every outcome mark, the first
+    # row of each distinct price run, and every row of every token appearing
+    # in early_alerts. Verified against fixtures: 43 rows -> 6 on a qualifying
+    # token, with all seven protected classes left whole.
+    dense_purge_hours: 24
+    # The mark the thinning always preserves — the entry point every return is
+    # measured from. Kept configurable so it cannot drift from the alert's
+    # trigger mark silently.
+    protect_mark_seconds: 300
+
     full_resolution_days: 3
     batch_tokens: 500
     interval_minutes: 10

@@ -1,0 +1,50 @@
+# Postgres volume usage watch.
+#
+# The volume filled and every monitor stopped writing with "could not extend
+# file: No space left on device". The spine watches whether monitors RUN, not
+# whether the disk they write to has room, so nothing saw it coming. This
+# closes that gap.
+#
+# Alerts go to the system channel: a full disk is an operational failure, not a
+# crypto or oil finding, and belongs with the other outage alerts.
+
+id: postgres-disk
+name: Postgres Disk
+source: postgres-disk
+enabled: true
+
+# Cheap: two catalogue queries. Frequent enough to catch a fast fill, rare
+# enough that the sample history stays small.
+schedule: 15m
+
+alerts:
+  channel: system
+
+options:
+  # ⚠️ MUST MATCH THE RAILWAY VOLUME. Postgres cannot see the size of the
+  # filesystem it sits on — pg_database_size reports the database, not the
+  # disk — so this is the only source of truth for the ceiling. If the volume
+  # is resized, change this in the same breath or every projection below
+  # describes a disk that no longer exists.
+  #
+  # Resized from 0.5 GB to 5 GB on 2026-08-25 after the volume filled.
+  volume_gb: 5
+
+  thresholds:
+    # Two levels, alerting only when the level RISES: crossing 70% says it
+    # once rather than every fifteen minutes, and 85% still says it again.
+    # Dropping back below clears the state so a later crossing is announced
+    # afresh.
+    warn_pct: 70
+    critical_pct: 85
+
+  # Growth is measured against the oldest sample inside this window, so one
+  # spike cannot dominate the projection. Under 30 minutes of history the
+  # growth rate is reported as unknown rather than guessed — a confident wrong
+  # number about time-until-full is worse than admitting there isn't one yet.
+  growth_window_hours: 6
+  min_samples_for_projection: 2
+
+  # A watcher that grows without bound is a bad watcher. At 15m this is ~2,880
+  # rows a month, a few hundred kB.
+  sample_retention_days: 30
