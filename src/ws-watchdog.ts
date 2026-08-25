@@ -16,13 +16,17 @@
  * that has heard nothing for longer than its threshold is treated as dead
  * regardless of what readyState claims.
  *
+ * NOTE ON LOCATION: this lives outside src/adapters/ deliberately. Every file
+ * in that directory is loaded as a source adapter at boot and must default-
+ * export one, so a shared helper placed there stops the process from starting.
+ *
  * The threshold is a data-rate question, so it belongs to the caller: the trade
  * stream carries ~116 messages/second and the launch feed ~1/second, but both
  * are orders of magnitude busier than any sane threshold, which is what makes a
  * single configured value workable for both.
  */
 
-import type { Logger } from '../logger.js';
+import type { Logger } from './logger.js';
 
 /** How often the clock is checked, relative to the threshold. */
 const CHECK_DIVISOR = 4;

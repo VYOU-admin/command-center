@@ -24,7 +24,7 @@
  */
 
 import type { Logger } from '../../logger.js';
-import { SilenceWatchdog } from '../ws-watchdog.js';
+import { SilenceWatchdog } from '../../ws-watchdog.js';
 import type { StreamConfig } from './config.js';
 
 export interface LaunchEvent {

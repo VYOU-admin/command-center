@@ -8,7 +8,7 @@
  */
 
 import type { Logger } from '../../logger.js';
-import { SilenceWatchdog } from '../ws-watchdog.js';
+import { SilenceWatchdog } from '../../ws-watchdog.js';
 import type { EarlyConfig } from './config.js';
 import type { LaunchInfo, TrackedToken } from './tracker.js';
 

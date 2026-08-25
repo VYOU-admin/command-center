@@ -35,7 +35,7 @@
 
 import { createHash } from 'node:crypto';
 import type { Logger } from '../../logger.js';
-import { SilenceWatchdog } from '../ws-watchdog.js';
+import { SilenceWatchdog } from '../../ws-watchdog.js';
 
 /** Anchor derives an event's discriminator from sha256("event:<Name>"). */
 const discriminator = (name: string): Buffer =>
