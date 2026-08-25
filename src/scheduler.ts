@@ -119,7 +119,7 @@ export class Scheduler {
     // Adapters raise content alerts (a token entering the top N) while writing,
     // but network I/O must not happen inside the persist transaction. They are
     // collected here and flushed once the write is durable.
-    const pendingAlerts: Alert[] = [];
+    const pendingAlerts: { alert: Alert; channel?: string }[] = [];
 
     try {
       const adapter = this.opts.adapters.get(config.source);
@@ -134,7 +134,7 @@ export class Scheduler {
         log: runLog,
         signal: controller.signal,
         db: this.opts.pool,
-        queueAlert: (alert) => pendingAlerts.push(alert),
+        queueAlert: (alert, channel) => pendingAlerts.push({ alert, channel }),
       };
 
       const records = await adapter.fetch(ctx);
@@ -149,9 +149,10 @@ export class Scheduler {
       );
 
       // Content alerts belong to the monitor's topic channel; failures do not,
-      // and are routed to the system channel by the Alerter instead.
-      for (const alert of pendingAlerts) {
-        await this.opts.discord.send(alert, config.alerts.channel);
+      // and are routed to the system channel by the Alerter instead. An adapter
+      // may override per alert when it raises both kinds from one run.
+      for (const { alert, channel } of pendingAlerts) {
+        await this.opts.discord.send(alert, channel ?? config.alerts.channel);
       }
 
       runLog.info('run succeeded', {

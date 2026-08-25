@@ -311,6 +311,100 @@ Raw samples are only pruned after their velocity summary exists.
   watched for its first 5 minutes. Trades after that are not recorded, so
   `trade_count` is a count within the window and not a lifetime total.
 
+## The oil price monitor
+
+Scrapes small business heating-oil sites every 15 minutes and stores every
+quoted price, append-only. Every scrape writes a row for every source and every
+gallon band whether or not anything moved — the unchanged rows are the history.
+A table that only recorded changes could tell you a price was $4.58 on two dates
+but not whether it held steady in between or simply was not checked.
+
+| table               | holds                                                    |
+| ------------------- | -------------------------------------------------------- |
+| `oil_observations`  | append-only, one row per source per gallon band per scrape |
+| `oil_price_history` | vendor-published history, backfilled once, keyed by date  |
+| `oil_source_state`  | per-source failure streaks and backfill status            |
+| `oil_alert_state`   | change-alert and daily-digest bookkeeping                 |
+
+### Sources fail independently
+
+Each site is scraped inside its own try/catch, so one changing its HTML cannot
+stop the others storing. The run only fails when *every* source fails.
+
+That creates a gap the spine cannot see. The registry counts failures per
+**monitor**, so a single permanently broken scraper would sit inside runs that
+report success and never raise anything — the exact silent failure the rest of
+this project is built against. `oil_source_state` therefore mirrors the spine's
+failure-streak logic one level down, per source, and alerts to the **system**
+channel after three consecutive failures. Price alerts go to `oil`; a broken
+parser is an operational problem, not a price update.
+
+### A wrong price is worse than a missing one
+
+Parsers throw rather than return something plausible. A null or a zero would
+flow into the comparison table, the change alert, and the history, and nothing
+downstream could tell it from a real number. So:
+
+- every field that must exist is asserted, and its absence is an error
+- prices are range-checked against $0.50–$25/gal, which catches a layout change
+  making a regex match some other number on the page
+- `price_per_gallon` is `not null check (> 0)` at the database level too
+- a source that breaks stores **nothing** and says so
+
+The distinction that matters is between *broken* and *legitimately empty*. A
+missing price **table** means the layout changed and the parser is now guessing,
+so it throws. A price table present but holding no rows is a dealer who
+currently lists no prices, which really happens — so it yields no rows rather
+than taking down the scrape. Every dealer on a page being empty throws again,
+because that is not ten coincidences.
+
+Vendor data is not always sane, either. McKinley's own historical table contains
+`9/31/24`, a date that does not exist, and a `7/30/90` that a two-digit year
+pivots into 1990 — decades before the table begins. Both are reported and
+skipped rather than coerced: there is no defensible way to guess whether 9/31
+meant the 30th or the 1st, and inventing one would fabricate a published price.
+
+### Scraping considerately
+
+These are small businesses on shared hosting. The monitor identifies itself with
+a real user agent including a link back to this repo, spaces requests three
+seconds apart *across the whole run* rather than per source, retries twice, and
+gives up on a hang rather than holding a socket open. A full scrape is three
+requests, so all sources together are touched roughly 288 times a day.
+
+Two sites needed more than a fetch. **McKinley** is a 1990s frameset whose
+homepage contains no prices at all, only `<frame>` tags — the price and the
+historical table are separate child documents whose filenames contain spaces.
+**CashHeatingOil** is zip-driven, and the zip's URL slug is resolved by posting
+the site's own lookup form and following the redirect rather than guessing that
+`06716` maps to `wolcott_ct`. A guess would break silently the day a slug differs
+from the town name.
+
+`LISTING ID` there is a **page**-level value, one per zip search, not per dealer.
+Each listing carries a hidden `dealerid` instead, and that is what gets stored:
+without it, the dealer list reordering is indistinguishable from a price change
+and would fire a false alert.
+
+### Alerts
+
+One alert per scrape, across all sources, not one per site — the question is
+"did anything move anywhere". Nothing moving is silent. A daily digest goes out
+at 07:00 `America/New_York` whether or not anything changed, in a named zone so
+it does not drift twice a year.
+
+Discord caps embeds at 25 fields and 1024 characters each, and a scrape is well
+over a hundred gallon bands, so the message leads with a comparable headline
+price per source and then lists what actually moved. Everything is in Postgres
+regardless.
+
+### Forbes is not enabled
+
+`forbesfueloil.com` serves a BotStopper proof-of-work challenge on every path,
+including `/wp-json/` and the sitemap. Reading it means defeating an access
+control the owner deliberately installed rather than parsing a public page, so
+the source ships disabled and its scraper throws if enabled, to make sure it is
+never turned on by accident.
+
 ## Designing against silent failure
 
 A monitor that stops working breaks in two different shapes, and only one of

@@ -59,8 +59,13 @@ export interface AdapterContext {
    * Queue a Discord alert. Deliberately queued rather than sent: alerts are
    * raised inside the persist transaction but must not perform network I/O
    * while holding it open, so the scheduler flushes them after the commit.
+   *
+   * Defaults to the monitor's own `alerts.channel`. The override exists for
+   * adapters that scrape several sources in one run: one source breaking is an
+   * operational failure and belongs in the system channel, even though that
+   * monitor's content alerts go somewhere topic-specific.
    */
-  queueAlert(alert: Alert): void;
+  queueAlert(alert: Alert, channel?: string): void;
 }
 
 export interface PanelContext {

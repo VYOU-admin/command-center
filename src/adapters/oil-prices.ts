@@ -1,0 +1,378 @@
+/**
+ * Home heating oil price monitor.
+ *
+ * Scrapes several small business sites on a schedule and stores every quoted
+ * price, append-only. Three things shape the design:
+ *
+ * 1. SOURCES FAIL INDEPENDENTLY. One site changing its HTML must not stop the
+ *    others from storing. Each source is scraped inside its own try/catch, and
+ *    a failing one is tracked per source rather than only per run — otherwise a
+ *    permanently broken scraper would live inside successful runs and never be
+ *    noticed, which is the silent failure this whole project is built against.
+ *
+ * 2. A WRONG PRICE IS WORSE THAN A MISSING ONE. Parsers throw instead of
+ *    returning a plausible-looking number, prices are range-checked, and the
+ *    price column is `not null check (> 0)`. A source that breaks stores
+ *    nothing and says so.
+ *
+ * 3. ALERTS ARE CROSS-SOURCE. The question being asked is "did anything move
+ *    anywhere", so one scrape produces at most one change alert covering every
+ *    source, not one alert per site.
+ */
+
+import type { AdapterContext, PanelContext, SourceAdapter } from './types.js';
+import type { PoolClient } from '../store/db.js';
+import { parseOilConfig, type OilConfig, type SourceConfig } from './oil/config.js';
+import { SCHEMA } from './oil/schema.js';
+import { createFetcher } from './oil/fetch.js';
+import { SCRAPERS, scrapeMcKinleyHistory, type Observation } from './oil/sources.js';
+import { renderOilPanel } from '../web/oil-panel.js';
+import { buildChangeAlert, buildDigestAlert, buildSourceFailureAlert, diffPrices, localParts, type PriceKey } from './oil/alerts.js';
+
+interface SourceResult {
+  source: SourceConfig;
+  ok: boolean;
+  observations: Observation[];
+  history: { priceDate: string; price: number }[];
+  error: string | null;
+  notes: Record<string, unknown>;
+}
+
+interface ScrapeRun {
+  cfg: OilConfig;
+  results: SourceResult[];
+}
+
+/* ------------------------------------------------------------------ fetch */
+
+async function scrapeAll(ctx: AdapterContext, cfg: OilConfig): Promise<SourceResult[]> {
+  const fetcher = createFetcher(cfg, ctx.log, ctx.signal);
+  const results: SourceResult[] = [];
+
+  // Sequential on purpose. Running these in parallel would defeat the shared
+  // request spacing and hit several small sites at once.
+  for (const source of cfg.sources.filter((s) => s.enabled)) {
+    const scraper = SCRAPERS[source.id];
+    if (!scraper) {
+      results.push({
+        source,
+        ok: false,
+        observations: [],
+        history: [],
+        notes: {},
+        error: `no scraper implemented for source "${source.id}"`,
+      });
+      continue;
+    }
+
+    try {
+      const out = await scraper(source, fetcher, ctx.log);
+      if (out.observations.length === 0) {
+        throw new Error('scrape produced no observations');
+      }
+
+      let history: { priceDate: string; price: number }[] = [];
+      if (source.backfill && (await needsBackfill(ctx, source.id))) {
+        history = await scrapeMcKinleyHistory(source, fetcher, ctx.log);
+        ctx.log.info('history backfill scraped', { source: source.id, rows: history.length });
+      }
+
+      results.push({ source, ok: true, observations: out.observations, history, notes: out.notes, error: null });
+      ctx.log.info('source scraped', {
+        source: source.id,
+        observations: out.observations.length,
+        history_rows: history.length,
+        ...out.notes,
+      });
+    } catch (err) {
+      const message = (err as Error).message;
+      results.push({ source, ok: false, observations: [], history: [], notes: {}, error: message });
+      // Loud, because a broken parser is the failure mode that matters here.
+      ctx.log.error('source scrape failed', { source: source.id, error: message });
+    }
+  }
+
+  return results;
+}
+
+async function needsBackfill(ctx: AdapterContext, source: string): Promise<boolean> {
+  const result = await ctx.db.query(
+    `select backfilled_at from oil_source_state where monitor_id = $1 and source = $2`,
+    [ctx.monitorId, source],
+  );
+  return result.rows.length === 0 || result.rows[0].backfilled_at === null;
+}
+
+/* ---------------------------------------------------------------- persist */
+
+async function writeObservations(
+  client: PoolClient,
+  monitorId: string,
+  rows: Observation[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const result = await client.query(
+    `insert into oil_observations (
+       monitor_id, source, zip, city, state, listing_id, dealer_id, listing_position,
+       product, payment_type, gallon_min, gallon_max, price_per_gallon,
+       gallon_minimum, surcharge_note, price_date, delivery_date, price_updated_on
+     )
+     select $1, * from unnest(
+       $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::int[],
+       $9::text[], $10::text[], $11::int[], $12::int[], $13::numeric[],
+       $14::int[], $15::text[], $16::date[], $17::date[], $18::date[]
+     )`,
+    [
+      monitorId,
+      rows.map((r) => r.source),
+      rows.map((r) => r.zip),
+      rows.map((r) => r.city),
+      rows.map((r) => r.state),
+      rows.map((r) => r.listingId),
+      rows.map((r) => r.dealerId),
+      rows.map((r) => r.listingPosition),
+      rows.map((r) => r.product),
+      rows.map((r) => r.paymentType),
+      rows.map((r) => r.gallonMin),
+      rows.map((r) => r.gallonMax),
+      rows.map((r) => r.pricePerGallon),
+      rows.map((r) => r.gallonMinimum),
+      rows.map((r) => r.surchargeNote),
+      rows.map((r) => r.priceDate),
+      rows.map((r) => r.deliveryDate),
+      rows.map((r) => r.priceUpdatedOn),
+    ],
+  );
+  return result.rowCount ?? 0;
+}
+
+async function writeHistory(
+  client: PoolClient,
+  monitorId: string,
+  source: string,
+  rows: { priceDate: string; price: number }[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const result = await client.query(
+    `insert into oil_price_history (monitor_id, source, price_date, price_per_gallon)
+     select $1, $2, * from unnest($3::date[], $4::numeric[])
+     on conflict (monitor_id, source, price_date) do nothing`,
+    [monitorId, source, rows.map((r) => r.priceDate), rows.map((r) => r.price)],
+  );
+  return result.rowCount ?? 0;
+}
+
+/** Previous known price for every key, read before this scrape is inserted. */
+async function previousPrices(
+  client: PoolClient,
+  monitorId: string,
+): Promise<Map<string, { price: number; observedAt: Date }>> {
+  const result = await client.query(
+    `select distinct on (source, coalesce(zip,''), coalesce(dealer_id,''),
+                         coalesce(payment_type,''), product, coalesce(gallon_min,-1))
+            source, zip, dealer_id, payment_type, product, gallon_min, gallon_max,
+            price_per_gallon, observed_at
+       from oil_observations
+      where monitor_id = $1
+      order by source, coalesce(zip,''), coalesce(dealer_id,''),
+               coalesce(payment_type,''), product, coalesce(gallon_min,-1), observed_at desc`,
+    [monitorId],
+  );
+  const map = new Map<string, { price: number; observedAt: Date }>();
+  for (const r of result.rows) {
+    map.set(keyOf(r as PriceKey), {
+      price: Number(r.price_per_gallon),
+      observedAt: r.observed_at as Date,
+    });
+  }
+  return map;
+}
+
+export function keyOf(r: PriceKey): string {
+  return [
+    r.source,
+    r.zip ?? '',
+    r.dealer_id ?? (r as { dealerId?: string | null }).dealerId ?? '',
+    r.payment_type ?? (r as { paymentType?: string | null }).paymentType ?? '',
+    r.product,
+    r.gallon_min ?? (r as { gallonMin?: number | null }).gallonMin ?? '',
+  ].join('|');
+}
+
+async function updateSourceState(
+  ctx: AdapterContext,
+  client: PoolClient,
+  cfg: OilConfig,
+  results: SourceResult[],
+): Promise<void> {
+  for (const result of results) {
+    const backfilled = result.ok && result.history.length > 0;
+    const state = await client.query(
+      `insert into oil_source_state
+         (monitor_id, source, consecutive_failures, last_ok_at, last_attempt_at,
+          last_error, backfilled_at)
+       values ($1, $2, $3, $4, now(), $5, case when $6 then now() else null end)
+       on conflict (monitor_id, source) do update set
+         consecutive_failures = case when $7 then 0
+                                     else oil_source_state.consecutive_failures + 1 end,
+         last_ok_at      = case when $7 then now() else oil_source_state.last_ok_at end,
+         last_attempt_at = now(),
+         last_error      = $5,
+         backfilled_at   = case when $6 then now() else oil_source_state.backfilled_at end
+       returning consecutive_failures, failure_alert_sent`,
+      [
+        ctx.monitorId,
+        result.source.id,
+        result.ok ? 0 : 1,
+        result.ok ? new Date() : null,
+        result.error,
+        backfilled,
+        result.ok,
+      ],
+    );
+
+    const row = state.rows[0] as { consecutive_failures: number; failure_alert_sent: boolean };
+
+    // Per-source failure alerting, mirroring the spine's per-monitor logic one
+    // level down. Routed to the system channel: a broken scraper is an
+    // operational problem, not a price update.
+    if (!result.ok && row.consecutive_failures >= cfg.sourceFailureAlertAfter && !row.failure_alert_sent) {
+      ctx.queueAlert(
+        buildSourceFailureAlert(ctx, result.source, row.consecutive_failures, result.error),
+        'system',
+      );
+      await client.query(
+        `update oil_source_state set failure_alert_sent = true
+          where monitor_id = $1 and source = $2`,
+        [ctx.monitorId, result.source.id],
+      );
+    }
+
+    if (result.ok && row.failure_alert_sent) {
+      ctx.queueAlert(
+        {
+          level: 'recovery',
+          title: `Oil source ${result.source.label} is scraping again`,
+          description: `\`${result.source.id}\` parsed successfully after a failing streak.`,
+          fields: [{ name: 'Prices stored', value: String(result.observations.length), inline: true }],
+        },
+        'system',
+      );
+      await client.query(
+        `update oil_source_state set failure_alert_sent = false
+          where monitor_id = $1 and source = $2`,
+        [ctx.monitorId, result.source.id],
+      );
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- adapter */
+
+const adapter: SourceAdapter<ScrapeRun> = {
+  type: 'oil-prices',
+
+  validate(options, monitorId) {
+    const cfg = parseOilConfig(options, monitorId);
+    for (const source of cfg.sources) {
+      if (source.enabled && !SCRAPERS[source.id]) {
+        throw new Error(
+          `monitor "${monitorId}": source "${source.id}" is enabled but no scraper ` +
+            `exists for it. Available: ${Object.keys(SCRAPERS).join(', ')}`,
+        );
+      }
+    }
+  },
+
+  async migrate(client) {
+    await client.query(SCHEMA);
+  },
+
+  async fetch(ctx) {
+    const cfg = parseOilConfig(ctx.options, ctx.monitorId);
+    const results = await scrapeAll(ctx, cfg);
+
+    // Every source failing is a real run failure. Some failing is not: the
+    // others have good data that must still be stored, and the per-source
+    // state above is what makes the broken one visible.
+    if (results.every((r) => !r.ok)) {
+      throw new Error(
+        `all ${results.length} oil sources failed: ` +
+          results.map((r) => `${r.source.id}: ${r.error}`).join(' | '),
+      );
+    }
+
+    return [{ cfg, results }];
+  },
+
+  async persist(ctx, client, runs) {
+    const run = runs[0];
+    if (!run) return 0;
+    const { cfg, results } = run;
+
+    const previous = await previousPrices(client, ctx.monitorId);
+
+    const observations = results.flatMap((r) => r.observations);
+    const stored = await writeObservations(client, ctx.monitorId, observations);
+
+    let historyRows = 0;
+    for (const result of results) {
+      if (result.history.length > 0) {
+        historyRows += await writeHistory(client, ctx.monitorId, result.source.id, result.history);
+      }
+    }
+
+    await updateSourceState(ctx, client, cfg, results);
+
+    const changes = diffPrices(previous, observations);
+    const failed = results.filter((r) => !r.ok);
+
+    const now = new Date();
+    const { date: localDate, hour: localHour } = localParts(now, cfg.timezone);
+    // Read as text, not as a Date. last_digest_on already IS a local calendar
+    // date; letting the driver hand back a Date makes it midnight UTC, and
+    // converting that back into America/New_York lands on the previous day —
+    // so the comparison never matched and the digest fired on every run.
+    const alertState = await client.query(
+      `select to_char(last_digest_on, 'YYYY-MM-DD') as last_digest_on
+         from oil_alert_state where monitor_id = $1`,
+      [ctx.monitorId],
+    );
+    const lastDigestStr = (alertState.rows[0]?.last_digest_on as string | undefined) ?? null;
+    const digestDue = localHour >= cfg.digestHour && lastDigestStr !== localDate;
+
+    if (changes.length > 0) {
+      ctx.queueAlert(buildChangeAlert(cfg, observations, changes, failed));
+    }
+    if (digestDue) {
+      ctx.queueAlert(buildDigestAlert(cfg, observations, failed, localDate));
+    }
+
+    await client.query(
+      `insert into oil_alert_state (monitor_id, last_alert_at, last_digest_on, last_change_count)
+       values ($1, case when $2 then now() else null end, case when $3 then $4::date else null end, $5)
+       on conflict (monitor_id) do update set
+         last_alert_at     = case when $2 then now() else oil_alert_state.last_alert_at end,
+         last_digest_on    = case when $3 then $4::date else oil_alert_state.last_digest_on end,
+         last_change_count = $5`,
+      [ctx.monitorId, changes.length > 0, digestDue, localDate, changes.length],
+    );
+
+    ctx.log.info('oil scrape stored', {
+      sources_ok: results.filter((r) => r.ok).map((r) => r.source.id),
+      sources_failed: failed.map((r) => r.source.id),
+      observations: stored,
+      history_rows: historyRows,
+      price_changes: changes.length,
+      digest_sent: digestDue,
+    });
+
+    return stored + historyRows;
+  },
+
+  async renderPanel(ctx: PanelContext) {
+    return renderOilPanel(ctx);
+  },
+};
+
+export default adapter;

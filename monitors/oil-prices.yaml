@@ -1,0 +1,93 @@
+# Home heating oil prices.
+#
+# Scrapes several small business sites and stores every quoted price,
+# append-only — every scrape writes a row for every source and every gallon
+# band whether or not anything moved. The unchanged rows ARE the history: a
+# table that only recorded changes could not tell you whether a price held
+# steady or simply was not checked.
+#
+# Sources fail independently. One site changing its HTML does not stop the
+# others storing, and a source that keeps failing alerts on its own to the
+# system channel rather than hiding inside a run that looks successful.
+
+id: oil-prices
+name: Oil Prices
+source: oil-prices
+enabled: true
+schedule: 15m
+
+options:
+  # Says who we are and how to reach us. These are small businesses; an honest
+  # user agent is the least the monitor owes them.
+  user_agent: "command-center-oil-monitor/1.0 (+https://github.com/VYOU-admin/command-center)"
+
+  # Gallon quantity the dashboard and alerts normalise to. 150 is the only
+  # quantity every source quotes cleanly: it clears McKinley's 150 minimum with
+  # no surcharge and sits inside a real cashheatingoil band, so no number has to
+  # be derived or estimated to make the comparison.
+  compare_gallons: 150
+
+  sources:
+    - id: mckinley
+      label: McKinley Oil
+      enabled: true
+      url: https://mckinleyoil.com/
+      # The site is a 1990s frameset: the homepage contains no prices at all,
+      # only <frame> tags. The price and the historical table live in separate
+      # child documents, whose filenames contain spaces and must stay encoded.
+      extra_urls:
+        today: https://mckinleyoil.com/home-todays%20price.html
+        history: https://mckinleyoil.com/home%20-%20historical%20chart.html
+      # Pull the vendor's published history once, on the first successful run,
+      # then never again. It reaches back to 2008.
+      backfill: true
+
+    - id: cashheatingoil
+      label: CashHeatingOil
+      enabled: true
+      # The zip -> URL slug is resolved by POSTing the site's own lookup form
+      # and following its redirect, not by guessing that 06716 means "wolcott".
+      # A guess would break silently the day a slug differs from the town name.
+      url: https://www.cashheatingoil.com/cod_oil_prices.php
+      # Quoted: YAML reads an unquoted 06716 as the number 6716.
+      zips:
+        - "06716" # Wolcott CT
+        - "06010" # Bristol CT
+
+    - id: forbes
+      label: Forbes Fuel Oil
+      # DISABLED. forbesfueloil.com serves a BotStopper proof-of-work challenge
+      # on every path, including /wp-json/ and the sitemap, so reading the price
+      # means defeating an access control the owner deliberately installed
+      # rather than just parsing a public page. Left off pending that decision;
+      # the scraper throws if enabled so it can never be turned on by accident.
+      enabled: false
+      url: https://forbesfueloil.com/
+
+  limits:
+    timeout_ms: 25000
+    # Space between HTTP requests, applied across the whole run rather than per
+    # source. A full scrape is 3 requests, so this run touches these sites
+    # roughly 288 times a day in total.
+    request_delay_ms: 3000
+    max_retries: 2
+
+  alerts:
+    # Hour and zone for the daily digest. All three vendors are in Connecticut,
+    # and a named zone handles DST rather than drifting twice a year.
+    digest_hour: 7
+    timezone: America/New_York
+    # Consecutive failures of ONE source before it alerts. The spine counts
+    # failures per monitor; this counts them per source, so a single broken
+    # scraper cannot hide inside otherwise-successful runs.
+    source_failure_alert_after: 3
+
+alerts:
+  # Spine-level: consecutive failures of the monitor as a whole, which now means
+  # every source failing at once. Goes to the system channel.
+  discord_on_consecutive_failures: 3
+  # Price change and digest alerts.
+  channel: oil
+
+dashboard:
+  window_hours: 24
