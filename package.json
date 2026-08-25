@@ -12,7 +12,8 @@
     "start": "node dist/index.js",
     "dev": "npm run build && node dist/index.js",
     "check": "tsc -p tsconfig.json --noEmit",
-    "run-once": "npm run build && node dist/cli/run-once.js"
+    "run-once": "npm run build && node dist/cli/run-once.js",
+    "alert-test": "npm run build && node dist/cli/alert-test.js"
   },
   "dependencies": {
     "pg": "^8.13.1",

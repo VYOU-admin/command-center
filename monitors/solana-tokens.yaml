@@ -101,8 +101,13 @@ options:
     re_entry_cooldown_hours: 24
 
 alerts:
-  # Spine-level: consecutive run failures for the monitor itself.
+  # Spine-level: consecutive run failures for the monitor itself. These go to
+  # the system channel regardless of what is set below — an outage should
+  # surface in one place, not scattered across topic feeds.
   discord_on_consecutive_failures: 3
+  # Where this monitor's CONTENT alerts go (top-N entry). Resolves to
+  # DISCORD_WEBHOOK_CRYPTO, falling back to DISCORD_WEBHOOK_URL if unset.
+  channel: crypto
 
 dashboard:
   window_hours: 24

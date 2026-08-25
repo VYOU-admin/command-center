@@ -148,14 +148,17 @@ export class Scheduler {
           : insertRecords(client, config.id, records as NormalizedRecord[]),
       );
 
+      // Content alerts belong to the monitor's topic channel; failures do not,
+      // and are routed to the system channel by the Alerter instead.
       for (const alert of pendingAlerts) {
-        await this.opts.discord.send(alert);
+        await this.opts.discord.send(alert, config.alerts.channel);
       }
 
       runLog.info('run succeeded', {
         record_count: recordCount,
         new_record_count: newRecordCount,
         alerts_sent: pendingAlerts.length,
+        alert_channel: config.alerts.channel,
         duration_ms: Date.now() - startedAt.getTime(),
       });
     } catch (err) {

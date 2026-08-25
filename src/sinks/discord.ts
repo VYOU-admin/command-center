@@ -27,21 +27,74 @@ export interface Alert {
   fields?: { name: string; value: string; inline?: boolean }[];
 }
 
-export class DiscordSink {
-  constructor(private readonly webhookUrl: string | null) {}
+/** How a channel name resolved to a webhook, for logging and /health. */
+export interface ChannelResolution {
+  channel: string;
+  /** `channel` = its own webhook, `fallback` = DISCORD_WEBHOOK_URL, `none` = nowhere. */
+  via: 'channel' | 'fallback' | 'none';
+  /** The variable that supplied it, for the boot log. Never the URL itself. */
+  envVar: string | null;
+}
 
-  get enabled(): boolean {
-    return this.webhookUrl !== null;
+export interface DiscordSinkOptions {
+  /** Channel name -> webhook, from DISCORD_WEBHOOK_<NAME>. */
+  channels: Map<string, string>;
+  /** DISCORD_WEBHOOK_URL, used when a named channel has no webhook of its own. */
+  fallbackUrl: string | null;
+}
+
+export class DiscordSink {
+  private readonly channels: Map<string, string>;
+  private readonly fallbackUrl: string | null;
+
+  constructor(opts: DiscordSinkOptions) {
+    this.channels = opts.channels;
+    this.fallbackUrl = opts.fallbackUrl;
   }
 
-  async send(alert: Alert): Promise<boolean> {
-    if (!this.webhookUrl) {
+  get enabled(): boolean {
+    return this.fallbackUrl !== null || this.channels.size > 0;
+  }
+
+  /**
+   * Resolve without sending, so boot can report the routing table and /health
+   * can expose it. A misrouted alert is a silent failure — the alert fires, it
+   * just lands somewhere nobody is reading — so the mapping has to be
+   * inspectable rather than only discoverable by watching channels.
+   */
+  resolve(channel: string): ChannelResolution {
+    const key = channel.toLowerCase();
+    if (this.channels.has(key)) {
+      return { channel: key, via: 'channel', envVar: `DISCORD_WEBHOOK_${key.toUpperCase()}` };
+    }
+    if (this.fallbackUrl) {
+      return { channel: key, via: 'fallback', envVar: 'DISCORD_WEBHOOK_URL' };
+    }
+    return { channel: key, via: 'none', envVar: null };
+  }
+
+  async send(alert: Alert, channel = 'system'): Promise<boolean> {
+    const key = channel.toLowerCase();
+    const resolution = this.resolve(key);
+    const webhookUrl = this.channels.get(key) ?? this.fallbackUrl;
+
+    if (!webhookUrl) {
       // Still emit the alert so it is not lost entirely when no webhook is set.
       log.warn('discord webhook not configured; alert not delivered', {
         alert_title: alert.title,
         alert_level: alert.level,
+        channel: key,
       });
       return false;
+    }
+
+    if (resolution.via === 'fallback') {
+      // Loud on purpose: this is the case where a forgotten variable sends
+      // crypto alerts into the system channel and looks like it worked.
+      log.warn('discord channel has no webhook of its own; using DISCORD_WEBHOOK_URL', {
+        channel: key,
+        expected_var: `DISCORD_WEBHOOK_${key.toUpperCase()}`,
+      });
     }
 
     const body = {
@@ -62,7 +115,7 @@ export class DiscordSink {
     };
 
     try {
-      const response = await fetch(this.webhookUrl, {
+      const response = await fetch(webhookUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
@@ -71,18 +124,25 @@ export class DiscordSink {
 
       if (!response.ok) {
         log.error('discord webhook rejected the alert', {
+          channel: key,
           status: response.status,
           body: redact((await response.text().catch(() => '')).slice(0, 300)),
         });
         return false;
       }
 
-      log.info('discord alert delivered', { alert_title: alert.title, alert_level: alert.level });
+      log.info('discord alert delivered', {
+        alert_title: alert.title,
+        alert_level: alert.level,
+        channel: key,
+        via: resolution.via,
+      });
       return true;
     } catch (err) {
       log.error('discord webhook request failed', {
         error: redact((err as Error).message),
         alert_title: alert.title,
+        channel: key,
       });
       return false;
     }

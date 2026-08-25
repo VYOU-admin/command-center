@@ -19,6 +19,13 @@ export interface MonitorConfig {
   options: Record<string, unknown>;
   alerts: {
     discordOnConsecutiveFailures: number;
+    /**
+     * Which Discord channel this monitor's CONTENT alerts go to, resolved
+     * against DISCORD_WEBHOOK_<CHANNEL>. Failure and recovery alerts ignore
+     * this and always go to the system channel — an outage should surface in
+     * one place regardless of which monitor broke.
+     */
+    channel: string;
   };
   dashboard: {
     windowHours: number;
@@ -26,6 +33,12 @@ export interface MonitorConfig {
   /** Path the config was loaded from, for error messages. */
   sourceFile: string;
 }
+
+/**
+ * Where a monitor's content alerts go when its YAML does not say. Also where
+ * every failure and recovery alert goes, unconditionally.
+ */
+export const DEFAULT_ALERT_CHANNEL = 'system';
 
 const DURATION = /^(\d+(?:\.\d+)?)\s*(s|m|h|d)$/i;
 const UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
@@ -77,6 +90,14 @@ function parseMonitor(raw: unknown, file: string): MonitorConfig {
     throw new Error(`${file}: alerts.discord_on_consecutive_failures must be an integer >= 1`);
   }
 
+  const channelRaw = alerts['channel'] ?? DEFAULT_ALERT_CHANNEL;
+  if (typeof channelRaw !== 'string' || !/^[a-z0-9][a-z0-9_-]*$/.test(channelRaw)) {
+    throw new Error(
+      `${file}: alerts.channel must be a lowercase slug naming a channel ` +
+        `(it resolves to DISCORD_WEBHOOK_<CHANNEL>), got: ${String(channelRaw)}`,
+    );
+  }
+
   const dashboard = isPlainObject(raw['dashboard']) ? raw['dashboard'] : {};
   const windowHours = dashboard['window_hours'] ?? 24;
   if (typeof windowHours !== 'number' || windowHours <= 0) {
@@ -94,7 +115,7 @@ function parseMonitor(raw: unknown, file: string): MonitorConfig {
     schedule,
     scheduleMs: parseDuration(schedule, `${file}: schedule`),
     options: isPlainObject(options) ? options : {},
-    alerts: { discordOnConsecutiveFailures: threshold },
+    alerts: { discordOnConsecutiveFailures: threshold, channel: channelRaw },
     dashboard: { windowHours },
     sourceFile: file,
   };

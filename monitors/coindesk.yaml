@@ -18,8 +18,12 @@ options:
   timeout_ms: 20000
 
 alerts:
-  # Post to Discord after this many consecutive failed runs.
+  # Post to Discord after this many consecutive failed runs. Failure alerts
+  # always go to the system channel; `channel` below only affects content alerts.
   discord_on_consecutive_failures: 3
+  # A crypto source, so content alerts would belong in the crypto channel. The
+  # RSS adapter raises none today, making this forward-looking rather than active.
+  channel: crypto
 
 dashboard:
   # Rolling window the dashboard shows for this monitor.

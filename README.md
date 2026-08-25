@@ -334,6 +334,45 @@ healthcheck points at it, and a broken *monitor* must not read as a broken
 *deployment* and trigger a rollback. External uptime checkers that want a hard
 signal can use `/health?strict=1`, which returns 503 when anything is unhealthy.
 
+## Alert routing
+
+Alerts are split by **kind**, not by monitor.
+
+Failure, recovery, and staleness alerts go to the `system` channel from every
+monitor, unconditionally. Routing an outage to the monitor's own topic channel
+would scatter operational failures across topic feeds, and the crypto channel is
+the wrong place to learn that the crypto monitor stopped running.
+
+Content alerts — a token entering the top N, say — go to whatever channel that
+monitor's YAML names:
+
+```yaml
+alerts:
+  discord_on_consecutive_failures: 3
+  channel: crypto # -> DISCORD_WEBHOOK_CRYPTO
+```
+
+`channel` defaults to `system`. It is a name, not a mapping: any environment
+variable called `DISCORD_WEBHOOK_<NAME>` becomes channel `<name>`, so adding a
+channel is setting a variable and naming it in YAML. There is no list in code to
+update, which is the same promise the adapter registry makes for sources.
+
+When a named channel has no webhook of its own, delivery falls back to
+`DISCORD_WEBHOOK_URL` rather than going silent — a forgotten variable should
+misroute an alert, not swallow it.
+
+That fallback is the reason routing is reported in three places: the boot log,
+`/health` under `alert_routing`, and a warning on every send that uses it. A
+misrouted alert is a **silent failure of the worst kind** — it is delivered
+successfully, returns 204, and logs as delivered. It just arrives somewhere
+nobody is reading. Nothing on the sending side can tell, so the mapping has to
+be inspectable rather than discoverable only by watching channels.
+
+`npm run alert-test` posts one message to each channel saying which variable
+delivered it, which is the only way to actually prove routing end to end. It
+does not touch Postgres, so it still works when the database is down — which is
+when alerting matters most.
+
 ## Endpoints
 
 | route            | purpose                                                       |
@@ -347,10 +386,12 @@ signal can use `/health?strict=1`, which returns 503 when anything is unhealthy.
 
 Nothing sensitive is committed; it all comes from the environment.
 
-| variable              | required | notes                                         |
-| --------------------- | -------- | --------------------------------------------- |
-| `DATABASE_URL`        | yes      | refuses to boot without it                    |
-| `DISCORD_WEBHOOK_URL` | no       | without it, alerts only reach logs and /health |
+| variable                   | required | notes                                          |
+| -------------------------- | -------- | ---------------------------------------------- |
+| `DATABASE_URL`             | yes      | refuses to boot without it                     |
+| `DISCORD_WEBHOOK_SYSTEM`   | no       | failure/recovery alerts from every monitor     |
+| `DISCORD_WEBHOOK_<NAME>`   | no       | any channel a monitor's `alerts.channel` names |
+| `DISCORD_WEBHOOK_URL`      | no       | fallback for a channel with no webhook of its own |
 | `PORT`                | no       | Railway sets it; 3000 locally                  |
 | `LOG_LEVEL`           | no       | `debug` / `info` / `warn` / `error`            |
 | `PUBLIC_URL`          | no       | link back from alerts; inferred on Railway     |

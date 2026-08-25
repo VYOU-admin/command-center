@@ -17,6 +17,7 @@ async function main(): Promise<void> {
     pool: app.pool,
     monitors: app.monitors,
     adapters: app.adapters,
+    discord: app.discord,
     port: app.env.port,
     bootedAt,
   });

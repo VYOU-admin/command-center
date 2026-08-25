@@ -69,6 +69,7 @@ options:
 
 alerts:
   discord_on_consecutive_failures: 3
+  channel: crypto
 
 dashboard:
   window_hours: 24

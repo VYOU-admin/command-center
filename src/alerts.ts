@@ -14,9 +14,14 @@
  *
  * Alerts fire on edges, not on every tick, so a long outage is one message plus
  * one recovery message rather than a siren.
+ *
+ * Everything raised here goes to the system channel regardless of which monitor
+ * broke. Routing an outage to the monitor's own topic channel would scatter
+ * operational failures across topic feeds, and the crypto channel is the wrong
+ * place to learn that the crypto monitor stopped running.
  */
 
-import type { MonitorConfig } from './config.js';
+import { DEFAULT_ALERT_CHANNEL, type MonitorConfig } from './config.js';
 import type { Env } from './env.js';
 import { assessMonitor, staleAfterMs, type MonitorHealth } from './health.js';
 import { log } from './logger.js';
@@ -75,7 +80,7 @@ export class Alerter {
           { name: 'Schedule', value: config.schedule, inline: true },
           ...this.dashboardField(),
         ],
-      });
+      }, DEFAULT_ALERT_CHANNEL);
       await setFailureAlertSent(this.pool, config.id, true);
       log.warn('failure threshold crossed, alert sent', {
         monitor_id: config.id,
@@ -94,7 +99,7 @@ export class Alerter {
           { name: 'New records', value: String(state.lastNewRecordCount ?? 0), inline: true },
           ...this.dashboardField(),
         ],
-      });
+      }, DEFAULT_ALERT_CHANNEL);
       await setFailureAlertSent(this.pool, config.id, false);
       log.info('monitor recovered, alert sent', { monitor_id: config.id });
     }
@@ -138,7 +143,7 @@ export class Alerter {
           },
           ...this.dashboardField(),
         ],
-      });
+      }, DEFAULT_ALERT_CHANNEL);
       await setStaleAlertAt(this.pool, config.id, now);
       log.warn('stale monitor alert sent', {
         monitor_id: config.id,

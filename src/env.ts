@@ -8,8 +8,20 @@ import { resolve } from 'node:path';
 export interface Env {
   /** Postgres connection string. Required. */
   databaseUrl: string;
-  /** Discord incoming webhook. Optional; alerts degrade to logs without it. */
+  /**
+   * Legacy single webhook, now the fallback for any channel without its own.
+   * Optional; alerts degrade to logs when neither this nor a channel is set.
+   */
   discordWebhookUrl: string | null;
+  /**
+   * Per-channel webhooks, keyed by lowercased channel name.
+   *
+   * Discovered from the environment rather than listed here: any variable named
+   * DISCORD_WEBHOOK_<NAME> becomes channel <name>. Adding a channel is setting
+   * a variable and naming it in a monitor's YAML — it never requires editing
+   * code, which is the same promise the adapter registry makes for sources.
+   */
+  discordChannels: Map<string, string>;
   /** Railway injects PORT; default is for local runs. */
   port: number;
   /** Directory holding monitor YAML files. */
@@ -40,6 +52,19 @@ export function loadEnv(): Env {
     throw new Error('DISCORD_WEBHOOK_URL must be an https:// URL');
   }
 
+  // DISCORD_WEBHOOK_URL is the fallback, not a channel called "url".
+  const discordChannels = new Map<string, string>();
+  for (const [key, raw] of Object.entries(process.env)) {
+    const match = /^DISCORD_WEBHOOK_(.+)$/.exec(key);
+    if (!match || key === 'DISCORD_WEBHOOK_URL') continue;
+    const value = raw?.trim();
+    if (!value) continue;
+    if (!value.startsWith('https://')) {
+      throw new Error(`${key} must be an https:// URL`);
+    }
+    discordChannels.set(match[1]!.toLowerCase(), value);
+  }
+
   // Railway injects RAILWAY_PUBLIC_DOMAIN once a domain is attached, so alerts
   // can link back to the dashboard without any extra configuration.
   const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
@@ -50,6 +75,7 @@ export function loadEnv(): Env {
   return {
     databaseUrl,
     discordWebhookUrl,
+    discordChannels,
     port,
     monitorsDir: resolve(process.env.MONITORS_DIR?.trim() || 'monitors'),
     tickMs: 30_000,

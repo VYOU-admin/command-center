@@ -7,7 +7,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AnyAdapter, PanelContext } from '../adapters/types.js';
 import type { MonitorConfig } from '../config.js';
 import { assessAll, overallStatus } from '../health.js';
+import { DEFAULT_ALERT_CHANNEL } from '../config.js';
 import { errorFields, log } from '../logger.js';
+import type { DiscordSink } from '../sinks/discord.js';
 import type { Pool } from '../store/db.js';
 import { getRecentRecords } from '../store/records.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
@@ -17,6 +19,8 @@ export interface WebServerOptions {
   pool: Pool;
   monitors: MonitorConfig[];
   adapters: Map<string, AnyAdapter>;
+  /** Read only to report alert routing; the web sink never sends alerts. */
+  discord: DiscordSink;
   port: number;
   /** Reported by /health so a deploy can be identified in logs. */
   bootedAt: Date;
@@ -68,9 +72,26 @@ export function createWebServer(opts: WebServerOptions): Server {
       // *monitor* must not read as a broken *deployment* and trigger a rollback.
       // Uptime checkers that do want a hard signal can ask for ?strict=1.
       const strict = url.searchParams.get('strict') === '1';
+      // Routing is reported here because a misrouted alert is a silent failure:
+      // it fires, it just lands somewhere nobody reads. Only the channel name
+      // and which variable supplied it — never the webhook URL.
+      const channels = new Set([DEFAULT_ALERT_CHANNEL, ...monitors.map((m) => m.alerts.channel)]);
+
       sendJson(res, strict && overall === 'degraded' ? 503 : 200, {
         status: overall,
         booted_at: bootedAt.toISOString(),
+        alert_routing: {
+          failure_and_recovery: DEFAULT_ALERT_CHANNEL,
+          channels: [...channels].map((c) => {
+            const r = opts.discord.resolve(c);
+            return {
+              channel: c,
+              resolved_via: r.via,
+              env_var: r.envVar,
+              monitors: monitors.filter((m) => m.alerts.channel === c).map((m) => m.id),
+            };
+          }),
+        },
         uptime_seconds: Math.round(process.uptime()),
         checked_at: new Date().toISOString(),
         monitors: health.map((m) => ({

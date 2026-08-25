@@ -114,8 +114,12 @@ options:
     silence_fail_after_seconds: 300
 
 alerts:
-  # Silent by default. Failure and recovery only — no per-launch alerts.
+  # Silent by default. Failure and recovery only — no per-launch alerts, and
+  # those failure alerts go to the system channel regardless of the channel set
+  # below. The channel is declared anyway so that if this monitor ever does emit
+  # content alerts they land in the right place rather than defaulting to system.
   discord_on_consecutive_failures: 3
+  channel: crypto
 
 dashboard:
   window_hours: 24
