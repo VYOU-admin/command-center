@@ -299,6 +299,22 @@ async function updateSourceState(
   cfg: OilConfig,
   results: SourceResult[],
 ): Promise<void> {
+  // A source that was failing and has since been disabled is not broken, it is
+  // switched off. Leaving its old streak in place would keep the dashboard
+  // showing a source as broken forever with nothing able to clear it — a
+  // permanent false alarm, which is worse than no signal at all.
+  const disabled = cfg.sources.filter((s) => !s.enabled).map((s) => s.id);
+  if (disabled.length > 0) {
+    await client.query(
+      `update oil_source_state
+          set consecutive_failures = 0, failure_alert_sent = false,
+              last_error = null
+        where monitor_id = $1 and source = any($2)
+          and (consecutive_failures > 0 or failure_alert_sent)`,
+      [ctx.monitorId, disabled],
+    );
+  }
+
   for (const result of results) {
     const backfilled = result.ok && result.history.length > 0;
     const state = await client.query(
