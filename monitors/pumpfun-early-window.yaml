@@ -1,0 +1,110 @@
+# pump.fun early window — deep, minute-by-minute tracking of a launch sample.
+#
+# PURPOSE: record what happens in the first six hours of a token's life, densely
+# near launch, so that "which early conditions precede a token going up" becomes
+# answerable later. This monitor COLLECTS ONLY — it scores nothing, filters
+# nothing, and raises no content alerts. The only alerts it can produce are the
+# spine's own failure and recovery messages, which go to the system channel.
+#
+# WHERE THE DATA COMES FROM
+#   PumpPortal  subscribeNewToken   -> launches: deployer, uri, initial mcap
+#               subscribeMigration  -> graduations
+#   Solana RPC  logsSubscribe       -> every pump.fun trade, PROGRAM-WIDE
+#
+# The trade stream carries the buyer and seller wallet on every trade, which
+# curve-account subscriptions do not. The event layout is not published by
+# pump.fun and has changed, so it was derived and verified against live data
+# rather than assumed — see the header of src/adapters/pumpfun-early/trades.ts
+# for the checks and their results.
+#
+# WHY PROGRAM-WIDE RATHER THAN PER TOKEN
+#   The RPC closes a connection on its 101st concurrent subscription. Following
+#   ~830 tokens per-token would need 9-10 sockets and would drop every
+#   subscription on a socket that went one over. One program-wide subscription
+#   has no such cap. It costs ~116 notifications/second and ~25 GB/day inbound,
+#   measured, and in exchange the sample rate below is a storage decision rather
+#   than an RPC one.
+
+id: pumpfun-early-window
+name: Pump.fun Early Window
+source: pumpfun-early-window
+enabled: true
+
+# Drain interval. Snapshots are timed on their own 1-second clock inside the
+# adapter — a 15-second mark cannot wait for a 30-second drain — so this only
+# controls how often completed snapshots are committed.
+schedule: 30s
+
+options:
+  rpc_url: wss://api.mainnet-beta.solana.com
+  pumpportal_url: wss://pumpportal.fun/api/data
+  program_id: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+
+  # How long each token is followed, and when it is given up on early.
+  window_minutes: 360
+  death_after_idle_minutes: 60
+
+  sampling:
+    # CONCURRENCY MATH, from measured production rates:
+    #
+    #   launch rate           31.4/min average (38.1 peak hour, 13.7 trough)
+    #   migrations            46.4/hour
+    #
+    #   sampled concurrent  = 31.4 x 0.05 x 360 min  =  565   (686 at peak)
+    #   graduate concurrent = 0.77/min x ~357 min    =  276
+    #                                          total ~  830   (~950 peak)
+    #
+    # With one program-wide subscription there is no per-token cap to exceed, so
+    # 5% is comfortable. The limit below is a memory and write-volume guard, not
+    # an upstream constraint.
+    #
+    # Membership is a hash of the mint, not a coin flip, so the sample is
+    # reproducible months later and "was this token sampled" stays answerable.
+    rate: 0.05
+    # Every graduating token is followed for whatever remains of its six hours,
+    # on top of the random sample. A graduate whose launch we never saw is
+    # skipped rather than tracked from an assumed age.
+    track_graduates: true
+
+  # Snapshot cadence: dense near launch, thinning out. 135 marks in total.
+  #   every 15s to 5 min   ->  20 marks
+  #   every 60s to 1 hour  ->  55 marks
+  #   every 5 min to 6 hr  ->  60 marks
+  # A token that dies early simply stops producing marks.
+  cadence:
+    - until_seconds: 300
+      every_seconds: 15
+    - until_seconds: 3600
+      every_seconds: 60
+    - until_seconds: 21600
+      every_seconds: 300
+
+  enrichment:
+    # SOL/USD, for the derived USD columns. The rate used is stored on every
+    # snapshot row, so USD values stay auditable and can be recomputed if a
+    # reading turns out to be wrong. SOL-denominated columns never depend on it.
+    sol_price_refresh_seconds: 300
+    # DexScreener metrics for tokens that have graduated off the curve.
+    dex_refresh_seconds: 300
+    dex_batch_size: 30
+
+  limits:
+    # Guard on memory and write volume. Expected steady state is ~830; this
+    # leaves room for a burst without silently dropping tokens.
+    max_concurrent_tracked: 2000
+    max_buffered_snapshots: 50000
+    metadata_timeout_ms: 5000
+    metadata_concurrency: 6
+    timeout_ms: 20000
+    # Trades run at ~37/second platform-wide, so minutes of silence means broken
+    # even while the socket reports itself connected.
+    silence_fail_after_seconds: 300
+
+alerts:
+  # Failure and recovery only, to the system channel. This monitor never raises
+  # a content alert.
+  discord_on_consecutive_failures: 3
+  channel: system
+
+dashboard:
+  window_hours: 24
