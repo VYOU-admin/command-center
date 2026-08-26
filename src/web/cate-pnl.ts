@@ -6,9 +6,18 @@
  * therefore has no schedule, no adapter and no retention -- it is a small
  * reference table with a page in front of it.
  *
- * TABS ARE DATA-DRIVEN. One tab per distinct `token` value, built from the
- * rows themselves, plus a Groups tab. Adding a second token means inserting
- * rows with a new token value -- nothing here is edited.
+ * TABS ARE DATA-DRIVEN. "All wallets" is the default and unions every token:
+ * one row per DISTINCT wallet with its figures summed, so a wallet that appears
+ * in several tokens is one row, not several. Per-token tabs follow, one per
+ * distinct `token` value found in the rows, then Groups.
+ *
+ * Adding a token is an INSERT with a new token value. No code here changes: the
+ * tab appears, the union picks the wallets up, and tokens_touched starts
+ * reporting more than 1 on its own. With a single token loaded every wallet
+ * shows 1, which is the correct answer rather than a placeholder.
+ *
+ * A ROW IS IDENTIFIED BY (wallet, token). Keying on wallet alone would make
+ * loading a second token overwrite the first rather than add to it.
  *
  * ALL ROWS ARE SENT TO THE BROWSER and sorted, grouped and paginated there.
  * At this size that is a few hundred kB and makes every interaction instant,
@@ -125,8 +134,11 @@ export function renderCatePnlPage(rows: CatePnlRow[], generatedAt: Date): string
 const ROWS = ${JSON.stringify(rows)};
 const TOKENS = ${JSON.stringify(tokens)};
 const PER = 50;
-let tab = TOKENS[0] || 'CATE';
+let tab = '__all';
 let sortKey='realized_pnl_sol', sortDir=-1, page=1, mode='flat';
+// The union view has its own sort default: wallets seen across several tokens
+// are the interesting ones, so they lead regardless of size.
+let aSortKey='tokens_touched', aSortDir=-1;
 let gSortDir=-1;
 const sel = new Set();
 const open = new Set();
@@ -156,21 +168,88 @@ function toast(msg,err){const t=document.getElementById('toast');t.textContent=m
 
 function tokenRows(){ return ROWS.filter(r=>r.token===tab); }
 
+const ACOLS=[
+  {k:'_sel',t:'',l:true,kind:'sel'},
+  {k:'wallet',t:'Wallet',l:true,kind:'wallet'},
+  {k:'tag',t:'Tag',l:true,kind:'tag'},
+  {k:'tokens_touched',t:'Tokens',kind:'int'},
+  {k:'tokens',t:'Token list',l:true,kind:'tokens'},
+  {k:'total_pnl_sol',t:'Total PnL SOL',kind:'pnl',d:3},
+  {k:'total_sol_in',t:'Total SOL in',kind:'num',d:3},
+  {k:'total_sol_out',t:'Total SOL out',kind:'num',d:3},
+  {k:'total_buys',t:'Buys',kind:'int'},
+  {k:'total_sells',t:'Sells',kind:'int'},
+  {k:'earliest_first_buy',t:'Earliest first buy',l:true,kind:'time'},
+  {k:'latest_last_sell',t:'Latest last sell',l:true,kind:'time'},
+];
+
+/**
+ * One row per DISTINCT wallet, summed across every token it appears in.
+ * Built from the rows already in the page -- no second query, and it starts
+ * reporting real multi-token counts the moment another token is inserted.
+ */
+function unionRows(){
+  const by=new Map();
+  for(const r of ROWS){
+    let u=by.get(r.wallet);
+    if(!u){ u={wallet:r.wallet, tag:null, _tags:new Set(), _manual:false, _tok:new Set(),
+      total_pnl_sol:0, total_sol_in:0, total_sol_out:0, total_buys:0, total_sells:0,
+      earliest_first_buy:null, latest_last_sell:null};
+      by.set(r.wallet,u); }
+    u._tok.add(r.token);
+    if(r.tag){ u._tags.add(r.tag); if(r.tag_source==='manual') u._manual=true; }
+    u.total_pnl_sol+=r.realized_pnl_sol; u.total_sol_in+=r.sol_in; u.total_sol_out+=r.sol_out;
+    u.total_buys+=r.n_buys; u.total_sells+=r.n_sells;
+    if(r.first_buy_time_utc && (!u.earliest_first_buy || r.first_buy_time_utc<u.earliest_first_buy))
+      u.earliest_first_buy=r.first_buy_time_utc;
+    if(r.last_sell_time_utc && (!u.latest_last_sell || r.last_sell_time_utc>u.latest_last_sell))
+      u.latest_last_sell=r.last_sell_time_utc;
+  }
+  for(const u of by.values()){
+    u.tokens=[...u._tok].sort().join(', ');
+    u.tokens_touched=u._tok.size;
+    // A wallet tagged differently per token shows both rather than silently
+    // picking one.
+    u.tag=u._tags.size?[...u._tags].sort().join(' / '):null;
+    u.tag_source=u._manual?'manual':(u._tags.size?'auto':null);
+  }
+  return [...by.values()];
+}
+
 /** Filters apply to the whole token set, before sorting and paging. */
 function filtered(){
-  return tokenRows().filter(r=>{
+  const all = tab==='__all' ? unionRows() : tokenRows();
+  const isU = tab==='__all';
+  const pnlK = isU?'total_pnl_sol':'realized_pnl_sol';
+  const inK  = isU?'total_sol_in':'sol_in';
+  const outK = isU?'total_sol_out':'sol_out';
+  const buyK = isU?'total_buys':'n_buys';
+  const sellK= isU?'total_sells':'n_sells';
+  const fbK  = isU?'earliest_first_buy':'first_buy_time_utc';
+  const lsK  = isU?'latest_last_sell':'last_sell_time_utc';
+  const MAP={realized_pnl_sol:pnlK, sol_in:inK, sol_out:outK, n_buys:buyK, n_sells:sellK};
+  return all.filter(r=>{
     if(F.q && !r.wallet.toLowerCase().includes(F.q.toLowerCase())) return false;
     if(F.tagMode==='tagged' && !r.tag) return false;
     if(F.tagMode==='untagged' && r.tag) return false;
     if(F.tag && r.tag!==F.tag) return false;
-    if(F.sold==='yes' && !r.sold_out) return false;
-    if(F.sold==='no' && r.sold_out) return false;
-    for(const [k] of NUMCOLS){
-      const lo=F['min_'+k], hi=F['max_'+k];
-      if(lo!==undefined && lo!=='' ){ if(nz(r[k]) || Number(r[k])<Number(lo)) return false; }
-      if(hi!==undefined && hi!=='' ){ if(nz(r[k]) || Number(r[k])>Number(hi)) return false; }
+    if(!isU && F.sold==='yes' && !r.sold_out) return false;
+    if(!isU && F.sold==='no' && r.sold_out) return false;
+    // tokens_touched filter: works unchanged once a second token exists
+    if(F.tt && F.tt!=='all'){
+      const n = isU ? r.tokens_touched : 1;
+      if(F.tt==='1' && n!==1) return false;
+      if(F.tt==='2+' && n<2) return false;
+      if(/^=\d+$/.test(F.tt) && n!==Number(F.tt.slice(1))) return false;
     }
-    for(const [k,f] of [['first_buy_time_utc','fb'],['last_sell_time_utc','ls']]){
+    for(const [k] of NUMCOLS){
+      const kk = MAP[k] || k;
+      if(isU && (kk===k) && !(kk in r)) continue;   // per-token-only column
+      const lo=F['min_'+k], hi=F['max_'+k];
+      if(lo!==undefined && lo!=='' ){ if(nz(r[kk]) || Number(r[kk])<Number(lo)) return false; }
+      if(hi!==undefined && hi!=='' ){ if(nz(r[kk]) || Number(r[kk])>Number(hi)) return false; }
+    }
+    for(const [k,f] of [[fbK,'fb'],[lsK,'ls']]){
       const lo=F[f+'_from'], hi=F[f+'_to'];
       if(lo){ if(nz(r[k]) || String(r[k]).slice(0,10) < lo) return false; }
       if(hi){ if(nz(r[k]) || String(r[k]).slice(0,10) > hi) return false; }
@@ -178,27 +257,41 @@ function filtered(){
     return true;
   });
 }
+function curKey(){ return tab==='__all'?aSortKey:sortKey; }
+function curDir(){ return tab==='__all'?aSortDir:sortDir; }
 function cmp(a,b,k){
   const A=a[k],B=b[k], an=nz(A), bn=nz(B);
   if(an&&bn) return 0;
-  if(an) return 1*sortDir;      // nulls last in both directions
-  if(bn) return -1*sortDir;
+  if(an) return 1*curDir();     // nulls last in both directions
+  if(bn) return -1*curDir();
   if(typeof A==='number'&&typeof B==='number') return A-B;
   if(typeof A==='boolean') return (A?1:0)-(B?1:0);
   return String(A).localeCompare(String(B));
 }
 function ordered(){
   const rows=filtered();
+  if(tab==='__all'){
+    // Default: multi-token wallets first, then by size. Explicitly sorting on
+    // a chosen column overrides the tie-break, not the other way round.
+    rows.sort((a,b)=>{
+      const primary=cmp(a,b,aSortKey)*aSortDir;
+      if(primary!==0) return primary;
+      if(aSortKey!=='tokens_touched'){ const t=(b.tokens_touched-a.tokens_touched); if(t) return t; }
+      return b.total_pnl_sol-a.total_pnl_sol;
+    });
+    return rows.map(r=>({r}));
+  }
   if(mode==='flat'){ rows.sort((a,b)=>cmp(a,b,sortKey)*sortDir); return rows.map(r=>({r})); }
   const g=new Map(), loose=[];
   for(const r of rows){ if(!r.tag){loose.push(r);continue;} if(!g.has(r.tag)) g.set(r.tag,[]); g.get(r.tag).push(r); }
-  const gs=[...g.entries()].map(([tag,rs])=>({tag,rs,sum:rs.reduce((s,x)=>s+x.realized_pnl_sol,0)}))
+  const pk=(x)=>tab==='__all'?x.total_pnl_sol:x.realized_pnl_sol;
+  const gs=[...g.entries()].map(([tag,rs])=>({tag,rs,sum:rs.reduce((s,x)=>s+pk(x),0)}))
     .sort((a,b)=>b.sum-a.sum);
   const out=[];
-  for(const x of gs){ out.push({head:x}); x.rs.sort((a,b)=>b.realized_pnl_sol-a.realized_pnl_sol);
+  for(const x of gs){ out.push({head:x}); x.rs.sort((a,b)=>pk(b)-pk(a));
     for(const r of x.rs) out.push({r}); }
-  if(loose.length){ out.push({head:{tag:'untagged',rs:loose,sum:loose.reduce((s,x)=>s+x.realized_pnl_sol,0)}});
-    loose.sort((a,b)=>b.realized_pnl_sol-a.realized_pnl_sol); for(const r of loose) out.push({r}); }
+  if(loose.length){ out.push({head:{tag:'untagged',rs:loose,sum:loose.reduce((s,x)=>s+pk(x),0)}});
+    loose.sort((a,b)=>pk(b)-pk(a)); for(const r of loose) out.push({r}); }
   return out;
 }
 function cell(r,c){
@@ -208,6 +301,8 @@ function cell(r,c){
   if(c.kind==='tag') return v
     ? '<span class="tag'+(r.tag_source==='manual'?' man':'')+'" data-edit="'+r.wallet+'">'+esc(v)+'</span>'
     : '<span class="tagempty" data-edit="'+r.wallet+'">+ tag</span>';
+  if(c.kind==='tokens') return String(v||'').split(', ').filter(Boolean).map(t=>
+    '<span class="tag" data-jump="'+esc(t)+'" data-jw="'+r.wallet+'" title="open the '+esc(t)+' tab filtered to this wallet">'+esc(t)+'</span>').join(' ');
   if(c.kind==='time') return nz(v)?'<span class="muted">—</span>':'<span class="muted">'+String(v).replace('T',' ').replace('Z','')+'</span>';
   if(c.kind==='bool') return v?'yes':'<span class="muted">no</span>';
   if(c.kind==='int') return nz(v)?'<span class="muted">—</span>':v;
@@ -216,7 +311,8 @@ function cell(r,c){
   return fmt(v,c.d??2);
 }
 function summary(rows){
-  const p=rows.map(r=>r.realized_pnl_sol).sort((a,b)=>a-b);
+  const k=tab==='__all'?'total_pnl_sol':'realized_pnl_sol';
+  const p=rows.map(r=>r[k]).sort((a,b)=>a-b);
   const med=p.length?(p.length%2?p[(p.length-1)/2]:(p[p.length/2-1]+p[p.length/2])/2):0;
   return {n:rows.length, win:p.filter(x=>x>0).length, lose:p.filter(x=>x<0).length,
           sum:p.reduce((a,b)=>a+b,0), med, tags:new Set(rows.filter(r=>r.tag).map(r=>r.tag)).size};
@@ -234,6 +330,12 @@ function filterBar(){
         {all:'All',tagged:'Tagged only',untagged:'Untagged only'}[v]+'</option>').join('')+'</select></div>'+
     '<div class="f"><label>Specific tag</label><select data-f="tag"><option value="">— any —</option>'+
       tags.map(t=>'<option value="'+esc(t)+'"'+(F.tag===t?' selected':'')+'>'+esc(t)+'</option>').join('')+'</select></div>'+
+    '<div class="f"><label>Tokens touched</label><select data-f="tt">'+
+      ['all','1','2+'].map(v=>'<option value="'+v+'"'+(F.tt===v?' selected':'')+'>'+
+        {all:'All','1':'Exactly 1','2+':'2 or more'}[v]+'</option>').join('')+
+      [...new Set(ROWS.map(r=>r.token))].map((_,i)=>i+1).filter(n=>n>2)
+        .map(n=>'<option value="='+n+'"'+(F.tt==='='+n?' selected':'')+'>Exactly '+n+'</option>').join('')+
+      '</select></div>'+
     '<div class="f"><label>Sold out</label><select data-f="sold">'+
       ['all','yes','no'].map(v=>'<option value="'+v+'"'+(F.sold===v?' selected':'')+'>'+
         {all:'All',yes:'Yes',no:'No'}[v]+'</option>').join('')+'</select></div>'+
@@ -249,23 +351,25 @@ function filterBar(){
 }
 
 function renderTable(){
+  const isU=tab==='__all';
+  const C=isU?ACOLS:COLS;
   const all=ordered();
   const rowsOnly=all.filter(x=>x.r).map(x=>x.r);
   const s=summary(filtered());
-  const total=tokenRows().length;
-  document.getElementById('sub').textContent='· '+tab+' · '+total+' wallets';
+  const total=isU?unionRows().length:tokenRows().length;
+  document.getElementById('sub').textContent='· '+(isU?'all tokens':tab)+' · '+total+' wallets';
   const pages=Math.max(1,Math.ceil(all.length/PER));
   if(page>pages) page=pages;
   const slice=all.slice((page-1)*PER,page*PER);
-  const head='<tr>'+COLS.map(c=>c.kind==='sel'
+  const head='<tr>'+C.map(c=>c.kind==='sel'
       ? '<th class="l"><input type="checkbox" id="selall"></th>'
       : '<th class="'+(c.l?'l':'')+'" data-k="'+c.k+'">'+c.t+
-        (mode==='flat'&&sortKey===c.k?' <span class="arrow">'+(sortDir<0?'▼':'▲')+'</span>':'')+'</th>').join('')+'</tr>';
+        ((isU||mode==='flat')&&curKey()===c.k?' <span class="arrow">'+(curDir()<0?'▼':'▲')+'</span>':'')+'</th>').join('')+'</tr>';
   const body=slice.map(x=>{
-    if(x.head) return '<tr class="grouphead"><td colspan="'+COLS.length+'">'+esc(x.head.tag)+
+    if(x.head) return '<tr class="grouphead"><td colspan="'+C.length+'">'+esc(x.head.tag)+
       ' · '+x.head.rs.length+' wallets · combined '+(x.head.sum>=0?'+':'')+x.head.sum.toFixed(2)+' SOL</td></tr>';
     return '<tr class="'+(sel.has(x.r.wallet)?'sel':'')+'">'+
-      COLS.map(c=>'<td class="'+(c.l?'l':'')+'">'+cell(x.r,c)+'</td>').join('')+'</tr>';
+      C.map(c=>'<td class="'+(c.l?'l':'')+'">'+cell(x.r,c)+'</td>').join('')+'</tr>';
   }).join('');
   const btn=(n,l,dis,on)=>'<button '+(dis?'disabled':'')+' class="'+(on?'on':'')+'" data-p="'+n+'">'+(l??n)+'</button>';
   let pg=btn(page-1,'‹',page===1,false); const win=[];
@@ -285,8 +389,8 @@ function renderTable(){
     '</div>'+
     filterBar()+
     '<div class="toolbar">'+
-      '<button class="btn '+(mode==='flat'?'pri':'')+'" id="m-flat">Sort by column</button>'+
-      '<button class="btn '+(mode==='group'?'pri':'')+'" id="m-group">Group by tag</button>'+
+      (isU?'':'<button class="btn '+(mode==='flat'?'pri':'')+'" id="m-flat">Sort by column</button>'+
+      '<button class="btn '+(mode==='group'?'pri':'')+'" id="m-group">Group by tag</button>')+
       '<button class="btn" id="export">Export CSV</button>'+
       '<span style="flex:1"></span>'+
       '<span class="count" id="selcount">'+sel.size+' selected</span>'+
@@ -300,15 +404,18 @@ function renderTable(){
 }
 
 function renderGroups(){
-  const rows=tokenRows();
+  // Across every token, not just the active tab: a tag identifies a wallet,
+  // and the point of the tokens column is that it spans them.
   const g=new Map();
-  for(const r of rows){ if(!r.tag) continue; if(!g.has(r.tag)) g.set(r.tag,[]); g.get(r.tag).push(r); }
+  for(const r of ROWS){ if(!r.tag) continue; if(!g.has(r.tag)) g.set(r.tag,[]); g.get(r.tag).push(r); }
   const gs=[...g.entries()].map(([tag,rs])=>({
-    tag, n:rs.length,
+    tag, n:new Set(rs.map(x=>x.wallet)).size,
     pnl:rs.reduce((s,x)=>s+x.realized_pnl_sol,0),
     solin:rs.reduce((s,x)=>s+x.sol_in,0),
     first:rs.map(x=>x.first_buy_time_utc).filter(Boolean).sort()[0]||'',
     last:rs.map(x=>x.last_sell_time_utc).filter(Boolean).sort().slice(-1)[0]||'',
+    // Derived from rows already loaded -- no extra query.
+    toks:[...new Set(rs.map(x=>x.token))].sort(),
     manual:rs.some(x=>x.tag_source==='manual'), rs,
   })).sort((a,b)=>(b.pnl-a.pnl)*(gSortDir<0?1:-1));
   const body=gs.map(x=>{
@@ -320,7 +427,7 @@ function renderGroups(){
       '<td>'+x.solin.toFixed(3)+'</td>'+
       '<td class="l"><span class="muted">'+(x.first||'—').replace('T',' ').replace('Z','')+'</span></td>'+
       '<td class="l"><span class="muted">'+(x.last||'—').replace('T',' ').replace('Z','')+'</span></td>'+
-      '<td class="muted">—</td></tr>';
+      '<td class="l">'+x.toks.map(t=>'<span class="tag" data-jump="'+esc(t)+'" data-jw="">'+esc(t)+'</span>').join(' ')+'</td></tr>';
     if(isOpen){
       h+='<tr><td></td><td colspan="7" class="l" style="padding:0 9px 8px">'+
         x.rs.sort((a,b)=>b.realized_pnl_sol-a.realized_pnl_sol).map(r=>
@@ -335,17 +442,16 @@ function renderGroups(){
   }).join('');
   document.getElementById('sub').textContent='· '+tab+' · '+gs.length+' groups';
   document.getElementById('view').innerHTML =
-    '<div class="note">⚠️ <strong>Tokens touched</strong> is not yet populated — it needs cross-token data, and only '+
-    TOKENS.join(', ')+' has been loaded. The column is present but empty rather than showing a 1 that would just be counting this page.</div>'+
     '<div class="tablebox"><table><thead><tr>'+
       '<th class="l"></th><th class="l">Tag</th><th>Wallets</th>'+
       '<th data-gsort="1" style="cursor:pointer">Combined PnL SOL '+(gSortDir<0?'▼':'▲')+'</th>'+
       '<th>Combined SOL in</th><th class="l">Earliest first buy</th><th class="l">Latest last sell</th>'+
-      '<th>Tokens touched</th></tr></thead><tbody>'+(body||'<tr><td colspan="8" class="l muted">no tags</td></tr>')+'</tbody></table></div>';
+      '<th class="l">Tokens</th></tr></thead><tbody>'+(body||'<tr><td colspan="8" class="l muted">no tags</td></tr>')+'</tbody></table></div>';
 }
 
 function render(){
   document.getElementById('tabs').innerHTML =
+    '<button class="'+(tab==='__all'?'on':'')+'" data-tab="__all">All wallets</button>'+
     TOKENS.map(t=>'<button class="'+(tab===t?'on':'')+'" data-tab="'+t+'">'+esc(t)+'</button>').join('')+
     '<button class="'+(tab==='__groups'?'on':'')+'" data-tab="__groups">Groups</button>';
   if(tab==='__groups') renderGroups(); else renderTable();
@@ -395,16 +501,19 @@ function exportCsv(){
   // addresses -- the table truncates for reading, a CSV that did so would be
   // useless for anything downstream.
   const rows=ordered().filter(x=>x.r).map(x=>x.r);
-  const cols=['token','wallet','tag','tag_source','first_buy_time_utc','first_buy_mcap_usd',
-    'last_sell_time_utc','n_buys','n_sells','sol_in','sol_out','realized_pnl_sol',
-    'realized_pnl_usd','tokens_still_held','hold_min','sold_out'];
+  const cols = tab==='__all'
+    ? ['wallet','tag','tokens_touched','tokens','total_pnl_sol','total_sol_in','total_sol_out',
+       'total_buys','total_sells','earliest_first_buy','latest_last_sell']
+    : ['token','wallet','tag','tag_source','first_buy_time_utc','first_buy_mcap_usd',
+       'last_sell_time_utc','n_buys','n_sells','sol_in','sol_out','realized_pnl_sol',
+       'realized_pnl_usd','tokens_still_held','hold_min','sold_out'];
   const q=(v)=>{ if(v===null||v===undefined) return '';
     const s=String(v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
   const csv=[cols.join(',')].concat(rows.map(r=>cols.map(c=>q(r[c])).join(','))).join('\n')+'\n';
   const stamp=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
-  a.download=tab.toLowerCase()+'_wallet_pnl_'+stamp+'.csv';
+  a.download=(tab==='__all'?'all-wallets':tab.toLowerCase())+'_wallet_pnl_'+stamp+'.csv';
   a.click(); URL.revokeObjectURL(a.href);
   toast('exported '+rows.length+' rows');
 }
@@ -432,8 +541,10 @@ document.addEventListener('click',(e)=>{
   const exp=e.target.closest('[data-exp]');
   if(exp){ const t=exp.dataset.exp; open.has(t)?open.delete(t):open.add(t); render(); return; }
   const th=e.target.closest('th[data-k]');
-  if(th){ if(mode!=='flat') mode='flat';
-    const k=th.dataset.k; if(sortKey===k) sortDir=-sortDir; else {sortKey=k;sortDir=-1;}
+  if(th){ const k=th.dataset.k;
+    if(tab==='__all'){ if(aSortKey===k) aSortDir=-aSortDir; else {aSortKey=k;aSortDir=-1;} }
+    else { if(mode!=='flat') mode='flat';
+      if(sortKey===k) sortDir=-sortDir; else {sortKey=k;sortDir=-1;} }
     page=1; render(); return; }
   const pb=e.target.closest('button[data-p]');
   if(pb){ page=Number(pb.dataset.p); render(); const b=document.querySelector('.tablebox'); if(b) b.scrollTop=0; return; }
@@ -457,6 +568,12 @@ document.addEventListener('click',(e)=>{
     inlineEdit(ed,row?row.tag:'',(v)=>saveTag([w],v)); return; }
   const rn=e.target.closest('[data-rename]');
   if(rn){ const t=rn.dataset.rename; inlineEdit(rn,t,(v)=>renameTag(t,v)); return; }
+  const jp=e.target.closest('[data-jump]');
+  if(jp){ tab=jp.dataset.jump; for(const k of Object.keys(F)) delete F[k];
+    const jw=jp.dataset.jw||'';
+    if(jw) F.q=jw;
+    mode='flat'; page=1; sel.clear(); render();
+    toast(jw?('showing '+jp.dataset.jump+' · '+jw.slice(0,4)+'…'+jw.slice(-4)):('showing '+jp.dataset.jump)); return; }
   const w=e.target.closest('.wallet');
   if(w){ navigator.clipboard.writeText(w.dataset.w).then(()=>toast('copied '+w.dataset.w.slice(0,4)+'…'+w.dataset.w.slice(-4))); }
 });
