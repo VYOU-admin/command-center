@@ -59,6 +59,63 @@ export function createWebServer(opts: WebServerOptions): Server {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     const path = url.pathname.replace(/\/+$/, '') || '/';
 
+    // Tag editing is the one thing the dashboard writes. Everything else stays
+    // read-only, so the surface that can change data is a single named path.
+    if (req.method === 'POST' && (path === '/api/wallet-tag' || path === '/api/tag-rename')) {
+      let raw = '';
+      for await (const chunk of req) {
+        raw += chunk;
+        if (raw.length > 1_000_000) {
+          sendJson(res, 413, { error: 'body too large' });
+          return;
+        }
+      }
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(raw || '{}') as Record<string, unknown>;
+      } catch {
+        sendJson(res, 400, { error: 'invalid json' });
+        return;
+      }
+      try {
+        if (path === '/api/wallet-tag') {
+          const wallets = Array.isArray(body.wallets) ? body.wallets.map(String) : [];
+          const tagRaw = body.tag;
+          const tag = tagRaw === null || tagRaw === '' ? null : String(tagRaw).trim().slice(0, 64);
+          if (wallets.length === 0) {
+            sendJson(res, 400, { error: 'no wallets given' });
+            return;
+          }
+          // Marked 'manual' so a later regroup, which only rewrites its own
+          // rows, can never silently undo a hand edit.
+          const r = await pool.query(
+            `update wallet_pnl set tag = $1, tag_source = case when $1 is null then null else 'manual' end
+              where wallet = any($2::text[]) returning wallet`,
+            [tag, wallets],
+          );
+          sendJson(res, 200, { ok: true, updated: r.rowCount ?? 0, tag });
+          return;
+        }
+        const from = String(body.from ?? '').trim();
+        const to = body.to === null || body.to === '' ? null : String(body.to).trim().slice(0, 64);
+        if (!from) {
+          sendJson(res, 400, { error: 'missing from' });
+          return;
+        }
+        const r = await pool.query(
+          `update wallet_pnl set tag = $1, tag_source = case when $1 is null then null else 'manual' end
+            where tag = $2 returning wallet`,
+          [to, from],
+        );
+        sendJson(res, 200, { ok: true, updated: r.rowCount ?? 0, tag: to });
+        return;
+      } catch (err) {
+        log.error('tag write failed', errorFields(err as Error));
+        sendJson(res, 500, { error: 'write failed' });
+        return;
+      }
+    }
+
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       sendJson(res, 405, { error: 'method not allowed' });
       return;
@@ -68,15 +125,17 @@ export function createWebServer(opts: WebServerOptions): Server {
       // A finished analysis rather than a monitor: one small static table, read
       // whole and handed to the browser to sort and paginate.
       const r = await pool.query(
-        `select wallet, tag, first_buy_time_utc, first_buy_mcap_usd, last_sell_time_utc,
-                n_buys, n_sells, sol_in, sol_out, realized_pnl_sol, realized_pnl_usd,
-                tokens_still_held, hold_min, sold_out
-           from cate_wallet_pnl
-          order by realized_pnl_sol desc`,
+        `select token, wallet, tag, tag_source, first_buy_time_utc, first_buy_mcap_usd,
+                last_sell_time_utc, n_buys, n_sells, sol_in, sol_out, realized_pnl_sol,
+                realized_pnl_usd, tokens_still_held, hold_min, sold_out
+           from wallet_pnl
+          order by token, realized_pnl_sol desc`,
       );
       const rows: CatePnlRow[] = r.rows.map((x: Record<string, unknown>) => ({
+        token: String(x.token ?? 'CATE'),
         wallet: String(x.wallet),
         tag: x.tag === null ? null : String(x.tag),
+        tag_source: x.tag_source === null ? null : String(x.tag_source),
         first_buy_time_utc: String(x.first_buy_time_utc ?? ''),
         first_buy_mcap_usd: Number(x.first_buy_mcap_usd ?? 0),
         last_sell_time_utc: x.last_sell_time_utc === null ? null : String(x.last_sell_time_utc),
