@@ -258,9 +258,81 @@ const scrapeBlocked: ScrapeFn = async (source) => {
  * Keyed by SHAPE, not by company. `vendor` covers every site whose page is an
  * anchor followed by prices, which is most of them.
  */
+
+/* -------------------------------------------------------------- armstrong */
+
+/**
+ * Armstrong publishes heating oil only behind its own quote form. The bare
+ * /get-price/ page carries the propane table and "$-.--- Please Call" for oil,
+ * which is why scraping it produced a propane-only source.
+ *
+ * The form takes TWO fields, and both matter: wcp_id selects the product
+ * (1 = Propane, 2 = Heating Oil) and zip_code selects the delivery area.
+ * Submitting only the zip re-renders the form, which is the failure the old
+ * config hit. With both, the dealer's own WordPress page returns the oil bands
+ * as plain HTML.
+ *
+ * The page says "Powered by DropletFuel", but that service is the OAuth
+ * checkout (authorize.php, PKCE, per-dealer client_id) — the price itself
+ * never goes through it, so no API integration is needed here.
+ */
+const scrapeArmstrong: ScrapeFn = async (source, fetcher, log) => {
+  const zip = source.zips[0];
+  if (!zip) throw new ParseError(source.id, 'a zip is required for the quote form');
+
+  const html = await fetcher.get(source.url, {
+    method: 'POST',
+    formData: { wcp_id: '2', zip_code: zip },
+  });
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ');
+
+  // "100-149 gallons: $ 4.85" / "300+ gallons: $ 4.80"
+  const observations: Observation[] = [];
+  const re = /(\d+)\s*(?:-\s*(\d+)|\+)?\s*gallons?\s*:\s*\$\s*(\d+\.\d{2,3})/gi;
+  for (const m of text.matchAll(re)) {
+    const min = Number(m[1]);
+    const max = m[2] ? Number(m[2]) : null;
+    const price = Number(m[3]);
+    if (!Number.isFinite(price) || price <= 0) continue;
+    observations.push({
+      source: source.id,
+      company: source.label,
+      zip,
+      city: null,
+      state: 'CT',
+      listingId: null,
+      dealerId: null,
+      listingPosition: null,
+      product: 'fuel_oil',
+      paymentType: null,
+      gallonMin: min,
+      gallonMax: max,
+      pricePerGallon: price,
+      gallonMinimum: null,
+      surchargeNote: null,
+      deliveryDate: null,
+      priceDate: null,
+      priceUpdatedOn: null,
+    });
+  }
+  if (observations.length === 0) {
+    // Loud, not silent: a form that stops returning bands must not look like a
+    // dealer with no prices.
+    throw new ParseError(source.id, `no gallon bands in the quote response for zip ${zip}`);
+  }
+  log.info('armstrong quote parsed', { zip, bands: observations.length });
+  return { observations, history: [], notes: { zip, bands: observations.length } };
+};
+
 export const SCRAPERS: Record<string, ScrapeFn> = {
   mckinley: scrapeMcKinley,
   cashheatingoil: scrapeCashHeatingOil,
+  armstrong: scrapeArmstrong,
   vendor: scrapeVendor,
   blocked: scrapeBlocked,
 };

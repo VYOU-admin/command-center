@@ -30,11 +30,12 @@ import { renderOilPanel } from '../web/oil-panel.js';
 import {
   buildCashWorkbook,
   buildOtherWorkbook,
-  diffOtherSources,
+  diffCompanyRows,
   diffTopRanks,
   selectCashRows,
+  selectCompanyRows,
   type CashRow,
-  type OtherQuote,
+  type CompanyRow,
 } from './oil/workbook.js';
 import {
   buildChangeAlert,
@@ -250,56 +251,48 @@ async function latestCashQuotes(
   return r.rows as never;
 }
 
-/** Everything that is not the CashHeatingOil source, in the original layout. */
-async function otherSourceRows(
+/**
+ * One heating-oil price per company: the band covering a 150-gallon delivery,
+ * taken from each source's most recent scrape. Propane, diesel and DEF never
+ * reach here — the product filter is applied in SQL and the band choice is made
+ * on parsed bounds rather than on each site's own wording.
+ */
+async function companyRows(
   client: PoolClient,
   monitorId: string,
   cfg: OilConfig,
-): Promise<CsvRow[]> {
-  const r = await client.query(
-    `select observed_at, company, source, zip,
-            case when gallon_min is null then null
-                 when gallon_max is null then gallon_min || '+'
-                 else gallon_min || '-' || gallon_max end as band,
-            payment_type, price_per_gallon
-       from oil_observations
-      where monitor_id = $1 and source <> $2
-        and product = 'fuel_oil'
-        and observed_at > now() - ($3 || ' hours')::interval
-      order by observed_at desc, price_per_gallon asc`,
-    [monitorId, cfg.cashSourceId, cfg.csvWindowHours],
-  );
-  return r.rows as CsvRow[];
-}
-
-/** Latest heating-oil quote per other source and band, for change detection. */
-async function latestOtherQuotes(
-  client: PoolClient,
-  monitorId: string,
-  cfg: OilConfig,
-): Promise<OtherQuote[]> {
+): Promise<CompanyRow[]> {
   const r = await client.query(
     `with latest as (
        select source, max(observed_at) t from oil_observations
         where monitor_id = $1 and source <> $2 and product = 'fuel_oil'
         group by source
      )
-     select o.source, o.company,
-            case when o.gallon_min is null then null
-                 when o.gallon_max is null then o.gallon_min || '+'
-                 else o.gallon_min || '-' || o.gallon_max end as band,
-            o.price_per_gallon
+     select o.observed_at, o.company, o.source, o.zip, o.gallon_min, o.gallon_max,
+            o.payment_type, o.price_per_gallon
        from oil_observations o join latest l
          on l.source = o.source and l.t = o.observed_at
       where o.monitor_id = $1 and o.product = 'fuel_oil'`,
     [monitorId, cfg.cashSourceId],
   );
-  return r.rows.map((x) => ({
-    source: String(x.source),
-    company: x.company === null ? null : String(x.company),
-    band: x.band === null ? null : String(x.band),
-    price: Number(x.price_per_gallon),
-  }));
+  return selectCompanyRows(
+    r.rows.map((x) => ({
+      observed_at: x.observed_at as Date,
+      company: x.company === null ? null : String(x.company),
+      source: String(x.source),
+      zip: x.zip === null ? null : String(x.zip),
+      gallon_min: x.gallon_min === null ? null : Number(x.gallon_min),
+      gallon_max: x.gallon_max === null ? null : Number(x.gallon_max),
+      payment_type: x.payment_type === null ? null : String(x.payment_type),
+      price_per_gallon: x.price_per_gallon as string,
+      // OMNI publishes no band at all; the config's default lower bound must
+      // not be presented as if the site had stated one.
+      band_label_override: cfg.noBandSources.includes(String(x.source))
+        ? '(no band stated)'
+        : null,
+    })),
+    cfg.exportGallons,
+  );
 }
 
 async function loadPreviousRanks(
@@ -559,7 +552,7 @@ const adapter: SourceAdapter<ScrapeRun> = {
 
     const previous = await previousPrices(client, ctx.monitorId);
     // Taken BEFORE this run's rows land, so the comparison is run-to-run.
-    const observationsBefore = await latestOtherQuotes(client, ctx.monitorId, cfg);
+    const observationsBefore = await companyRows(client, ctx.monitorId, cfg);
 
     const observations = results.flatMap((r) => r.observations);
     const stored = await writeObservations(client, ctx.monitorId, observations);
@@ -628,14 +621,8 @@ const adapter: SourceAdapter<ScrapeRun> = {
 
     // Other sources get the same change-only treatment: a vendor that did not
     // move its price should not generate a ping just because a run happened.
-    const otherNow = await latestOtherQuotes(client, ctx.monitorId, cfg);
-    const otherBefore: OtherQuote[] = observationsBefore.map((o) => ({
-      source: o.source,
-      company: o.company,
-      band: o.band,
-      price: o.price,
-    }));
-    const otherChanges = diffOtherSources(otherBefore, otherNow);
+    const otherNow = await companyRows(client, ctx.monitorId, cfg);
+    const otherChanges = diffCompanyRows(observationsBefore, otherNow);
     // After a wipe there is no baseline, so the change list is empty by
     // construction. Ping anyway once, or the first clean run produces files
     // nobody is told about.
@@ -654,9 +641,7 @@ const adapter: SourceAdapter<ScrapeRun> = {
             },
             {
               filename: 'other-sources.xlsx',
-              content: await buildOtherWorkbook(
-                await otherSourceRows(client, ctx.monitorId, cfg),
-              ),
+              content: await buildOtherWorkbook(otherNow),
               contentType:
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
               encoding: 'base64' as const,

@@ -43,6 +43,84 @@ export interface OtherRow {
   price_per_gallon: string | number;
 }
 
+/** One heating-oil price per company: the band that covers a 150 gal delivery. */
+export interface CompanyRow {
+  observed_at: Date;
+  company: string;
+  source: string;
+  band_label: string;
+  price_per_gallon: number;
+  zip: string | null;
+}
+
+/**
+ * Pick the single band that a 150-gallon delivery falls into.
+ *
+ * Every site labels its tiers differently — "100-299 Gallons", "TODAY'S PRICE",
+ * a bare "150" row, "150-199 gallons" behind a zip form — so the choice is made
+ * on the parsed bounds rather than on the label. Among a source's heating-oil
+ * bands, take the one with the HIGHEST lower bound that still admits 150. The
+ * highest-qualifying bound is what makes open-ended tiers work: a site
+ * publishing 100+ and 150+ means the 150+ tier for this delivery, not the 100+.
+ *
+ * Cash wins where a site quotes cash and credit separately.
+ */
+export function selectCompanyRows(
+  rows: {
+    observed_at: Date;
+    company: string | null;
+    source: string;
+    zip: string | null;
+    gallon_min: number | null;
+    gallon_max: number | null;
+    payment_type: string | null;
+    price_per_gallon: string | number;
+    band_label_override?: string | null;
+  }[],
+  gallons: number,
+): CompanyRow[] {
+  const bySource = new Map<string, typeof rows>();
+  for (const r of rows) {
+    const list = bySource.get(r.source) ?? [];
+    list.push(r);
+    bySource.set(r.source, list);
+  }
+
+  const out: CompanyRow[] = [];
+  for (const [source, list] of [...bySource.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const eligible = list.filter((r) => {
+      const min = r.gallon_min ?? 0;
+      const max = r.gallon_max;
+      return min <= gallons && (max === null || max >= gallons);
+    });
+    if (eligible.length === 0) continue;
+
+    // Cash beats credit; then the highest qualifying lower bound.
+    eligible.sort((a, b) => {
+      const cash = (x: typeof a): number => (x.payment_type === 'credit' ? 1 : 0);
+      if (cash(a) !== cash(b)) return cash(a) - cash(b);
+      return (b.gallon_min ?? 0) - (a.gallon_min ?? 0);
+    });
+    const pick = eligible[0]!;
+    const label =
+      pick.band_label_override ??
+      (pick.gallon_min === null
+        ? '(no band stated)'
+        : pick.gallon_max === null
+          ? `${pick.gallon_min}+`
+          : `${pick.gallon_min}-${pick.gallon_max}`);
+    out.push({
+      observed_at: pick.observed_at,
+      company: pick.company ?? source,
+      source,
+      band_label: label,
+      price_per_gallon: Number(pick.price_per_gallon),
+      zip: pick.zip,
+    });
+  }
+  return out;
+}
+
 /** Zips where the FJB blurb matched nothing this run. */
 export interface FjbMiss {
   zip: string;
@@ -102,29 +180,24 @@ export async function buildCashWorkbook(
   return toBuffer(wb);
 }
 
-export async function buildOtherWorkbook(rows: OtherRow[]): Promise<string> {
+export async function buildOtherWorkbook(rows: CompanyRow[]): Promise<string> {
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('Other sources');
-  // The original CSV layout, column for column.
+  const ws = wb.addWorksheet('Heating oil @150 gal');
   ws.columns = [
     { header: 'timestamp', key: 'timestamp', width: 26 },
-    { header: 'company', key: 'company', width: 26 },
-    { header: 'source', key: 'source', width: 18 },
-    { header: 'zip', key: 'zip', width: 10 },
-    { header: 'gallon_band', key: 'band', width: 14 },
-    { header: 'payment_type', key: 'payment_type', width: 14 },
+    { header: 'company', key: 'company', width: 28 },
+    { header: 'band_label', key: 'band', width: 20 },
     { header: 'price_per_gallon', key: 'price', width: 18 },
+    { header: 'zip', key: 'zip', width: 10 },
   ];
   ws.getRow(1).font = { bold: true };
-  for (const r of rows) {
+  for (const r of [...rows].sort((a, b) => a.price_per_gallon - b.price_per_gallon)) {
     const row = ws.addRow({
       timestamp: r.observed_at.toISOString(),
-      company: r.company ?? '',
-      source: r.source,
+      company: r.company,
+      band: r.band_label,
+      price: r.price_per_gallon,
       zip: r.zip === null ? '' : String(r.zip),
-      band: r.band ?? '',
-      payment_type: r.payment_type ?? '',
-      price: Number(r.price_per_gallon),
     });
     row.getCell('price').numFmt = '0.000';
     row.getCell('zip').numFmt = '@';
@@ -270,6 +343,32 @@ export interface OtherQuote {
   company: string | null;
   band: string | null;
   price: number;
+}
+
+/** Change lines for the one-row-per-company view. */
+export function diffCompanyRows(previous: CompanyRow[], current: CompanyRow[]): string[] {
+  const prev = new Map(previous.map((r) => [r.source, r]));
+  const out: string[] = [];
+  for (const r of [...current].sort((a, b) => a.company.localeCompare(b.company))) {
+    const p = prev.get(r.source);
+    if (!p) {
+      out.push(`${r.company} — new quote $${r.price_per_gallon.toFixed(2)} · ${r.band_label}`);
+      continue;
+    }
+    const delta = r.price_per_gallon - p.price_per_gallon;
+    if (Math.abs(delta) <= 0.0005) continue;
+    const sign = delta > 0 ? '+' : '-';
+    out.push(
+      `${r.company} — $${p.price_per_gallon.toFixed(2)} → $${r.price_per_gallon.toFixed(2)} ` +
+        `(${sign}${Math.abs(delta).toFixed(2)}) · ${r.band_label}`,
+    );
+  }
+  for (const [source, p] of prev) {
+    if (!current.some((c) => c.source === source)) {
+      out.push(`${p.company} — no longer quoting (was $${p.price_per_gallon.toFixed(2)})`);
+    }
+  }
+  return out;
 }
 
 export function diffOtherSources(

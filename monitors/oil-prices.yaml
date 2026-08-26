@@ -63,6 +63,21 @@ options:
     # construction, so a clean first run does not produce files silently.
     force_first_ping: true
 
+    # ONE ROW PER COMPANY. The single price reported is the one covering a
+    # delivery of this many gallons. Sites label their tiers differently —
+    # "100-299 Gallons", "TODAY'S PRICE", a bare "150" row, "150-199 gallons"
+    # behind a zip form — so the band is chosen on parsed bounds, taking the
+    # highest lower bound that still admits this size. That is what makes
+    # open-ended tiers resolve correctly: a site publishing both 100+ and 150+
+    # means the 150+ tier for this delivery.
+    gallons: 150
+
+    # OMNI states no band whatsoever, only "Today's Price is $X per gallon".
+    # Its configured lower bound is a parsing default, not something the site
+    # published, so the export says so rather than asserting a band.
+    no_band_sources:
+      - omni
+
   retention:
     # oil_observations rolls a 24-hour window: appended continuously, anything
     # older pruned each run. No daily archive file is kept — the workbooks are
@@ -178,15 +193,28 @@ options:
 
     - id: armstrong
       label: Armstrong Oil & Propane
-      kind: vendor
+      kind: armstrong
       enabled: true
-      url: https://armstrongoilandpropane.com/
-      # Heating oil is published as "$-.--- Please Call", so only propane has an
-      # actual number. Captured as propane rather than pretending it is oil.
-      extract:
-        - anchor: "Today's Propane Pricing"
-          window: 28
-          product: propane
+      # Heating oil is only published behind the quote form. The bare page
+      # carries the propane table and "$-.--- Please Call" for oil, which is
+      # what the old vendor-scrape was reading.
+      #
+      # The form needs TWO fields: wcp_id=2 selects Heating Oil (1 is propane)
+      # and zip_code selects the area. Submitting only the zip re-renders the
+      # form. With both, the dealer's own page returns the oil bands as plain
+      # HTML — for 06786: 100-149 $4.85, 150-199 $4.85, 200-299 $4.85,
+      # 300+ $4.80.
+      #
+      # The page says "Powered by DropletFuel", but that service is the OAuth
+      # checkout (authorize.php, PKCE, per-dealer client_id); the price never
+      # goes through it, so no API integration is required.
+      url: https://armstrongoilandpropane.com/get-price/
+      site_url: https://armstrongoilandpropane.com/
+      # One zip, one price — this file reports a company, not a zip grid. The
+      # per-zip breakout is CashHeatingOil's job.
+      zips:
+        - "06786"
+
 
     # ------------------------------------------------------- cannot be scraped
     # Kept in the roster with a reason rather than deleted, so the list stays a
@@ -231,9 +259,14 @@ options:
       enabled: false
       url: https://hurricaneenergyct.com/get-price
       disabled_reason: >-
-        No price in the served HTML. The page embeds a third-party
-        api.dropletfuel.com widget, so the price belongs to that service rather
-        than to this site.
+        Re-checked 2026-08-26: the DropletFuel explanation below was WRONG and
+        has been corrected so nobody acts on it. hurricaneenergyct.com/get-price
+        now returns ~838 characters with NO api.dropletfuel.com reference at
+        all, so whatever the page served before, it does not embed that widget
+        today. The Armstrong investigation also showed DropletFuel is the OAuth
+        checkout rather than a price API, so it would not have been the source
+        of a price in any case. Still disabled because no price has been located
+        in what the site serves; it needs its own fresh investigation.
 
     - id: tonys
       label: Tony's Oil

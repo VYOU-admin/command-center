@@ -60,6 +60,10 @@ export interface OilConfig {
    * diff against and the change list is empty by construction.
    */
   forceFirstPing: boolean;
+  /** Delivery size the single reported price must cover. */
+  exportGallons: number;
+  /** Sources that publish no band; their label says so rather than inventing one. */
+  noBandSources: string[];
   sources: SourceConfig[];
   /**
    * Identifies a company on listing sites that hide the dealer name. Matched on
@@ -221,6 +225,10 @@ export function parseOilConfig(
   const cashBandMax = typeof ex['band_max'] === 'number' ? ex['band_max'] : 149;
   const cashTopN = typeof ex['top_n'] === 'number' ? ex['top_n'] : 2;
   const forceFirstPing = ex['force_first_ping'] !== false;
+  const exportGallons = typeof ex['gallons'] === 'number' ? ex['gallons'] : 150;
+  const noBandSources = Array.isArray(ex['no_band_sources'])
+    ? (ex['no_band_sources'] as unknown[]).map((v) => String(v))
+    : [];
 
   const rawBlurbs = options['company_blurbs'];
   const companyBlurbs: CompanyBlurb[] = Array.isArray(rawBlurbs)
@@ -252,6 +260,8 @@ export function parseOilConfig(
     cashBandMax,
     cashTopN,
     forceFirstPing,
+    exportGallons,
+    noBandSources,
     sources,
     companyBlurbs,
     retentionFullHours: configNumber(r, 'full_resolution_hours', ctx, 48),
