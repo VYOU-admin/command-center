@@ -672,6 +672,25 @@ const adapter: SourceAdapter<ScrapeRun> = {
       ctx.queueAlert(buildDigestAlert(cfg, observations, failed, localDate, null, files));
     }
 
+    // Record what was sent. Without this the digest has no memory of the day
+    // it last ran, so `last_digest_on != today` stays true and it fires on
+    // EVERY run rather than once a day.
+    await client.query(
+      `insert into oil_alert_state (monitor_id, last_alert_at, last_digest_on, last_change_count)
+       values ($1, case when $2 then now() else null end, case when $3 then $4::date else null end, $5)
+       on conflict (monitor_id) do update set
+         last_alert_at     = case when $2 then now() else oil_alert_state.last_alert_at end,
+         last_digest_on    = case when $3 then $4::date else oil_alert_state.last_digest_on end,
+         last_change_count = $5`,
+      [
+        ctx.monitorId,
+        shouldPing,
+        digestDue,
+        localDate,
+        rankChanges.length + otherChanges.length,
+      ],
+    );
+
     await saveRanks(client, ctx.monitorId, cashRows);
 
     const pruned = await pruneObservations(client, ctx.monitorId, cfg);
