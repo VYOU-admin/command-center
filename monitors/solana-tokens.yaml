@@ -1,3 +1,20 @@
+# DISABLED 2026-08-25.
+#
+# Collection stopped by request. Focus has moved to the pump.fun early-window
+# work, and this monitor's DexScreener-based scanning of already-listed tokens
+# answers a different question from "what does a launch do in its first ten
+# minutes".
+#
+# It also grew ~8.8 MB/day with no retention policy — 3.2 GB/year — which made
+# it the next thing after early_snapshots to fill the volume.
+#
+# ALL TABLES ARE KEPT: solana_tokens, solana_token_observations and
+# solana_top_membership are untouched and remain queryable. Existing analyses
+# (ALERT_OUTCOMES.md and the rest) stay reproducible; only new collection stops.
+#
+# NOTE: this monitor also READ pump_launches, to seed its watch list from
+# recent graduates. That source is disabled too, so the dependency lapses
+# together rather than leaving a monitor reading a table nothing updates.
 # Solana new-token tracking.
 #
 # Two ingest stages, both free and key-less:
@@ -11,7 +28,7 @@
 id: solana-tokens
 name: Solana Tokens
 source: solana-tokens
-enabled: true
+enabled: false
 schedule: 1h
 
 options:

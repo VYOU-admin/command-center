@@ -1,3 +1,18 @@
+# DISABLED 2026-08-25.
+#
+# Collection stopped by request. It derived velocity summaries and deployer
+# statistics from pump_launches and pump_curve_samples, both written by
+# pumpfun-launches, which was itself disabled earlier today. With no new input
+# there is nothing left for it to compute.
+#
+# ALL TABLES ARE KEPT: pump_velocity_summary and pump_deployer_stats are
+# untouched and remain queryable, as are the pump_launches and
+# pump_curve_samples tables they were derived from. The deployer analysis run
+# today drew on pump_deployer_stats and stays reproducible.
+#
+# NOTE: this monitor was also the only pruner of pump_curve_samples (83 MB).
+# With it disabled that table is frozen at its current size — it will neither
+# grow nor shrink. Reclaiming it is a separate decision.
 # pump.fun outcome reconciliation, deployer statistics, and retention.
 #
 # Separate from the launch stream so it has its own health and its own staleness
@@ -7,7 +22,7 @@
 id: pumpfun-outcomes
 name: Pump.fun Outcomes
 source: pumpfun-outcomes
-enabled: true
+enabled: false
 schedule: 10m
 
 options:
