@@ -59,6 +59,21 @@ options:
     # if it ever is, it is treated as 0 and the token passes this test.
     max_buy_share: 0.7
 
+    # UNVALIDATED TEST RANGES — display only.
+    #
+    # These appear in a separate, clearly-marked footer block on the alert and
+    # are recorded on every early_alerts row, but they GATE NOTHING: a token
+    # outside both ranges still alerts exactly as before. They exist so the
+    # question "would these ranges have helped" can be answered from stored
+    # data later instead of being argued about now.
+    #
+    # Nothing here has been backtested. Tune freely; because the thresholds in
+    # force are written onto each alert row, past alerts stay interpretable
+    # after a change rather than being silently re-scored.
+    test_curve_min: 60
+    test_curve_max: 79
+    test_sell_buy_max: 0.50
+
   # Bounds how far back a run will look. The boot time takes precedence, so
   # this never resurrects a backlog — it only limits the scan after a brief
   # gap. A gap longer than this drops the tokens in it rather than alerting

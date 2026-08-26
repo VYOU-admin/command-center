@@ -48,8 +48,28 @@ create table if not exists early_alerts (
   min_curve_sol         numeric,
   max_buy_share         numeric,
 
+  -- UNVALIDATED TEST RANGES. These do not gate the alert; they are recorded so
+  -- the question "did these ranges mean anything" can be answered later from
+  -- stored data rather than re-derived. Null ratio means no buy volume, which
+  -- is not the same as a ratio of zero.
+  sell_buy_ratio        numeric,
+  in_test_curve_range   boolean,
+  in_test_sell_buy_range boolean,
+  test_curve_min        numeric,
+  test_curve_max        numeric,
+  test_sell_buy_max     numeric,
+
   primary key (monitor_id, mint)
 );
+
+-- The table predates the test-range columns, so add them idempotently rather
+-- than relying on the create above for an existing deployment.
+alter table early_alerts add column if not exists sell_buy_ratio         numeric;
+alter table early_alerts add column if not exists in_test_curve_range    boolean;
+alter table early_alerts add column if not exists in_test_sell_buy_range boolean;
+alter table early_alerts add column if not exists test_curve_min         numeric;
+alter table early_alerts add column if not exists test_curve_max         numeric;
+alter table early_alerts add column if not exists test_sell_buy_max      numeric;
 
 create index if not exists early_alerts_time_idx
   on early_alerts (monitor_id, alerted_at desc);

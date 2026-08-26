@@ -39,6 +39,10 @@ interface AlertConfig {
   maxBuyShare: number;
   lookbackMinutes: number;
   maxPerRun: number;
+  /** Unvalidated display-only ranges. They never gate an alert. */
+  testCurveMin: number;
+  testCurveMax: number;
+  testSellBuyMax: number;
 }
 
 /** Per-monitor boot time, so a deploy never alerts on the existing backlog. */
@@ -70,6 +74,9 @@ function parseConfig(options: Record<string, unknown>, ctx: string): AlertConfig
     maxBuyShare,
     lookbackMinutes: configNumber(options, 'lookback_minutes', ctx, 30),
     maxPerRun: configNumber(options, 'max_alerts_per_run', ctx, 50),
+    testCurveMin: configNumber(t, 'test_curve_min', ctx, 60),
+    testCurveMax: configNumber(t, 'test_curve_max', ctx, 79),
+    testSellBuyMax: configNumber(t, 'test_sell_buy_max', ctx, 0.5),
   };
 }
 
@@ -91,6 +98,8 @@ interface Candidate {
   sellVolumeSol: number;
   largestBuySol: number;
   largestBuyShare: number;
+  /** sell_volume / buy_volume at the mark. Null when nothing was bought. */
+  sellBuyRatio: number | null;
   hasTelegram: boolean | null;
   hasTwitter: boolean | null;
   hasWebsite: boolean | null;
@@ -168,12 +177,48 @@ function buildAlert(c: Candidate, cfg: AlertConfig) {
         inline: true,
       },
       {
+        name: 'Sell/buy',
+        value: c.sellBuyRatio === null ? '—' : c.sellBuyRatio.toFixed(2),
+        inline: true,
+      },
+      {
         name: 'Socials',
         value: socials.length ? socials.join(' · ') : 'none',
         inline: true,
       },
+      // Visually separated and explicitly labelled. These ranges gate nothing
+      // and have never been validated; presenting them like the measured
+      // fields above would read as a recommendation, which they are not.
+      {
+        name: '\u200b',
+        value: buildTestRanges(c, cfg),
+        inline: false,
+      },
     ],
   };
+}
+
+/**
+ * The unvalidated test ranges, rendered as a fenced block so they read as a
+ * scratchpad rather than as part of the measured data above.
+ */
+function buildTestRanges(c: Candidate, cfg: AlertConfig): string {
+  const curveIn = c.curveSol >= cfg.testCurveMin && c.curveSol <= cfg.testCurveMax;
+  const ratioIn = c.sellBuyRatio !== null && c.sellBuyRatio <= cfg.testSellBuyMax;
+  const mark = (v: boolean): string => (v ? 'IN RANGE' : 'out');
+  const ratioTxt = c.sellBuyRatio === null ? 'n/a (no buys)' : c.sellBuyRatio.toFixed(2);
+  // Fixed-width label column so the two checks line up under each other; a
+  // ragged block is harder to scan at a glance on a phone.
+  const line = (label: string, value: string, ok: boolean): string =>
+    `${label.padEnd(26)}${value.padStart(9)}  [${mark(ok)}]`;
+  return (
+    '⚠️ **TEST RANGES — unvalidated.** Not a signal; these gate nothing.\n' +
+    '```\n' +
+    line(`Curve at 5m ${cfg.testCurveMin}-${cfg.testCurveMax} SOL`, fmtSol(c.curveSol), curveIn) +
+    '\n' +
+    line(`Sell/buy ratio <= ${cfg.testSellBuyMax.toFixed(2)}`, ratioTxt, ratioIn) +
+    '\n```'
+  );
 }
 
 async function writeAndPick(
@@ -193,14 +238,18 @@ async function writeAndPick(
        curve_sol, mcap_usd, price_usd, trade_count, buy_count, sell_count,
        unique_buyers, unique_sellers, buy_volume_sol, sell_volume_sol,
        largest_buy_sol, largest_buy_share, has_telegram, has_twitter,
-       has_website, min_curve_sol, max_buy_share
+       has_website, min_curve_sol, max_buy_share,
+       sell_buy_ratio, in_test_curve_range, in_test_sell_buy_range,
+       test_curve_min, test_curve_max, test_sell_buy_max
      )
      select $1, * from unnest(
        $2::text[], $3::timestamptz[], $4::numeric[], $5::text[], $6::text[],
        $7::numeric[], $8::numeric[], $9::numeric[], $10::int[], $11::int[], $12::int[],
        $13::int[], $14::int[], $15::numeric[], $16::numeric[],
        $17::numeric[], $18::numeric[], $19::boolean[], $20::boolean[],
-       $21::boolean[], $22::numeric[], $23::numeric[]
+       $21::boolean[], $22::numeric[], $23::numeric[],
+       $24::numeric[], $25::boolean[], $26::boolean[],
+       $27::numeric[], $28::numeric[], $29::numeric[]
      )
      on conflict (monitor_id, mint) do nothing
      returning mint`,
@@ -228,6 +277,12 @@ async function writeAndPick(
       rows.map((r) => r.hasWebsite),
       rows.map(() => cfg.minCurveSol),
       rows.map(() => cfg.maxBuyShare),
+      rows.map((r) => r.sellBuyRatio),
+      rows.map((r) => r.curveSol >= cfg.testCurveMin && r.curveSol <= cfg.testCurveMax),
+      rows.map((r) => r.sellBuyRatio !== null && r.sellBuyRatio <= cfg.testSellBuyMax),
+      rows.map(() => cfg.testCurveMin),
+      rows.map(() => cfg.testCurveMax),
+      rows.map(() => cfg.testSellBuyMax),
     ],
   );
   for (const row of res.rows) inserted.add(row.mint);
@@ -322,6 +377,9 @@ const adapter: SourceAdapter<Drain> = {
         sellVolumeSol: n(r.sell_volume_sol),
         largestBuySol,
         largestBuyShare: curveSol > 0 ? largestBuySol / curveSol : 0,
+        // Null, not zero: "nothing was bought" and "nothing was sold" are
+        // different facts and must not collapse into the same number.
+        sellBuyRatio: n(r.buy_volume_sol) > 0 ? n(r.sell_volume_sol) / n(r.buy_volume_sol) : null,
         hasTelegram: (r.has_telegram as boolean | null) ?? null,
         hasTwitter: (r.has_twitter as boolean | null) ?? null,
         hasWebsite: (r.has_website as boolean | null) ?? null,
