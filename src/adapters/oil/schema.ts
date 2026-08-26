@@ -105,4 +105,18 @@ alter table oil_observations add column if not exists company text;
 
 create index if not exists oil_obs_company_idx
   on oil_observations (monitor_id, company, observed_at desc);
+
+-- The ranked top-N per zip as last reported, so the next run can say what
+-- changed. Kept separate from oil_observations because that table rolls on a
+-- 24-hour window and the comparison must survive a prune.
+create table if not exists oil_rank_state (
+  monitor_id  text        not null,
+  zip         text        not null,
+  rank        integer     not null,
+  price       numeric     not null,
+  dealer_id   text,
+  is_fjb      boolean     not null default false,
+  observed_at timestamptz not null,
+  primary key (monitor_id, zip, rank)
+);
 `;

@@ -24,6 +24,12 @@ export interface AlertFile {
   filename: string;
   content: string;
   contentType?: string;
+  /**
+   * How `content` is encoded. Binary attachments (xlsx and the like) must be
+   * carried as base64 and decoded here — treating them as UTF-8 text silently
+   * corrupts every non-ASCII byte, producing a file Excel refuses to open.
+   */
+  encoding?: 'utf8' | 'base64';
 }
 
 export interface Alert {
@@ -135,6 +141,27 @@ export class DiscordSink {
       const form = new FormData();
       form.append('payload_json', JSON.stringify(body));
       files.forEach((file, i) => {
+        if (file.encoding === 'base64') {
+          // Binary: decode and attach as-is. Truncating a zip container (which
+          // is what xlsx is) would produce an unopenable file rather than a
+          // clipped one, so an oversized binary is dropped with a warning.
+          const buf = Buffer.from(file.content, 'base64');
+          if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
+            log.warn('binary attachment too large, dropped', {
+              filename: file.filename,
+              bytes: buf.byteLength,
+            });
+            return;
+          }
+          form.append(
+            `files[${i}]`,
+            new Blob([new Uint8Array(buf)], {
+              type: file.contentType ?? 'application/octet-stream',
+            }),
+            file.filename,
+          );
+          return;
+        }
         let content = file.content;
         if (Buffer.byteLength(content) > MAX_ATTACHMENT_BYTES) {
           // Truncate on a line boundary and say so inside the file itself, so a

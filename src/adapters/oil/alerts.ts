@@ -273,6 +273,7 @@ export function buildDigestAlert(
   failed: { source: SourceConfig; error: string | null }[],
   localDate: string,
   csv: string | null,
+  files?: Alert['files'],
 ): Alert {
   // Unlike the change alert, this one is meant to be read cold, so it carries
   // the full ranked list rather than only what moved.
@@ -312,13 +313,17 @@ export function buildDigestAlert(
     title: `Daily oil price digest — ${localDate}`,
     description: body,
     fields: failureField(failed),
-    ...(csv
-      ? {
-          files: [
-            { filename: `oil-prices-${cfg.csvWindowHours}h.csv`, content: csv, contentType: 'text/csv' },
-          ],
-        }
-      : {}),
+    // The digest now carries the same two workbooks as the change ping; the
+    // legacy CSV path is kept only for callers that still pass one.
+    ...(files && files.length > 0
+      ? { files }
+      : csv
+        ? {
+            files: [
+              { filename: `oil-prices-${cfg.csvWindowHours}h.csv`, content: csv, contentType: 'text/csv' },
+            ],
+          }
+        : {}),
   };
 }
 

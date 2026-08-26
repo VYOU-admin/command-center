@@ -46,6 +46,20 @@ export interface CompanyBlurb {
 }
 
 export interface OilConfig {
+  /** Which source the narrow CashHeatingOil workbook is built from. */
+  cashSourceId: string;
+  /** The company label the blurb match assigns to FJB. */
+  fjbCompany: string;
+  cashBandMin: number;
+  cashBandMax: number;
+  /** How many cheapest dealers per zip the workbook reports. */
+  cashTopN: number;
+  /**
+   * Send a ping on the first run after the rank state is empty. Without it a
+   * wipe would produce files nobody is told about, because there is nothing to
+   * diff against and the change list is empty by construction.
+   */
+  forceFirstPing: boolean;
   sources: SourceConfig[];
   /**
    * Identifies a company on listing sites that hide the dealer name. Matched on
@@ -200,6 +214,14 @@ export function parseOilConfig(
     throw new Error(`${ctx}: alerts.timezone is not a valid IANA zone: ${timezone}`);
   }
 
+  const ex = (options['exports'] ?? {}) as Record<string, unknown>;
+  const cashSourceId = typeof ex['cash_source_id'] === 'string' ? ex['cash_source_id'] : 'cashheatingoil';
+  const fjbCompany = typeof ex['fjb_company'] === 'string' ? ex['fjb_company'] : 'FJBOil';
+  const cashBandMin = typeof ex['band_min'] === 'number' ? ex['band_min'] : 100;
+  const cashBandMax = typeof ex['band_max'] === 'number' ? ex['band_max'] : 149;
+  const cashTopN = typeof ex['top_n'] === 'number' ? ex['top_n'] : 2;
+  const forceFirstPing = ex['force_first_ping'] !== false;
+
   const rawBlurbs = options['company_blurbs'];
   const companyBlurbs: CompanyBlurb[] = Array.isArray(rawBlurbs)
     ? rawBlurbs.map((b, i) => {
@@ -224,6 +246,12 @@ export function parseOilConfig(
   const r = section(options, 'retention');
 
   return {
+    cashSourceId,
+    fjbCompany,
+    cashBandMin,
+    cashBandMax,
+    cashTopN,
+    forceFirstPing,
     sources,
     companyBlurbs,
     retentionFullHours: configNumber(r, 'full_resolution_hours', ctx, 48),

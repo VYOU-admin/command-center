@@ -28,6 +28,13 @@ import { createFetcher } from './oil/fetch.js';
 import { SCRAPERS, scrapeMcKinleyHistory, type Observation } from './oil/sources.js';
 import { renderOilPanel } from '../web/oil-panel.js';
 import {
+  buildCashWorkbook,
+  buildOtherWorkbook,
+  diffTopRanks,
+  selectCashRows,
+  type CashRow,
+} from './oil/workbook.js';
+import {
   buildChangeAlert,
   buildCsv,
   buildDigestAlert,
@@ -207,6 +214,103 @@ export function keyOf(r: PriceKey): string {
     r.product,
     r.gallon_min ?? (r as { gallonMin?: number | null }).gallonMin ?? '',
   ].join('|');
+}
+
+
+/** Cash quotes in the reported band for the most recent observation time. */
+async function latestCashQuotes(
+  client: PoolClient,
+  monitorId: string,
+  cfg: OilConfig,
+): Promise<
+  {
+    observed_at: Date;
+    zip: string;
+    price_per_gallon: string;
+    company: string | null;
+    dealer_id: string | null;
+    listing_position: number | null;
+  }[]
+> {
+  const r = await client.query(
+    `with latest as (
+       select max(observed_at) t from oil_observations
+        where monitor_id = $1 and source = $2
+     )
+     select o.observed_at, o.zip, o.price_per_gallon, o.company, o.dealer_id, o.listing_position
+       from oil_observations o, latest
+      where o.monitor_id = $1 and o.source = $2 and o.observed_at = latest.t
+        and o.payment_type = 'cash'
+        and o.gallon_min = $3 and o.gallon_max = $4
+        and o.zip is not null`,
+    [monitorId, cfg.cashSourceId, cfg.cashBandMin, cfg.cashBandMax],
+  );
+  return r.rows as never;
+}
+
+/** Everything that is not the CashHeatingOil source, in the original layout. */
+async function otherSourceRows(
+  client: PoolClient,
+  monitorId: string,
+  cfg: OilConfig,
+): Promise<CsvRow[]> {
+  const r = await client.query(
+    `select observed_at, company, source, zip,
+            case when gallon_min is null then null
+                 when gallon_max is null then gallon_min || '+'
+                 else gallon_min || '-' || gallon_max end as band,
+            payment_type, price_per_gallon
+       from oil_observations
+      where monitor_id = $1 and source <> $2
+        and observed_at > now() - ($3 || ' hours')::interval
+      order by observed_at desc, price_per_gallon asc`,
+    [monitorId, cfg.cashSourceId, cfg.csvWindowHours],
+  );
+  return r.rows as CsvRow[];
+}
+
+async function loadPreviousRanks(
+  client: PoolClient,
+  monitorId: string,
+): Promise<CashRow[]> {
+  const r = await client.query(
+    `select zip, rank, price, dealer_id, is_fjb, observed_at
+       from oil_rank_state where monitor_id = $1 order by zip, rank`,
+    [monitorId],
+  );
+  return r.rows.map((x) => ({
+    observed_at: x.observed_at as Date,
+    zip: String(x.zip),
+    rank: Number(x.rank),
+    price_per_gallon: Number(x.price),
+    is_fjb: Boolean(x.is_fjb),
+    dealer_id: x.dealer_id === null ? null : String(x.dealer_id),
+    listing_position: null,
+    extra: false,
+  }));
+}
+
+async function saveRanks(
+  client: PoolClient,
+  monitorId: string,
+  rows: CashRow[],
+): Promise<void> {
+  await client.query(`delete from oil_rank_state where monitor_id = $1`, [monitorId]);
+  const top = rows.filter((r) => !r.extra);
+  if (top.length === 0) return;
+  await client.query(
+    `insert into oil_rank_state (monitor_id, zip, rank, price, dealer_id, is_fjb, observed_at)
+     select $1, * from unnest($2::text[], $3::int[], $4::numeric[], $5::text[], $6::boolean[], $7::timestamptz[])`,
+    [
+      monitorId,
+      top.map((r) => r.zip),
+      top.map((r) => r.rank),
+      top.map((r) => r.price_per_gallon),
+      top.map((r) => r.dealer_id),
+      top.map((r) => r.is_fjb),
+      top.map((r) => r.observed_at),
+    ],
+  );
 }
 
 /**
@@ -451,28 +555,92 @@ const adapter: SourceAdapter<ScrapeRun> = {
     const lastDigestStr = (alertState.rows[0]?.last_digest_on as string | undefined) ?? null;
     const digestDue = localHour >= cfg.digestHour && lastDigestStr !== localDate;
 
-    // The CSV is only built when something will actually carry it.
-    const csv =
-      changes.length > 0 || digestDue
-        ? buildCsv(await csvRows(client, ctx.monitorId, cfg.csvWindowHours))
-        : null;
+    // ---- the two workbooks, and what changed in the ranked view ----
+    const quotes = await latestCashQuotes(client, ctx.monitorId, cfg);
+    const { rows: cashRows, zipsSeen, zipsWithFjb } = selectCashRows(
+      quotes,
+      cfg.fjbCompany,
+      cfg.cashTopN,
+    );
 
-    if (changes.length > 0) {
-      ctx.queueAlert(buildChangeAlert(cfg, changes, failed, csv, cfg.csvWindowHours));
+    // A zip where the blurb matched nothing is NOT the same as FJB being absent
+    // from that zip, and the two are indistinguishable once the data is stored.
+    // Say so loudly rather than letting a broken match look like a real result.
+    const fjbMisses = [...zipsSeen].filter((z) => !zipsWithFjb.has(z)).sort();
+    if (fjbMisses.length > 0) {
+      ctx.log.warn('FJB blurb matched no listing', { zips: fjbMisses });
+      ctx.queueAlert(
+        {
+          level: 'warning',
+          title: `FJB not found in ${fjbMisses.length} zip${fjbMisses.length > 1 ? 's' : ''}`,
+          description:
+            'The FJB blurb matched no listing in the zips below. This is reported ' +
+            'because a silent match failure is indistinguishable from FJB simply ' +
+            'not being listed, and the two mean very different things.\n\n' +
+            `Zips: **${fjbMisses.join(', ')}**`,
+          fields: [
+            { name: 'Source', value: cfg.cashSourceId, inline: true },
+            { name: 'Zips checked', value: String(zipsSeen.size), inline: true },
+            { name: 'Zips with FJB', value: String(zipsWithFjb.size), inline: true },
+          ],
+        },
+        'system',
+      );
+    }
+
+    const previousRanks = await loadPreviousRanks(client, ctx.monitorId);
+    const rankChanges = diffTopRanks(previousRanks, cashRows);
+    // After a wipe there is no baseline, so the change list is empty by
+    // construction. Ping anyway once, or the first clean run produces files
+    // nobody is told about.
+    const firstPing = cfg.forceFirstPing && previousRanks.length === 0 && cashRows.length > 0;
+    const shouldPing = rankChanges.length > 0 || firstPing;
+
+    const files =
+      shouldPing || digestDue
+        ? [
+            {
+              filename: 'cashheatingoil.xlsx',
+              content: await buildCashWorkbook(cashRows, fjbMisses.map((zip) => ({ zip }))),
+              contentType:
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              encoding: 'base64' as const,
+            },
+            {
+              filename: 'other-sources.xlsx',
+              content: await buildOtherWorkbook(
+                await otherSourceRows(client, ctx.monitorId, cfg),
+              ),
+              contentType:
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              encoding: 'base64' as const,
+            },
+          ]
+        : [];
+
+    if (shouldPing) {
+      const lines = firstPing
+        ? ['Baseline after reset — no previous run to compare against.']
+        : rankChanges;
+      ctx.queueAlert({
+        level: 'warning',
+        title: firstPing
+          ? `Oil baseline — ${zipsSeen.size} zips, ${cashRows.length} rows`
+          : `Oil prices moved in ${new Set(rankChanges.map((c) => c.slice(0, 5))).size} zip(s)`,
+        description: lines.slice(0, 20).join('\n') || 'no detail',
+        fields: [
+          { name: 'Zips', value: String(zipsSeen.size), inline: true },
+          { name: 'FJB found in', value: `${zipsWithFjb.size}/${zipsSeen.size}`, inline: true },
+          { name: 'Band', value: `${cfg.cashBandMin}-${cfg.cashBandMax} cash`, inline: true },
+        ],
+        files,
+      });
     }
     if (digestDue) {
-      ctx.queueAlert(buildDigestAlert(cfg, observations, failed, localDate, csv));
+      ctx.queueAlert(buildDigestAlert(cfg, observations, failed, localDate, null, files));
     }
 
-    await client.query(
-      `insert into oil_alert_state (monitor_id, last_alert_at, last_digest_on, last_change_count)
-       values ($1, case when $2 then now() else null end, case when $3 then $4::date else null end, $5)
-       on conflict (monitor_id) do update set
-         last_alert_at     = case when $2 then now() else oil_alert_state.last_alert_at end,
-         last_digest_on    = case when $3 then $4::date else oil_alert_state.last_digest_on end,
-         last_change_count = $5`,
-      [ctx.monitorId, changes.length > 0, digestDue, localDate, changes.length],
-    );
+    await saveRanks(client, ctx.monitorId, cashRows);
 
     const pruned = await pruneObservations(client, ctx.monitorId, cfg);
 

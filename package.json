@@ -16,6 +16,7 @@
     "alert-test": "npm run build && node dist/cli/alert-test.js"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "pg": "^8.13.1",
     "rss-parser": "^3.13.0",
     "yaml": "^2.6.1"

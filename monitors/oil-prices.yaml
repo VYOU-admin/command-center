@@ -36,8 +36,25 @@ options:
   #
   # oil_price_history — McKinley's own daily series back to 2008 — is never
   # touched by this and cannot be.
+  # The two Excel exports. cashheatingoil.xlsx is deliberately narrow: one
+  # band, cash only, the two cheapest dealers per zip, plus FJB's own row
+  # whenever FJB is not already in that top two — the file exists to compare
+  # against FJB, so omitting FJB when it ranks third would hide the subject.
+  exports:
+    cash_source_id: cashheatingoil
+    fjb_company: FJBOil
+    band_min: 100
+    band_max: 149
+    top_n: 2
+    # Ping once after a wipe even though the change list is empty by
+    # construction, so a clean first run does not produce files silently.
+    force_first_ping: true
+
   retention:
-    full_resolution_hours: 48
+    # oil_observations rolls a 24-hour window: appended continuously, anything
+    # older pruned each run. No daily archive file is kept — the workbooks are
+    # produced per run and oil_price_history holds the long series.
+    full_resolution_hours: 24
     max_rows_per_pass: 20000
 
   sources:
