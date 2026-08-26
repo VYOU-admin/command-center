@@ -14,6 +14,7 @@ import type { Pool } from '../store/db.js';
 import { getRecentRecords } from '../store/records.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard, renderRecordListPanel } from './views.js';
+import { renderCatePnlPage, type CatePnlRow } from './cate-pnl.js';
 
 export interface WebServerOptions {
   pool: Pool;
@@ -60,6 +61,36 @@ export function createWebServer(opts: WebServerOptions): Server {
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
+
+    if (path === '/cate') {
+      // A finished analysis rather than a monitor: one small static table, read
+      // whole and handed to the browser to sort and paginate.
+      const r = await pool.query(
+        `select wallet, tag, first_buy_time_utc, first_buy_mcap_usd, last_sell_time_utc,
+                n_buys, n_sells, sol_in, sol_out, realized_pnl_sol, realized_pnl_usd,
+                tokens_still_held, hold_min, sold_out
+           from cate_wallet_pnl
+          order by realized_pnl_sol desc`,
+      );
+      const rows: CatePnlRow[] = r.rows.map((x: Record<string, unknown>) => ({
+        wallet: String(x.wallet),
+        tag: x.tag === null ? null : String(x.tag),
+        first_buy_time_utc: String(x.first_buy_time_utc ?? ''),
+        first_buy_mcap_usd: Number(x.first_buy_mcap_usd ?? 0),
+        last_sell_time_utc: x.last_sell_time_utc === null ? null : String(x.last_sell_time_utc),
+        n_buys: Number(x.n_buys ?? 0),
+        n_sells: Number(x.n_sells ?? 0),
+        sol_in: Number(x.sol_in ?? 0),
+        sol_out: Number(x.sol_out ?? 0),
+        realized_pnl_sol: Number(x.realized_pnl_sol ?? 0),
+        realized_pnl_usd: Number(x.realized_pnl_usd ?? 0),
+        tokens_still_held: Number(x.tokens_still_held ?? 0),
+        hold_min: x.hold_min === null ? null : Number(x.hold_min),
+        sold_out: Boolean(x.sold_out),
+      }));
+      sendHtml(res, 200, renderCatePnlPage(rows, new Date()));
       return;
     }
 
@@ -212,7 +243,7 @@ export function createWebServer(opts: WebServerOptions): Server {
       return;
     }
 
-    sendJson(res, 404, { error: 'not found', routes: ['/', '/health', '/api/monitors', '/api/records'] });
+    sendJson(res, 404, { error: 'not found', routes: ['/', '/cate', '/health', '/api/monitors', '/api/records'] });
   };
 
   return createServer((req, res) => {
