@@ -36,6 +36,16 @@ options:
   #
   # oil_price_history — McKinley's own daily series back to 2008 — is never
   # touched by this and cannot be.
+  # other-sources.xlsx carries HEATING OIL ONLY. Propane is excluded on the
+  # stored `product` field, which each scraper sets from the page's own section
+  # anchor ("Propane Prices", "Today's Propane Pricing") rather than from any
+  # price threshold — a threshold would misclassify the moment oil moves.
+  #
+  # Measured on live data: phillips 4 oil / 5 propane, pricerite 2 / 5,
+  # armstrong 0 / 5. Armstrong therefore drops out of the file entirely: it
+  # publishes heating oil as "$-.--- Please Call", so it has no numeric oil
+  # price to report.
+  #
   # The two Excel exports. cashheatingoil.xlsx is deliberately narrow: one
   # band, cash only, the two cheapest dealers per zip, plus FJB's own row
   # whenever FJB is not already in that top two — the file exists to compare
@@ -45,7 +55,10 @@ options:
     fjb_company: FJBOil
     band_min: 100
     band_max: 149
-    top_n: 2
+    # Top 3 per zip. Changes are compared by DEALER, not by rank slot, so a
+    # price cut, a re-ordering, and entering or leaving the top 3 are three
+    # distinct events rather than one ambiguous "slot 2 changed".
+    top_n: 3
     # Ping once after a wipe even though the change list is empty by
     # construction, so a clean first run does not produce files silently.
     force_first_ping: true

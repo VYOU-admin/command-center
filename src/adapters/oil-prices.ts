@@ -30,9 +30,11 @@ import { renderOilPanel } from '../web/oil-panel.js';
 import {
   buildCashWorkbook,
   buildOtherWorkbook,
+  diffOtherSources,
   diffTopRanks,
   selectCashRows,
   type CashRow,
+  type OtherQuote,
 } from './oil/workbook.js';
 import {
   buildChangeAlert,
@@ -262,11 +264,42 @@ async function otherSourceRows(
             payment_type, price_per_gallon
        from oil_observations
       where monitor_id = $1 and source <> $2
+        and product = 'fuel_oil'
         and observed_at > now() - ($3 || ' hours')::interval
       order by observed_at desc, price_per_gallon asc`,
     [monitorId, cfg.cashSourceId, cfg.csvWindowHours],
   );
   return r.rows as CsvRow[];
+}
+
+/** Latest heating-oil quote per other source and band, for change detection. */
+async function latestOtherQuotes(
+  client: PoolClient,
+  monitorId: string,
+  cfg: OilConfig,
+): Promise<OtherQuote[]> {
+  const r = await client.query(
+    `with latest as (
+       select source, max(observed_at) t from oil_observations
+        where monitor_id = $1 and source <> $2 and product = 'fuel_oil'
+        group by source
+     )
+     select o.source, o.company,
+            case when o.gallon_min is null then null
+                 when o.gallon_max is null then o.gallon_min || '+'
+                 else o.gallon_min || '-' || o.gallon_max end as band,
+            o.price_per_gallon
+       from oil_observations o join latest l
+         on l.source = o.source and l.t = o.observed_at
+      where o.monitor_id = $1 and o.product = 'fuel_oil'`,
+    [monitorId, cfg.cashSourceId],
+  );
+  return r.rows.map((x) => ({
+    source: String(x.source),
+    company: x.company === null ? null : String(x.company),
+    band: x.band === null ? null : String(x.band),
+    price: Number(x.price_per_gallon),
+  }));
 }
 
 async function loadPreviousRanks(
@@ -525,6 +558,8 @@ const adapter: SourceAdapter<ScrapeRun> = {
     const { cfg, results } = run;
 
     const previous = await previousPrices(client, ctx.monitorId);
+    // Taken BEFORE this run's rows land, so the comparison is run-to-run.
+    const observationsBefore = await latestOtherQuotes(client, ctx.monitorId, cfg);
 
     const observations = results.flatMap((r) => r.observations);
     const stored = await writeObservations(client, ctx.monitorId, observations);
@@ -590,11 +625,22 @@ const adapter: SourceAdapter<ScrapeRun> = {
 
     const previousRanks = await loadPreviousRanks(client, ctx.monitorId);
     const rankChanges = diffTopRanks(previousRanks, cashRows);
+
+    // Other sources get the same change-only treatment: a vendor that did not
+    // move its price should not generate a ping just because a run happened.
+    const otherNow = await latestOtherQuotes(client, ctx.monitorId, cfg);
+    const otherBefore: OtherQuote[] = observationsBefore.map((o) => ({
+      source: o.source,
+      company: o.company,
+      band: o.band,
+      price: o.price,
+    }));
+    const otherChanges = diffOtherSources(otherBefore, otherNow);
     // After a wipe there is no baseline, so the change list is empty by
     // construction. Ping anyway once, or the first clean run produces files
     // nobody is told about.
     const firstPing = cfg.forceFirstPing && previousRanks.length === 0 && cashRows.length > 0;
-    const shouldPing = rankChanges.length > 0 || firstPing;
+    const shouldPing = rankChanges.length > 0 || otherChanges.length > 0 || firstPing;
 
     const files =
       shouldPing || digestDue
@@ -621,13 +667,14 @@ const adapter: SourceAdapter<ScrapeRun> = {
     if (shouldPing) {
       const lines = firstPing
         ? ['Baseline after reset — no previous run to compare against.']
-        : rankChanges;
+        : [...rankChanges, ...otherChanges];
       ctx.queueAlert({
         level: 'warning',
         title: firstPing
           ? `Oil baseline — ${zipsSeen.size} zips, ${cashRows.length} rows`
-          : `Oil prices moved in ${new Set(rankChanges.map((c) => c.slice(0, 5))).size} zip(s)`,
-        description: lines.slice(0, 20).join('\n') || 'no detail',
+          : `Oil prices moved — ${rankChanges.length} in top ${cfg.cashTopN}` +
+            (otherChanges.length > 0 ? `, ${otherChanges.length} other source(s)` : ''),
+        description: lines.slice(0, 25).join('\n') || 'no detail',
         fields: [
           { name: 'Zips', value: String(zipsSeen.size), inline: true },
           { name: 'FJB found in', value: `${zipsWithFjb.size}/${zipsSeen.size}`, inline: true },

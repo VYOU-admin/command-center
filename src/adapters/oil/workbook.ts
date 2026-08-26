@@ -3,17 +3,20 @@
  *
  * cashheatingoil.xlsx answers one question — "who is cheapest in each of my
  * zips, and where does FJB sit" — so it is deliberately narrow: the 100-149
- * gallon band, cash prices only, the top two dealers per zip, plus FJB's own
- * row whenever FJB is not already in that top two. Everything else from that
- * source is dropped.
+ * gallon band, cash prices only, the top N dealers per zip, plus FJB's own row
+ * whenever FJB is not already in that top N. Everything else from that source
+ * is dropped.
  *
  * other-sources.xlsx keeps the original seven-column layout unchanged, because
- * it is the general-purpose dump and the narrowing above would destroy it.
+ * it is the general-purpose dump and the narrowing above would destroy it. It
+ * carries HEATING OIL ONLY: propane is excluded on the stored `product` field,
+ * which each scraper sets from the page's own section anchor rather than from
+ * any price threshold — a threshold would misclassify the moment oil moves.
  *
  * WHY FJB IS ALWAYS PRESENT. The point of the file is comparison against one
  * specific dealer. A file that silently omits FJB when it happens to be third
- * cheapest would answer "who is cheapest" while hiding the thing being asked
- * about, so FJB is appended with its true rank and flagged.
+ * outside the reported top N would answer "who is cheapest" while hiding the
+ * thing being asked about, so FJB is appended with its true rank and flagged.
  */
 
 import ExcelJS from 'exceljs';
@@ -26,7 +29,7 @@ export interface CashRow {
   is_fjb: boolean;
   dealer_id: string | null;
   listing_position: number | null;
-  /** True when this row is FJB appended outside the top two. */
+  /** True when this row is FJB appended outside the reported top N. */
   extra: boolean;
 }
 
@@ -71,15 +74,19 @@ export async function buildCashWorkbook(
   for (const r of rows) {
     const row = ws.addRow({
       timestamp: r.observed_at.toISOString(),
-      zip: r.zip,
+      // Text, not a number: 06010 loses its leading zero the moment Excel
+      // decides it is numeric, and a wrong zip is worse than an ugly one.
+      zip: String(r.zip),
       rank: r.rank,
       price: Number(r.price_per_gallon),
       is_fjb: r.is_fjb ? 'true' : 'false',
       dealer_id: r.dealer_id ?? '',
       pos: r.listing_position ?? '',
-      note: r.extra ? 'FJB outside top 2' : '',
+      note: r.extra ? 'FJB outside top N' : '',
     });
     row.getCell('price').numFmt = '0.000';
+    row.getCell('zip').numFmt = '@';
+    row.getCell('zip').alignment = { horizontal: 'left' };
     if (r.is_fjb) row.font = { bold: true };
   }
 
@@ -114,19 +121,20 @@ export async function buildOtherWorkbook(rows: OtherRow[]): Promise<string> {
       timestamp: r.observed_at.toISOString(),
       company: r.company ?? '',
       source: r.source,
-      zip: r.zip ?? '',
+      zip: r.zip === null ? '' : String(r.zip),
       band: r.band ?? '',
       payment_type: r.payment_type ?? '',
       price: Number(r.price_per_gallon),
     });
     row.getCell('price').numFmt = '0.000';
+    row.getCell('zip').numFmt = '@';
   }
   return toBuffer(wb);
 }
 
 /**
  * Rank the cash 100-149 quotes within each zip and pick what the file shows:
- * the two cheapest, and FJB as an extra flagged row when it is not among them.
+ * the N cheapest, and FJB as an extra flagged row when it is not among them.
  */
 export function selectCashRows(
   quotes: {
@@ -185,41 +193,107 @@ export function selectCashRows(
 }
 
 /**
- * What changed between two runs, comparing only the ranked positions this file
- * is about. A price that moved or a ranking that flipped is a change; anything
- * deeper in the list is not, because the file does not show it.
+ * What changed between two runs, in the ranked view this file is about.
+ *
+ * Compared by DEALER rather than by rank slot. Comparing slot-to-slot cannot
+ * tell "the dealer in position 2 cut their price" from "a cheaper dealer
+ * appeared and pushed everyone down" — the same slot shows a different number
+ * either way. Tracking the dealer makes a price move, a re-ordering, and an
+ * entry or exit three distinct, correctly-labelled events.
  */
-export function diffTopRanks(
-  previous: CashRow[],
-  current: CashRow[],
-): string[] {
-  const key = (r: CashRow): string => `${r.zip}#${r.rank}`;
-  const prev = new Map(previous.filter((r) => !r.extra).map((r) => [key(r), r]));
+export function diffTopRanks(previous: CashRow[], current: CashRow[]): string[] {
+  const label = (r: { is_fjb: boolean }): string => (r.is_fjb ? 'FJB' : 'competitor');
+  const money = (n: number): string => `$${n.toFixed(2)}`;
+  const byZip = (rows: CashRow[]): Map<string, Map<string, CashRow>> => {
+    const m = new Map<string, Map<string, CashRow>>();
+    for (const r of rows.filter((x) => !x.extra)) {
+      const inner = m.get(r.zip) ?? new Map<string, CashRow>();
+      inner.set(r.dealer_id ?? `pos${r.listing_position ?? r.rank}`, r);
+      m.set(r.zip, inner);
+    }
+    return m;
+  };
+  const prev = byZip(previous);
+  const curr = byZip(current);
   const out: string[] = [];
 
-  for (const r of current.filter((c) => !c.extra)) {
-    const p = prev.get(key(r));
-    const who = r.is_fjb ? 'FJB' : (r.dealer_id ?? 'unknown');
+  for (const zip of [...curr.keys()].sort()) {
+    const p = prev.get(zip);
+    const c = curr.get(zip)!;
+    // No prior state for this zip at all: a first run, not a set of changes.
+    if (!p || p.size === 0) continue;
+
+    for (const [dealer, now] of c) {
+      const was = p.get(dealer);
+      if (!was) {
+        out.push(
+          `CashHeatingOil — entered top 3 at ${money(now.price_per_gallon)} · ${zip} · ` +
+            `rank ${now.rank} · ${label(now)}`,
+        );
+        continue;
+      }
+      const delta = now.price_per_gallon - was.price_per_gallon;
+      const moved = Math.abs(delta) > 0.0005;
+      const reranked = was.rank !== now.rank;
+      if (moved) {
+        const sign = delta > 0 ? '+' : '-';
+        out.push(
+          `CashHeatingOil — ${money(was.price_per_gallon)} → ${money(now.price_per_gallon)} ` +
+            `(${sign}${Math.abs(delta).toFixed(2)}) · ${zip} · rank ${now.rank} · ${label(now)}` +
+            (reranked ? ` · rank ${was.rank} → ${now.rank}` : ''),
+        );
+      } else if (reranked) {
+        out.push(
+          `CashHeatingOil — ${money(now.price_per_gallon)} unchanged · ${zip} · ` +
+            `rank ${was.rank} → ${now.rank} · ${label(now)}`,
+        );
+      }
+    }
+
+    for (const [dealer, was] of p) {
+      if (c.has(dealer)) continue;
+      out.push(
+        `CashHeatingOil — left top 3 (was rank ${was.rank} at ${money(was.price_per_gallon)}) · ` +
+          `${zip} · ${label(was)}`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Change lines for the non-listing sources, same one-line-per-change shape.
+ * Keyed on source plus band, since a vendor publishes one price per band.
+ */
+export interface OtherQuote {
+  source: string;
+  company: string | null;
+  band: string | null;
+  price: number;
+}
+
+export function diffOtherSources(
+  previous: OtherQuote[],
+  current: OtherQuote[],
+): string[] {
+  const key = (q: OtherQuote): string => `${q.source}|${q.band ?? ''}`;
+  const prev = new Map(previous.map((q) => [key(q), q]));
+  const out: string[] = [];
+  for (const q of current) {
+    const p = prev.get(key(q));
+    const name = q.company ?? q.source;
+    const band = q.band ? ` · ${q.band}gal` : '';
     if (!p) {
-      out.push(`${r.zip} #${r.rank}: new — ${who} at $${r.price_per_gallon.toFixed(3)}`);
+      out.push(`${name} — new quote $${q.price.toFixed(2)}${band}`);
       continue;
     }
-    const priceMoved = Math.abs(p.price_per_gallon - r.price_per_gallon) > 1e-9;
-    const dealerChanged = (p.dealer_id ?? '') !== (r.dealer_id ?? '');
-    if (priceMoved && dealerChanged) {
-      out.push(
-        `${r.zip} #${r.rank}: ${p.dealer_id ?? '?'} $${p.price_per_gallon.toFixed(3)} → ` +
-          `${who} $${r.price_per_gallon.toFixed(3)} (ranking flipped)`,
-      );
-    } else if (dealerChanged) {
-      out.push(`${r.zip} #${r.rank}: ranking flipped — ${p.dealer_id ?? '?'} → ${who}`);
-    } else if (priceMoved) {
-      const dir = r.price_per_gallon > p.price_per_gallon ? '↑' : '↓';
-      out.push(
-        `${r.zip} #${r.rank}: ${who} $${p.price_per_gallon.toFixed(3)} → ` +
-          `$${r.price_per_gallon.toFixed(3)} ${dir}`,
-      );
-    }
+    const delta = q.price - p.price;
+    if (Math.abs(delta) <= 0.0005) continue;
+    const sign = delta > 0 ? '+' : '-';
+    out.push(
+      `${name} — $${p.price.toFixed(2)} → $${q.price.toFixed(2)} ` +
+        `(${sign}${Math.abs(delta).toFixed(2)})${band}`,
+    );
   }
   return out;
 }
