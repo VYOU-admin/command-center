@@ -640,7 +640,7 @@ const adapter: SourceAdapter<ScrapeRun> = {
               encoding: 'base64' as const,
             },
             {
-              filename: 'other-sources.xlsx',
+              filename: 'competitor-pricing.xlsx',
               content: await buildOtherWorkbook(otherNow),
               contentType:
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

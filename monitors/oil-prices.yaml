@@ -36,7 +36,7 @@ options:
   #
   # oil_price_history — McKinley's own daily series back to 2008 — is never
   # touched by this and cannot be.
-  # other-sources.xlsx carries HEATING OIL ONLY. Propane is excluded on the
+  # competitor-pricing.xlsx carries HEATING OIL ONLY. Propane is excluded on the
   # stored `product` field, which each scraper sets from the page's own section
   # anchor ("Propane Prices", "Today's Propane Pricing") rather than from any
   # price threshold — a threshold would misclassify the moment oil moves.

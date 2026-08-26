@@ -7,7 +7,7 @@
  * whenever FJB is not already in that top N. Everything else from that source
  * is dropped.
  *
- * other-sources.xlsx keeps the original seven-column layout unchanged, because
+ * competitor-pricing.xlsx keeps the original seven-column layout unchanged, because
  * it is the general-purpose dump and the narrowing above would destroy it. It
  * carries HEATING OIL ONLY: propane is excluded on the stored `product` field,
  * which each scraper sets from the page's own section anchor rather than from
