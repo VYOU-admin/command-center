@@ -240,7 +240,7 @@ function filtered(){
       const n = isU ? r.tokens_touched : 1;
       if(F.tt==='1' && n!==1) return false;
       if(F.tt==='2+' && n<2) return false;
-      if(/^=\d+$/.test(F.tt) && n!==Number(F.tt.slice(1))) return false;
+      if(/^=\\d+$/.test(F.tt) && n!==Number(F.tt.slice(1))) return false;
     }
     for(const [k] of NUMCOLS){
       const kk = MAP[k] || k;
@@ -508,8 +508,8 @@ function exportCsv(){
        'last_sell_time_utc','n_buys','n_sells','sol_in','sol_out','realized_pnl_sol',
        'realized_pnl_usd','tokens_still_held','hold_min','sold_out'];
   const q=(v)=>{ if(v===null||v===undefined) return '';
-    const s=String(v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
-  const csv=[cols.join(',')].concat(rows.map(r=>cols.map(c=>q(r[c])).join(','))).join('\n')+'\n';
+    const s=String(v); return /[",\\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  const csv=[cols.join(',')].concat(rows.map(r=>cols.map(c=>q(r[c])).join(','))).join('\\n')+'\\n';
   const stamp=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
