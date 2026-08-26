@@ -89,7 +89,9 @@ export function createWebServer(opts: WebServerOptions): Server {
           // Marked 'manual' so a later regroup, which only rewrites its own
           // rows, can never silently undo a hand edit.
           const r = await pool.query(
-            `update wallet_pnl set tag = $1, tag_source = case when $1 is null then null else 'manual' end
+            `update wallet_pnl
+                set tag = $1::text,
+                    tag_source = case when $1::text is null then null else 'manual' end
               where wallet = any($2::text[]) returning wallet`,
             [tag, wallets],
           );
@@ -103,8 +105,10 @@ export function createWebServer(opts: WebServerOptions): Server {
           return;
         }
         const r = await pool.query(
-          `update wallet_pnl set tag = $1, tag_source = case when $1 is null then null else 'manual' end
-            where tag = $2 returning wallet`,
+          `update wallet_pnl
+              set tag = $1::text,
+                  tag_source = case when $1::text is null then null else 'manual' end
+            where tag = $2::text returning wallet`,
           [to, from],
         );
         sendJson(res, 200, { ok: true, updated: r.rowCount ?? 0, tag: to });
