@@ -503,10 +503,19 @@ async function pruneSnapshots(
  *   - it was DROPPED at the ten-minute decision (decided, no keep_reason), so
  *     it is neither an activity keeper nor part of the random control arm
  *   - it never graduated
- *   - it never traded at all (last_trade_at is null, which the tracker only
- *     writes for tokens with at least one trade)
  *   - it never produced an alert
  *   - it is older than dense_purge_hours
+ *
+ * THIS GATE ONCE ALSO REQUIRED last_trade_at IS NULL, and that single line made
+ * the whole tier inert. A token dropped at the ten-minute decision has almost
+ * always still traded — it simply failed the activity floor — so requiring that
+ * it never traded at all is a far stronger condition than was intended.
+ * Measured in production it left 9 of 54,466 otherwise-eligible tokens: the
+ * tier ran every ten minutes, reported success, and removed ~7.5% of inflow
+ * while the volume filled and Postgres crash-looped on a full disk.
+ * keep_reason IS NULL already means "dropped", so the extra condition bought
+ * nothing. Note the repair is to DELETE the line, not to invert it: inverting
+ * it would exempt exactly those 9 genuinely never-traded tokens.
  *
  * WHAT SURVIVES EVEN THEN — the protect list:
  *
@@ -532,7 +541,6 @@ async function thinDenseGrid(
         and t.decided_at is not null
         and t.keep_reason is null
         and not t.graduated
-        and t.last_trade_at is null
         and not exists (select 1 from early_alerts a where a.mint = t.mint)
       order by t.launched_at
       limit $3`,
@@ -561,16 +569,29 @@ async function thinDenseGrid(
     [monitorId, mints, cfg.fiveMinuteMarkSeconds],
   );
 
-  // Wallet rows for the same tokens go on the same terms. ⚠️ This is the one
-  // place the loser record can be lost: wallet statistics must therefore be
-  // CUMULATIVE, folding each token in once and keeping the running totals,
-  // never rebuilt by rescanning this table. A full rebuild after a prune would
-  // silently forget exactly the failures that identify a bot.
-  const walletsGone = await client.query(
-    `delete from early_token_wallets
-      where monitor_id = $1 and mint = any($2::text[])`,
-    [monitorId, mints],
-  );
+  // WALLET ROWS ARE DELIBERATELY NOT DELETED HERE — do not re-enable this
+  // without reading the next paragraph.
+  //
+  // The obvious symmetry is to drop early_token_wallets rows for the same
+  // tokens, and this once did. It is switched off because those rows ARE the
+  // loser record. The whole point of collecting wallets on dropped tokens is
+  // that a wallet appearing in three winners and two hundred losers is a bot,
+  // and that judgement is only possible while the losers are still on disk.
+  //
+  // The prerequisite is a CUMULATIVE wallet_stats table that folds each token
+  // in once and carries running totals forward, so a token's contribution
+  // survives the deletion of its rows. That table does not exist yet — it was
+  // deferred until capture had accumulated. Deleting now would spend the
+  // evidence before the analysis it was collected for, and it cannot be
+  // recovered afterwards by rescanning, precisely because the rows are gone.
+  //
+  // Cost of leaving it off, measured: ~612,000 prunable rows (~250 MB) retained
+  // today, and roughly 85% of wallet-row inflow that this would otherwise
+  // remove. That is the accepted price of keeping the loser record.
+  //
+  // TO RE-ENABLE: build cumulative wallet_stats first, verify a token's totals
+  // survive its rows being removed, then restore the delete below.
+  const walletsGone = { rowCount: 0 };
 
   await client.query(
     `update early_tokens set dense_pruned = true
