@@ -136,8 +136,24 @@ options:
   # stop early — a pass written against "every row older than N days" would sort
   # millions of rows every time to delete a few thousand.
   #
-  # 500 tokens every 10 minutes clears 72,000/day against ~32,000 launches/day,
-  # so the batch keeps ahead of the inflow with room for a backlog.
+  # SIZING THE BATCH — measured, because the original figure was wrong.
+  #
+  # The old note read "500 tokens every 10 minutes clears 72,000/day against
+  # ~32,000 launches/day". Launches are now ~50,000/day and the number that
+  # matters is not launches but tokens AGEING PAST dense_purge_hours into
+  # eligibility, measured at ~2,825/hour. Against a capacity of 500 x 5.71
+  # passes = ~2,985/hour that is 5% headroom, and at 5% the backlog stops
+  # draining and simply oscillates: measured 70,816 -> 70,612 -> 70,670 over an
+  # hour, i.e. flat, with 66,744 rows/hour deleted the whole time.
+  #
+  # A batch that merely matches arrivals can never clear a backlog, and one busy
+  # day pushes it back into deficit — the same failure as before, only slower.
+  # 2,000 gives ~11,940 tokens/hour against ~2,825 arriving: roughly 4x headroom,
+  # and the standing backlog drains in hours rather than never.
+  #
+  # The cost is per-pass duration, not per-token work: a token is still examined
+  # exactly once in its life. Passes at 500 finished well inside the 10-minute
+  # interval, which is the budget this has to fit.
   retention:
     # TIER 2 — the one that actually bounds growth.
     #
@@ -164,7 +180,7 @@ options:
     protect_mark_seconds: 300
 
     full_resolution_days: 3
-    batch_tokens: 500
+    batch_tokens: 2000
     interval_minutes: 10
     max_rows_per_pass: 50000
 
