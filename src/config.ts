@@ -121,7 +121,32 @@ function parseMonitor(raw: unknown, file: string): MonitorConfig {
   };
 }
 
-export async function loadMonitorConfigs(dir: string): Promise<MonitorConfig[]> {
+/**
+ * Substitute ${VAR} placeholders in monitor YAML from a supplied map.
+ *
+ * Secrets must not sit in a committed YAML file, but an adapter reaching into
+ * process.env directly would break the rule env.ts states: every
+ * environment value enters the process in exactly one place. So the values are
+ * resolved by env.ts and passed in here, and the YAML carries only the name.
+ *
+ * An unset variable is a hard error rather than an empty string, because a
+ * monitor silently pointed at "" would fail later as a confusing network error
+ * instead of a clear boot failure.
+ */
+export function interpolate(text: string, vars: Map<string, string>, path: string): string {
+  return text.replace(/\$\{([A-Z0-9_]+)\}/g, (_m, name: string) => {
+    const v = vars.get(name);
+    if (v === undefined || v === '') {
+      throw new Error(`${path}: \${${name}} is referenced but not set in the environment`);
+    }
+    return v;
+  });
+}
+
+export async function loadMonitorConfigs(
+  dir: string,
+  vars: Map<string, string> = new Map(),
+): Promise<MonitorConfig[]> {
   let entries: string[];
   try {
     entries = await readdir(dir);
@@ -141,7 +166,7 @@ export async function loadMonitorConfigs(dir: string): Promise<MonitorConfig[]> 
 
   for (const file of files) {
     const path = join(dir, file);
-    const text = await readFile(path, 'utf8');
+    const text = interpolate(await readFile(path, 'utf8'), vars, path);
     let raw: unknown;
     try {
       raw = parseYaml(text);

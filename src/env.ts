@@ -30,7 +30,17 @@ export interface Env {
   tickMs: number;
   /** Public dashboard URL, used to link alerts back. Null when unknown. */
   publicUrl: string | null;
+  /**
+   * Values a monitor's YAML may reference as ${NAME}, so a secret can be named
+   * in committed config without its value living there. Populated from the
+   * allowlist below rather than from all of process.env, so a typo in a YAML
+   * cannot reach an unrelated variable.
+   */
+  configVars: Map<string, string>;
 }
+
+/** Environment variables monitor YAML is permitted to interpolate. */
+const CONFIG_VAR_ALLOWLIST = ['HELIUS_API_KEY', 'HELIUS_RPC_URL', 'ALCHEMY_API_KEY'] as const;
 
 export function loadEnv(): Env {
   const databaseUrl = process.env.DATABASE_URL?.trim();
@@ -78,6 +88,20 @@ export function loadEnv(): Env {
     discordChannels,
     port,
     monitorsDir: resolve(process.env.MONITORS_DIR?.trim() || 'monitors'),
+    configVars: (() => {
+      const m = new Map<string, string>();
+      for (const key of CONFIG_VAR_ALLOWLIST) {
+        const v = process.env[key]?.trim();
+        if (v) m.set(key, v);
+      }
+      // Convenience: a bare Helius key becomes the RPC URL a monitor needs, so
+      // the same secret does not have to be set twice in two shapes.
+      const key = m.get('HELIUS_API_KEY');
+      if (key && !m.has('HELIUS_RPC_URL')) {
+        m.set('HELIUS_RPC_URL', `https://mainnet.helius-rpc.com/?api-key=${key}`);
+      }
+      return m;
+    })(),
     // The scheduler wakes on this interval and runs whatever is due. It must be
     // meaningfully SHORTER than the shortest monitor schedule, not equal to it.
     //

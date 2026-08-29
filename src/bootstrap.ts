@@ -27,7 +27,7 @@ export async function bootstrap(): Promise<App> {
   const env = loadEnv();
 
   const [monitors, adapters] = await Promise.all([
-    loadMonitorConfigs(env.monitorsDir),
+    loadMonitorConfigs(env.monitorsDir, env.configVars),
     loadAdapters(),
   ]);
 

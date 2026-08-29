@@ -1,0 +1,100 @@
+# NFT mint collector — Solana + EVM, individual mint level.
+#
+# COLLECTION ONLY. Scores nothing, alerts on nothing. The daily digest is a
+# separate monitor that reads nft_mints, so retuning the thresholds below can
+# never put collection at risk.
+#
+# MEASURED BEFORE BUILDING (2026-08-29), which is why the filters exist:
+#   Robinhood 4663  674,759 ERC-721 mints/day
+#                     61.5% one farm collection (Pixel Angels)
+#                      8.6% DEX liquidity-position NFTs, not collectibles
+#                         0 ERC-1155 mints observed
+#   Solana            4,320 regular NFT creates/day
+#                    72,000 compressed creates/day (94.3% of all creation)
+# Unfiltered that is ~6.1 GB/month and fills the volume in about eight months.
+# Filtered it is ~0.3 GB/month.
+
+id: nft-mints
+name: NFT Mint Collector
+source: nft-mints
+enabled: true
+
+# Each run advances a per-chain cursor, so the interval sets batch size rather
+# than coverage. Five minutes keeps each EVM pass inside the public RPC's
+# 10,000-log ceiling.
+schedule: 5m
+
+alerts:
+  channel: system
+
+options:
+  # Bounds a restart after an outage. A longer gap is skipped rather than
+  # backfilled — for a daily digest, a hole is better than an unbounded replay
+  # that stalls every subsequent run.
+  lookback_minutes: 30
+
+  solana:
+    enabled: true
+    # Helius DAS. Chosen over a Token Metadata WebSocket on measurement, not
+    # preference: searchAssets with createdAt {after, before} returns exactly
+    # what was created (~4 calls/day at limit 1000), where the socket would
+    # decode 66,718 transactions/day to find ~1,668 creates — 97.5% waste.
+    # NOTE: createdAt accepts ONLY after/before as RFC 3339 strings, and
+    # tokenType cannot be used without ownerAddress. Both found by trying.
+    rpc_url: ${HELIUS_RPC_URL}
+    page_limit: 1000
+    max_pages_per_run: 25
+
+    # COMPRESSED NFTs (Bubblegum) — off for v1.
+    # Turning this on costs almost nothing technically: DAS returns them in the
+    # same response with the same shape, so no extra decoding, and polling goes
+    # from ~4 to ~76 calls/day. The reason it is off is analytical, not
+    # technical: at 72,000/day they are 17x the regular-NFT volume and are
+    # dominated by airdrops and spam, which would swamp the digest.
+    # Every row already carries `compressed`, so switching this on needs no
+    # schema change and no code change.
+    include_compressed: false
+
+  evm_chains:
+    - chain: robinhood
+      chain_id: 4663
+      enabled: true
+      # Public RPC for bulk logs. Alchemy's free tier caps eth_getLogs at NINE
+      # blocks, which would need ~23,000 calls to cover a day — measured, and
+      # the reason the split is this way round rather than the obvious one.
+      rpc_url: https://rpc.mainnet.chain.robinhood.com
+      # ~0.1 s/block, so 2,000 blocks is ~3.4 minutes of chain. Kept small
+      # because the ERC-721 filter also matches ERC-20 mints (identical event
+      # signature; only the topic count differs, which an RPC filter cannot
+      # express), so a wider window trips the 10,000-log ceiling.
+      blocks_per_pass: 2000
+      max_passes_per_run: 5
+
+  collection_filter:
+    # Uniswap v3/v4 Positions and friends are minted by adding liquidity.
+    # Matched on name rather than an address list so a new DEX is covered
+    # without a code change.
+    exclude_lp_positions: true
+    # Keeps a farm visible without letting it own the table. Pixel Angels alone
+    # was 61.5% of chain 4663's mints; this caps it at 500/day while still
+    # recording that it was there.
+    max_mints_per_collection_per_day: 500
+    # One wallet minting itself 900 times is not a collection. Applied only once
+    # a collection has enough volume that day to judge, so a genuine drop's
+    # first few mints are never thrown away.
+    min_distinct_minters_per_day: 5
+
+  # RETENTION SHIPS WITH THE COLLECTOR. The early_snapshots table filled a 5 GB
+  # volume because its gate silently matched almost nothing; nothing here ships
+  # without a policy, and every run logs what retention actually removed so a
+  # policy that deletes nothing is visible immediately rather than in a month.
+  retention:
+    full_detail_days: 30
+    aggregate_after_days: 30
+    purge_aggregates_days: 365
+    # Rows for wallets already in wallet_pnl are never purged — those are the
+    # ones this monitor exists to surface.
+    keep_forever_if_known_wallet: true
+
+dashboard:
+  window_hours: 24
