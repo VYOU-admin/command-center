@@ -54,8 +54,18 @@ interface JsonRpcResult<T> {
   error?: { message?: string };
 }
 
-async function post<T>(url: string, body: unknown, signal: AbortSignal, timeoutMs: number)
-: Promise<JsonRpcResult<T>> {
+/**
+ * One JSON-RPC attempt. Separated from the retry loop so the failure modes
+ * stay legible.
+ *
+ * A public RPC does not always answer with JSON. Under load it returns an HTML
+ * error page, and `r.json()` then throws SyntaxError: Unexpected token '<'.
+ * That is a transport failure wearing a parser's clothing, and treating it as
+ * fatal failed whole production runs — three times in the first twenty here,
+ * and once before that it killed a 4,851-page pull outright. It is retryable.
+ */
+async function attempt<T>(url: string, body: unknown, signal: AbortSignal, timeoutMs: number)
+: Promise<{ ok: true; value: JsonRpcResult<T> } | { ok: false; retryable: boolean; message: string }> {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
   const onAbort = () => ac.abort();
@@ -67,12 +77,36 @@ async function post<T>(url: string, body: unknown, signal: AbortSignal, timeoutM
       body: JSON.stringify(body),
       signal: ac.signal,
     });
-    if (r.status === 429) return { error: { message: 'rate limited (429)' } };
-    return (await r.json()) as JsonRpcResult<T>;
+    if (r.status === 429 || r.status >= 500) {
+      return { ok: false, retryable: true, message: `http ${r.status}` };
+    }
+    const text = await r.text();
+    try {
+      return { ok: true, value: JSON.parse(text) as JsonRpcResult<T> };
+    } catch {
+      return { ok: false, retryable: true, message: `non-JSON response (${text.slice(0, 40)})` };
+    }
+  } catch (err) {
+    // The caller's signal aborting is a real stop; our own timeout is not.
+    if (signal.aborted) return { ok: false, retryable: false, message: 'run aborted' };
+    return { ok: false, retryable: true, message: (err as Error).message };
   } finally {
     clearTimeout(t);
     signal.removeEventListener('abort', onAbort);
   }
+}
+
+async function post<T>(url: string, body: unknown, signal: AbortSignal, timeoutMs: number)
+: Promise<JsonRpcResult<T>> {
+  let last = 'unknown';
+  for (let i = 0; i < 4; i += 1) {
+    const r = await attempt<T>(url, body, signal, timeoutMs);
+    if (r.ok) return r.value;
+    last = r.message;
+    if (!r.retryable) break;
+    await new Promise((res) => setTimeout(res, 400 * (i + 1) ** 2));
+  }
+  return { error: { message: last } };
 }
 
 interface EvmLog {
