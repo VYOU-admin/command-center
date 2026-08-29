@@ -68,12 +68,21 @@ options:
       # signature; only the topic count differs, which an RPC filter cannot
       # express), so a wider window trips the 10,000-log ceiling.
       blocks_per_pass: 2000
-      max_passes_per_run: 5
+      # 15 x 2,000 = 30,000 blocks of capacity per run against ~3,000 produced
+      # per 5-minute interval. In steady state the loop exits as soon as the
+      # cursor reaches head, so the extra passes cost nothing; they exist to
+      # drain a backlog after an outage roughly three times faster.
+      # Measured keeping up before this change: the cursor advanced 600
+      # blocks/min against the chain's ~594.
+      max_passes_per_run: 15
 
   collection_filter:
     # Uniswap v3/v4 Positions and friends are minted by adding liquidity.
     # Matched on name rather than an address list so a new DEX is covered
-    # without a code change.
+    # without a code change. APPLIED TO EVM CHAINS ONLY: Solana has no
+    # position NFTs, and running the rule there produced 38 false positives on
+    # the first production run — assets whose names merely end in "position"
+    # or contain "liquidity".
     exclude_lp_positions: true
     # Keeps a farm visible without letting it own the table. Pixel Angels alone
     # was 61.5% of chain 4663's mints; this caps it at 500/day while still

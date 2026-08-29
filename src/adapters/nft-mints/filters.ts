@@ -27,6 +27,15 @@ export interface FilterConfig {
   maxMintsPerCollectionPerDay: number;
   minDistinctMintersPerDay: number;
   includeCompressed: boolean;
+  /**
+   * Chains the LP rule applies to. It exists for EVM DEX position NFTs, which
+   * are minted by adding liquidity. Solana has no such thing, so running the
+   * rule there can only produce false positives — and did: the first
+   * production run rejected 38 Solana assets as "lp_position", which on that
+   * chain means nothing more than an NFT whose name happens to end in
+   * "position" or contain "liquidity".
+   */
+  lpRuleChains: Set<string>;
 }
 
 export interface CandidateMint {
@@ -125,7 +134,8 @@ export function applyFilters(
       log.reject(c.chain, 'compressed_disabled');
       continue;
     }
-    if (cfg.excludeLpPositions && looksLikeLpPosition(c.collectionName)) {
+    if (cfg.excludeLpPositions && cfg.lpRuleChains.has(c.chain)
+        && looksLikeLpPosition(c.collectionName)) {
       log.reject(c.chain, 'lp_position');
       continue;
     }

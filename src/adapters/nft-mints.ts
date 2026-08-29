@@ -110,6 +110,9 @@ function parseConfig(options: Record<string, unknown>, monitorId: string): NftCo
       maxMintsPerCollectionPerDay: configNumber(f, 'max_mints_per_collection_per_day', ctx, 500),
       minDistinctMintersPerDay: configNumber(f, 'min_distinct_minters_per_day', ctx, 5),
       includeCompressed: solana?.includeCompressed ?? false,
+      // Derived from the configured EVM chains rather than listed separately,
+      // so adding a chain cannot forget to enable the rule for it.
+      lpRuleChains: new Set(evm.map((e) => e.chain)),
     },
     retention,
     lookbackMinutes: configNumber(options, 'lookback_minutes', ctx, 30),
