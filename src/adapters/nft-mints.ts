@@ -226,18 +226,19 @@ const nftMints: SourceAdapter<Drain> = {
     if (mints.length > 0) {
       const days = [...new Set(mints.map((m) => m.blockTime.toISOString().slice(0, 10)))];
       const rows = await client.query<{
-        chain: string; collection_address: string; day: string;
+        chain: string; collection_address: string; day_key: string;
         mints: string; minters: string[];
       }>(
-        `select chain, collection_address, to_char(block_time::date,'YYYY-MM-DD') day,
-                count(*)::text mints, array_agg(distinct minter_wallet) minters
+        `select chain, collection_address,
+                to_char(block_time::date,'YYYY-MM-DD') as day_key,
+                count(*)::text as mints, array_agg(distinct minter_wallet) as minters
            from nft_mints
           where block_time::date = any($1::date[])
           group by 1,2,3`,
         [days],
       );
       for (const r of rows.rows) {
-        existing.set(dayKey(r.chain, r.collection_address, r.day),
+        existing.set(dayKey(r.chain, r.collection_address, r.day_key),
           { mints: Number(r.mints), minters: new Set(r.minters) });
       }
     }
