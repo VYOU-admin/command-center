@@ -1,0 +1,108 @@
+# PONS run state — resume from here
+
+Written 2026-08-31. Nothing has been written to `wallet_pnl` or
+`wallet_clusters` for this token. AI has not been touched.
+
+## Supplied inputs (pool discovery is abandoned; identifiers come from the operator)
+
+    --token           0x39dBED3a2bd333467115dE45665cC57F813C4571
+    --pool            0x10cc6bd38112cac182db90b6a71d8bb5939526ba
+    --mcap-threshold  10000000
+
+## Derived and verified (steps 1-2 complete)
+
+| Field | Value | Source |
+|---|---|---|
+| DEX / version | uniswap **v3** | DexScreener `token-pairs/v1/robinhood/{token}` |
+| Base token | PONS `0x39dBED3a2bd333467115dE45665cC57F813C4571` | supplied |
+| Base decimals | **18** | `decimals()` on the token |
+| Base supply now | 1,000,000,000 | `totalSupply()` |
+| **Quote token** | **WETH `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73`** | DexScreener |
+| **Quote decimals** | **18** | `decimals()` — DexScreener does not return decimals |
+| Pool created | 2026-07-13T20:42:21Z | DexScreener `pairCreatedAt` |
+| **Pool creation block** | **8,963,150** | binary search on block timestamp |
+| **Head block at run start** | **51,141,570** | `eth_blockNumber` |
+| Span | 42,178,420 blocks | — |
+| Liquidity / mcap | $5.7M / $273M | DexScreener |
+
+**The quote is WETH, an ERC-20 — not native ETH.** NTF's quote was native, so
+its decode read `preBalances`/`postBalances`. PONS must read WETH `Transfer`
+logs instead. This is the main V3-vs-V4 difference beyond the event shape.
+
+## Swap pull — checkpointed, RESUMABLE, currently stopped
+
+    script      scripts/pons_pull_swaps.py
+    checkpoint  <scratch>/pons_swaps.jsonl     (6,328 swaps)
+    state       <scratch>/pons_swaps.state     (6 windows done)
+    cursor      block 9,113,155  (0.36% of span)
+    stopped at  window 9,113,156-9,125,656 — "exhausted retries"
+
+Re-running the script resumes from the state file; completed windows are
+skipped. The failure is a public-RPC transport stall, not a data problem.
+
+Event: Uniswap V3 `Swap`
+`0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67`
+V3 pools are their own contract, so the pool address is the log address and
+`amount0`/`amount1` are int256 deltas from the POOL's perspective (positive =
+into the pool). V4 differs: one PoolManager singleton, poolId in topic1, int128
+amounts from the SWAPPER's perspective.
+
+Density observed: ~6,328 swaps in the first 0.36% of the span. Full-history
+projection is therefore high (order 10^5-10^6) and uncertain.
+
+## NEXT STEP — threshold-derived receipts bound (standard pipeline step)
+
+Not a PONS special case. Every future token gets the same treatment.
+
+1. Resume the swap pull to completion (free, public RPC).
+2. Build the mcap curve: swap-implied price x supply-at-that-block.
+3. Find the **last block where mcap < $10,000,000**.
+4. Bound the Alchemy receipts phase at that block.
+5. Report before starting receipts:
+   - last sub-threshold block and timestamp
+   - swaps in the bounded range vs total in full history
+   - unique transactions in range and the wall-clock receipts estimate
+   - whether mcap crossed $10M once or several times, with the block range of
+     **each** sub-threshold period (mcap is not monotone; later dips count)
+
+Rationale: a wallet whose first buy was above threshold is out of the cohort by
+policy, so its receipt is wasted spend. A fixed "first N days" only approximates
+the boundary and misses later dips back under the threshold.
+
+Receipts cost at NTF's measured 10.6 req/s: 50k txs ~1.3h, 150k ~4h, 500k ~13h.
+
+## LOCKED CONSTRAINTS — carry verbatim, do not re-derive
+
+- **`tx.from` is the trader only ~46% of the time** on this chain. Smart-account
+  wallets and ERC-4337 bundlers make the signer a relayer. Use balance deltas.
+- **Router order-splitting: split by the swap's own pool amount minus its fee.**
+  A router can route one order through several pools of the same token;
+  attributing the wallet's whole net to one pool inflated NTF by up to **1381x**.
+- **Circular arb: exclude rows where the PoolManager both sends and receives the
+  token in one transaction.** The attributed wallet is a tip recipient, not the
+  trader. This was 5.2% of NTF rows, and wallet *identity* is wrong there, not
+  just the amount.
+- **Measure the fee rate from unambiguous single-swap trades. Do not assume 2%.**
+  NTF was exactly 2.0000% on buys and 0% on sells at both p1 and p99, but that is
+  a property of that token's hook, not of the venue.
+- **Supply from mint/burn events, never a constant.** NTF burned 4.9% of supply
+  mid-window, enough to move a wallet across a $100k threshold.
+- **Decode from balance deltas at ANY call depth.** Aggregators CPI into the AMM;
+  a top-level program check found 0 of 20 CATE swaps.
+- **FIFO, not net flow; unsold inventory valued at zero** and surfaced through
+  `remaining_tokens`. Deterministic tie-break `(block_time, signature)`.
+- **Quote asset is detected, never assumed** — NTF was native ETH, PONS is WETH.
+
+## Cohort policy (canonical, adopted for all tokens)
+
+Has a first buy in this pool, `first_buy_mcap_usd` below threshold, not an
+excess seller, circular-arb rows excluded.
+
+## Reporting gate
+
+Report before loading: quote token, measured fee rate, supply curve, trades
+decoded, wallets attributed, validation split by attribution path, mcap
+distribution with percentiles and histogram, the threshold applied (flag if it
+captures under 3% or over 40%), cohort size, median PnL, top 10, and a
+hand-checkable FIFO walkthrough for the top wallet. **Stop there. Do not load
+until the operator confirms.**
