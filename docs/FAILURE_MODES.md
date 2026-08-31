@@ -94,3 +94,32 @@ transaction, and read them again after commit.
 Several "failures" were assertions hardcoding label text that had legitimately
 changed (`Total PnL USD ▼`, `PnL SOL`, `SOL + ETH` vs `ETH + SOL`). The code was
 correct every time. Assert on structure and counts, not on rendered strings.
+
+## 7. An exclusion rule applied at the wrong granularity
+
+A rule can be correct and still destroy the data if it fires on the wrong unit.
+
+- **Circular-arb on AI, 2026-08-31.** The V4 rule "the PoolManager both sends and
+  receives the token in one transaction" was applied per TRANSACTION. AI charges
+  a 1% token-side hook fee, so the PoolManager pays a fee recipient which dumps
+  its cut back into the pool in the same transaction — the signature fires on
+  59.6% of transactions. Excluding those transactions **discarded 2,122 genuine
+  buys** and left zero single-swap buys, which was the only visible tell.
+  Corrected by excluding the ROUND-TRIPPER wallet's swap rather than the whole
+  transaction, leaving the buyer in that transaction intact.
+
+**Rule.** Before applying an exclusion, check what fraction of the data it
+removes and what the removed rows actually contain. An exclusion that fires on a
+majority of transactions is a finding to investigate, not a filter to apply. The
+same discipline as a filter that matches nothing, in the opposite direction.
+
+## 8. Infrastructure addresses entering a cohort as traders
+
+- **PONS.** The Uniswap V4 PoolManager sits in the loaded PONS cohort as a
+  trader, holding 19.8% of that token's unrealized total. PONS is a v3 pool, so
+  the v4 PoolManager was not on any exclusion list for that run, yet routers hop
+  through it and it accumulates balances.
+
+**Rule.** Exclude venue infrastructure — pool managers, routers, fee recipients,
+the zero address — from attribution candidates on EVERY token, not only when the
+address happens to be the venue being indexed.
