@@ -282,6 +282,41 @@ interface DasAsset {
   ownership?: { owner?: string };
   content?: { metadata?: { name?: string } };
   grouping?: Array<{ group_key?: string; group_value?: string }>;
+  /** Update authority. Present on ungrouped assets — measured 9 of 9. */
+  authorities?: Array<{ address?: string; scopes?: string[] }>;
+}
+
+/**
+ * The cap bucket for a Solana asset.
+ *
+ * WHY NOT 'unknown'. A single literal for every asset with no collection
+ * grouping put unrelated mints in one bucket, which then hit
+ * collection_daily_cap and rejected the rest. It accepted EXACTLY 500 on
+ * 2026-08-29, -30 and -31 — the cap, to the row — while Solana collected ~1,500
+ * a day against ~9,952 regular candidates seen.
+ *
+ * WHY NOT THE MINT ADDRESS EITHER. Keying on the mint makes every ungrouped
+ * asset its own collection with one mint and one minter, so neither
+ * collection_daily_cap (1 < 500) nor min_distinct_minters (1 < 5) can ever
+ * fire. That removes volume bounding from precisely the population that filled
+ * a 5 GB volume, trading a visible bug for an invisible one.
+ *
+ * UPDATE AUTHORITY is what "collection" means for an asset that never
+ * registered one: the issuer. A farm minting ten thousand ungrouped NFTs from
+ * one authority still gets capped, while unrelated issuers stop colliding. The
+ * mint address remains the last resort so an asset with neither grouping nor
+ * authority is still its own bucket rather than rejoining a shared one.
+ */
+export function solanaCollectionKey(a: {
+  id: string;
+  grouping?: Array<{ group_key?: string; group_value?: string }>;
+  authorities?: Array<{ address?: string }>;
+}): { key: string; source: 'collection' | 'authority' | 'mint' } {
+  const collection = a.grouping?.find((g) => g.group_key === 'collection')?.group_value;
+  if (collection) return { key: collection, source: 'collection' };
+  const auth = a.authorities?.find((x) => x.address)?.address;
+  if (auth) return { key: auth, source: 'authority' };
+  return { key: a.id, source: 'mint' };
 }
 
 /** RFC 3339 with seconds, which is the only shape DAS accepts. */
@@ -308,10 +343,10 @@ export async function fetchSolanaMints(
     const items = j.result?.items ?? [];
     for (const a of items) {
       const compressed = a.compression?.compressed === true;
-      const collection = a.grouping?.find((g) => g.group_key === 'collection')?.group_value ?? '';
+      const { key } = solanaCollectionKey(a);
       out.push({
         chain: cfg.chain,
-        collectionAddress: collection || 'unknown',
+        collectionAddress: key,
         collectionName: a.content?.metadata?.name ?? null,
         tokenId: '',
         mintAddress: a.id,
