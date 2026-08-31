@@ -23,7 +23,7 @@ const SAMPLE_PNL = [{
   sol_in: 1, sol_out: 0, realized_pnl_sol: 0, realized_pnl_usd: 0,
   tokens_still_held: 100, hold_min: null, sold_out: false,
   cluster_id: 'ntf-c001', cluster_signal: 'shared_signer', cluster_confidence: 'high',
-  rate_basis: 'constant 2439.92 USD/ETH (test)', pre_window_entry: true,
+  rate_basis: 'constant 2439.92 USD/ETH (test)', pre_window_entry: true, cluster_count: 2,
 }];
 
 // A clustered wallet with NO PnL row: 259 of 274 look like this, and the Groups

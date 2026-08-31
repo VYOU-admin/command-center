@@ -136,10 +136,22 @@ export function createWebServer(opts: WebServerOptions): Server {
                 p.n_buys, p.n_sells, p.sol_in, p.sol_out, p.realized_pnl_sol,
                 p.realized_pnl_usd, p.tokens_still_held, p.hold_min, p.sold_out,
                 p.rate_basis, p.pre_window_entry,
-                c.cluster_id, c.signal as cluster_signal, c.confidence as cluster_confidence
+                c.cluster_id, c.cluster_signal, c.cluster_confidence, c.cluster_count
            from wallet_pnl p
-           left join wallet_clusters c
-             on c.chain = p.chain and c.wallet = p.wallet
+           -- AGGREGATED, not a plain join. wallet_clusters is keyed
+           -- (chain, wallet, signal, cluster_id) so a wallet can hold several
+           -- clusters; joining rows directly would multiply a wallet into
+           -- several union rows and silently inflate the table.
+           left join lateral (
+             select count(*)::int                              as cluster_count,
+                    min(x.cluster_id)                          as cluster_id,
+                    string_agg(distinct x.signal, '+' order by x.signal) as cluster_signal,
+                    min(case x.confidence when 'high' then '1high'
+                                          when 'medium' then '2medium'
+                                          else '3low' end)     as cluster_confidence
+               from wallet_clusters x
+              where x.chain = p.chain and x.wallet = p.wallet
+           ) c on true
           order by p.token, p.realized_pnl_sol desc`,
       );
       const rows: CatePnlRow[] = r.rows.map((x: Record<string, unknown>) => ({
@@ -148,7 +160,9 @@ export function createWebServer(opts: WebServerOptions): Server {
         quote_asset: String(x.quote_asset ?? 'SOL'),
         cluster_id: x.cluster_id == null ? null : String(x.cluster_id),
         cluster_signal: x.cluster_signal == null ? null : String(x.cluster_signal),
-        cluster_confidence: x.cluster_confidence == null ? null : String(x.cluster_confidence),
+        cluster_confidence: x.cluster_confidence == null ? null
+          : String(x.cluster_confidence).replace(/^\d/, ''),
+        cluster_count: Number(x.cluster_count ?? 0),
         rate_basis: x.rate_basis == null ? null : String(x.rate_basis),
         pre_window_entry: x.pre_window_entry === true,
         wallet: String(x.wallet),

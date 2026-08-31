@@ -43,6 +43,9 @@ export interface CatePnlRow {
   cluster_id: string | null;
   cluster_signal: string | null;
   cluster_confidence: string | null;
+  /** How many clusters this wallet belongs to. A wallet may sit in several
+   *  once the same signal links it to more than one distinct group. */
+  cluster_count: number;
   /** How realized_pnl_usd was priced — a method for the Solana tokens, a
    *  constant for NTF. Shown in the UI because a USD figure with no visible
    *  basis invites being read as live-priced. */
@@ -382,8 +385,10 @@ function cell(r,c){
     // high-confidence shared_signer one, so confidence drives the colour and
     // the signal is spelled out rather than abbreviated.
     var cf=r.cluster_confidence||'medium';
-    return '<span class="cl cl-'+esc(cf)+'" title="'+esc(r.cluster_signal||'')+' · '+esc(cf)+' confidence">'
-      + esc(r.cluster_id)+'</span> <span class="sig">'+esc((r.cluster_signal||'').replace('_',' '))+'</span>';
+    var extra = (r.cluster_count>1) ? ' <span class="sig">+'+(r.cluster_count-1)+' more</span>' : '';
+    return '<span class="cl cl-'+esc(cf)+'" title="'+esc(r.cluster_signal||'')+' · '+esc(cf)+' confidence'
+      + (r.cluster_count>1?' · in '+r.cluster_count+' clusters':'')+'">'
+      + esc(r.cluster_id)+'</span> <span class="sig">'+esc((r.cluster_signal||'').replace(/_/g,' '))+'</span>'+extra;
   }
   if(c.kind==='wallet'){
     // Explorer differs per chain; a Solscan link for an EVM address is a dead
