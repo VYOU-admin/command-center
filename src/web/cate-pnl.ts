@@ -39,6 +39,10 @@ export interface CatePnlRow {
   chain: string;
   /** What realized_pnl is denominated in. SOL and ETH are not comparable. */
   quote_asset: string;
+  /** Left-joined from wallet_clusters; null when the wallet is unclustered. */
+  cluster_id: string | null;
+  cluster_signal: string | null;
+  cluster_confidence: string | null;
   wallet: string;
   tag: string | null;
   /** 'auto' | 'manual' | null. A regroup rewrites only its own rows. */
@@ -57,7 +61,24 @@ export interface CatePnlRow {
   sold_out: boolean;
 }
 
-export function renderCatePnlPage(rows: CatePnlRow[], generatedAt: Date): string {
+/** A wallet_clusters row. Independent of wallet_pnl and its cohort filter. */
+export interface ClusterRow {
+  chain: string;
+  wallet: string;
+  cluster_id: string;
+  signal: string;
+  evidence: string;
+  confidence: string;
+  cluster_size: number;
+  /** True when this wallet also has a wallet_pnl row. 259 of 274 do not. */
+  has_pnl: boolean;
+}
+
+export function renderCatePnlPage(
+  rows: CatePnlRow[],
+  clusters: ClusterRow[],
+  generatedAt: Date,
+): string {
   const tokens = [...new Set(rows.map((r) => r.token))].sort();
   return `<!doctype html>
 <html lang="en">
@@ -101,6 +122,12 @@ export function renderCatePnlPage(rows: CatePnlRow[], generatedAt: Date): string
   .tablebox { background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:auto; max-height:58vh; }
   table { border-collapse:separate; border-spacing:0; width:100%; font-size:13px; }
   thead th { position:sticky; top:0; z-index:2; background:var(--panel); border-bottom:1px solid var(--border); text-align:right; padding:8px 9px; white-space:nowrap; cursor:pointer; user-select:none; font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .cl { display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600; }
+  .cl-high { background:rgba(80,200,120,.16); color:#4ec27a; border:1px solid rgba(80,200,120,.4); }
+  .cl-medium { background:rgba(200,170,80,.13); color:#c2a34e; border:1px solid rgba(200,170,80,.32); }
+  .cl-low { background:rgba(200,90,90,.13); color:#c26a6a; border:1px solid rgba(200,90,90,.32); }
+  .sig { font-size:10px; color:var(--muted); }
+  .nopnl { font-size:10px; color:var(--muted); border:1px dashed var(--border); border-radius:3px; padding:0 4px; }
   .note { margin:10px 0; padding:9px 12px; border:1px solid var(--border); border-left:3px solid var(--link); border-radius:6px; font-size:12px; color:var(--muted); background:var(--panel); }
   thead th.nosort { cursor:default; opacity:.75; }
   a.exp { color:var(--muted); text-decoration:none; font-size:11px; }
@@ -123,6 +150,12 @@ export function renderCatePnlPage(rows: CatePnlRow[], generatedAt: Date): string
   .pager button { background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:6px; min-width:32px; padding:5px 8px; font-size:13px; cursor:pointer; font-variant-numeric:tabular-nums; }
   .pager button.on { background:var(--link); border-color:var(--link); color:#0b0e13; font-weight:700; }
   .pager button:disabled { opacity:.4; cursor:default; }
+  .cl { display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600; }
+  .cl-high { background:rgba(80,200,120,.16); color:#4ec27a; border:1px solid rgba(80,200,120,.4); }
+  .cl-medium { background:rgba(200,170,80,.13); color:#c2a34e; border:1px solid rgba(200,170,80,.32); }
+  .cl-low { background:rgba(200,90,90,.13); color:#c26a6a; border:1px solid rgba(200,90,90,.32); }
+  .sig { font-size:10px; color:var(--muted); }
+  .nopnl { font-size:10px; color:var(--muted); border:1px dashed var(--border); border-radius:3px; padding:0 4px; }
   .note { background:rgba(242,163,60,.10); border:1px solid var(--warn); border-radius:8px; padding:8px 12px; font-size:12px; color:var(--text); margin-bottom:12px; }
   #toast { position:fixed; bottom:22px; left:50%; transform:translateX(-50%); padding:8px 16px; border-radius:8px; font-size:13px; font-weight:600; opacity:0; transition:opacity .18s; pointer-events:none; background:var(--link); color:#0b0e13; z-index:50; }
   #toast.show { opacity:1; } #toast.err { background:var(--bad); color:#fff; }
@@ -140,6 +173,7 @@ export function renderCatePnlPage(rows: CatePnlRow[], generatedAt: Date): string
 <div id="toast"></div>
 <script>
 const ROWS = ${JSON.stringify(rows)};
+const CLUSTERS = ${JSON.stringify(clusters)};
 const TOKENS = ${JSON.stringify(tokens)};
 const PER = 50;
 let tab = '__all';
@@ -159,6 +193,7 @@ const COLS=[
   {k:'_sel', t:'', l:true, kind:'sel'},
   {k:'wallet',t:'Wallet',l:true,kind:'wallet'},
   {k:'tag',t:'Tag',l:true,kind:'tag'},
+  {k:'cluster',t:'Cluster',l:true,kind:'cluster'},
   {k:'first_buy_time_utc',t:'First buy',l:true,kind:'time'},
   {k:'first_buy_mcap_usd',t:'Buy mcap $',kind:'num',d:0},
   {k:'last_sell_time_utc',t:'Last sell',l:true,kind:'time'},
@@ -183,6 +218,7 @@ const ACOLS=[
   {k:'tokens_touched',t:'Tokens',kind:'int'},
   {k:'tokens',t:'Token list',l:true,kind:'tokens'},
   {k:'quote_assets',t:'Quote',l:true,kind:'quote'},
+  {k:'cluster',t:'Cluster',l:true,kind:'cluster'},
   // MIXED UNITS: a wallet may hold SOL-quoted and ETH-quoted PnL. Summing or
   // ordering those would be meaningless, so this column carries no sort on the
   // union tab. Per-token tabs are single-asset and keep their sort.
@@ -211,6 +247,8 @@ function unionRows(){
       by.set(r.wallet,u); }
     u._tok.add(r.token);
     if(r.quote_asset) u._q.add(r.quote_asset);
+    if(r.cluster_id){ u.cluster_id=r.cluster_id; u.cluster_signal=r.cluster_signal;
+                      u.cluster_confidence=r.cluster_confidence; }
     if(r.chain) u._chain.add(r.chain);
     if(r.tag){ u._tags.add(r.tag); if(r.tag_source==='manual') u._manual=true; }
     u.total_pnl_sol+=r.realized_pnl_sol; u.total_sol_in+=r.sol_in; u.total_sol_out+=r.sol_out;
@@ -315,6 +353,15 @@ function cell(r,c){
   const v=r[c.k];
   if(c.kind==='sel') return '<input type="checkbox" class="rowsel" data-w="'+r.wallet+'"'+(sel.has(r.wallet)?' checked':'')+'>';
   if(c.kind==='quote') return '<span class="muted">'+esc(String(v||''))+'</span>';
+  if(c.kind==='cluster'){
+    if(!r.cluster_id) return '<span class="muted">—</span>';
+    // A medium-confidence same_transaction link must not read the same as a
+    // high-confidence shared_signer one, so confidence drives the colour and
+    // the signal is spelled out rather than abbreviated.
+    var cf=r.cluster_confidence||'medium';
+    return '<span class="cl cl-'+esc(cf)+'" title="'+esc(r.cluster_signal||'')+' · '+esc(cf)+' confidence">'
+      + esc(r.cluster_id)+'</span> <span class="sig">'+esc((r.cluster_signal||'').replace('_',' '))+'</span>';
+  }
   if(c.kind==='wallet'){
     // Explorer differs per chain; a Solscan link for an EVM address is a dead
     // end, so the chain on the row decides. 'mixed' gets no link rather than a
@@ -441,49 +488,68 @@ function renderTable(){
 }
 
 function renderGroups(){
-  // Across every token, not just the active tab: a tag identifies a wallet,
-  // and the point of the tokens column is that it spans them.
+  // READS wallet_clusters, NOT wallet_pnl.tag. The whole reason the table is
+  // separate is that 259 of 274 clustered wallets have no PnL row at all — the
+  // cohort filter excluded them — so a groups view built from wallet_pnl can
+  // only ever show the 15 that survived it.
+  const pnlBy=new Map();
+  for(const r of ROWS) pnlBy.set(r.chain+'|'+r.wallet, r);
   const g=new Map();
-  for(const r of ROWS){ if(!r.tag) continue; if(!g.has(r.tag)) g.set(r.tag,[]); g.get(r.tag).push(r); }
-  const gs=[...g.entries()].map(([tag,rs])=>({
-    tag, n:new Set(rs.map(x=>x.wallet)).size,
-    pnl:rs.reduce((s,x)=>s+x.realized_pnl_sol,0),
-    solin:rs.reduce((s,x)=>s+x.sol_in,0),
-    first:rs.map(x=>x.first_buy_time_utc).filter(Boolean).sort()[0]||'',
-    last:rs.map(x=>x.last_sell_time_utc).filter(Boolean).sort().slice(-1)[0]||'',
-    // Derived from rows already loaded -- no extra query.
-    toks:[...new Set(rs.map(x=>x.token))].sort(),
-    manual:rs.some(x=>x.tag_source==='manual'), rs,
-  })).sort((a,b)=>(b.pnl-a.pnl)*(gSortDir<0?1:-1));
+  for(const c of CLUSTERS){
+    if(!g.has(c.cluster_id)) g.set(c.cluster_id,[]);
+    g.get(c.cluster_id).push(c);
+  }
+  const gs=[...g.entries()].map(([cid,cs])=>{
+    const withPnl=cs.filter(c=>pnlBy.has(c.chain+'|'+c.wallet));
+    const pnl=withPnl.reduce((s2,c)=>s2+(pnlBy.get(c.chain+'|'+c.wallet).realized_pnl_sol||0),0);
+    return {cid, n:cs.length, withPnl:withPnl.length, noPnl:cs.length-withPnl.length,
+            conf:cs[0].confidence, signal:cs[0].signal, evidence:cs[0].evidence,
+            chain:cs[0].chain, pnl, cs};
+  }).sort((a,b)=>{
+    // high confidence first, then size — the ordering states which links are
+    // stronger rather than leaving it to a colour alone.
+    const rank=x=>x.conf==='high'?0:(x.conf==='medium'?1:2);
+    return (rank(a)-rank(b)) || (b.n-a.n) || a.cid.localeCompare(b.cid);
+  });
   const body=gs.map(x=>{
-    const isOpen=open.has(x.tag);
-    let h='<tr><td class="l"><button class="btn" style="padding:1px 7px" data-exp="'+esc(x.tag)+'">'+(isOpen?'▾':'▸')+'</button></td>'+
-      '<td class="l"><span class="tag'+(x.manual?' man':'')+'" data-rename="'+esc(x.tag)+'">'+esc(x.tag)+'</span></td>'+
+    const isOpen=open.has(x.cid);
+    let h='<tr><td class="l"><button class="btn" style="padding:1px 7px" data-exp="'+esc(x.cid)+'">'+(isOpen?'▾':'▸')+'</button></td>'+
+      '<td class="l"><span class="cl cl-'+esc(x.conf)+'">'+esc(x.cid)+'</span></td>'+
+      '<td class="l"><span class="sig">'+esc(x.signal.replace('_',' '))+'</span></td>'+
+      '<td class="l"><span class="cl cl-'+esc(x.conf)+'">'+esc(x.conf)+'</span></td>'+
       '<td>'+x.n+'</td>'+
-      '<td><span class="'+(x.pnl>0?'pos':x.pnl<0?'neg':'')+'">'+(x.pnl>0?'+':'')+x.pnl.toFixed(3)+'</span></td>'+
-      '<td>'+x.solin.toFixed(3)+'</td>'+
-      '<td class="l"><span class="muted">'+(x.first||'—').replace('T',' ').replace('Z','')+'</span></td>'+
-      '<td class="l"><span class="muted">'+(x.last||'—').replace('T',' ').replace('Z','')+'</span></td>'+
-      '<td class="l">'+x.toks.map(t=>'<span class="tag" data-jump="'+esc(t)+'" data-jw="">'+esc(t)+'</span>').join(' ')+'</td></tr>';
+      '<td>'+x.withPnl+'</td>'+
+      '<td>'+(x.noPnl?'<span class="nopnl">'+x.noPnl+' no PnL</span>':'0')+'</td>'+
+      '<td><span class="'+(x.pnl>0?'pos':x.pnl<0?'neg':'')+'">'+(x.withPnl?((x.pnl>0?'+':'')+x.pnl.toFixed(3)):'—')+'</span></td>'+
+      '<td class="l"><span class="muted" title="'+esc(x.evidence)+'">'+esc(x.evidence.slice(0,14))+'…</span></td></tr>';
     if(isOpen){
-      h+='<tr><td></td><td colspan="7" class="l" style="padding:0 9px 8px">'+
-        x.rs.sort((a,b)=>b.realized_pnl_sol-a.realized_pnl_sol).map(r=>
-          '<div style="display:flex;gap:12px;padding:2px 0;font-size:12px">'+
-          '<span class="wallet" data-w="'+r.wallet+'" title="'+r.wallet+'">'+r.wallet.slice(0,4)+'…'+r.wallet.slice(-4)+'</span>'+
-          '<span class="'+(r.realized_pnl_sol>0?'pos':'neg')+'">'+(r.realized_pnl_sol>0?'+':'')+r.realized_pnl_sol.toFixed(3)+' SOL</span>'+
-          '<span class="muted">'+r.n_buys+'b/'+r.n_sells+'s</span>'+
-          '<span class="muted">'+(r.first_buy_time_utc||'').replace('T',' ').replace('Z','')+'</span></div>').join('')+
-        '</td></tr>';
+      h+='<tr><td></td><td colspan="8" class="l" style="padding:0 9px 8px">'+
+        x.cs.map(c=>{
+          const r=pnlBy.get(c.chain+'|'+c.wallet);
+          const href = c.chain==='solana' ? 'https://solscan.io/account/'+c.wallet
+                     : 'https://robinhoodchain.blockscout.com/address/'+c.wallet;
+          return '<div style="display:flex;gap:12px;padding:2px 0;font-size:12px;align-items:center">'+
+            '<span class="wallet" data-w="'+c.wallet+'" title="'+c.wallet+'">'+c.wallet.slice(0,6)+'…'+c.wallet.slice(-4)+'</span>'+
+            '<a class="exp" href="'+href+'" target="_blank" rel="noopener">&#8599;</a>'+
+            (r ? '<span class="muted">'+r.token+'</span><span class="'+(r.realized_pnl_sol>0?'pos':r.realized_pnl_sol<0?'neg':'')+'">'
+                 +(r.realized_pnl_sol>0?'+':'')+Number(r.realized_pnl_sol).toFixed(4)+' '+esc(r.quote_asset)+'</span>'
+               : '<span class="nopnl">no PnL row — outside the cohort</span>')+
+            '</div>';
+        }).join('')+'</td></tr>';
     }
     return h;
   }).join('');
-  document.getElementById('sub').textContent='· '+tab+' · '+gs.length+' groups';
-  document.getElementById('view').innerHTML =
+  const tot=CLUSTERS.length, withp=CLUSTERS.filter(c=>pnlBy.has(c.chain+'|'+c.wallet)).length;
+  document.getElementById('view').innerHTML=
+    '<div class="note">'+tot+' clustered wallets in '+g.size+' clusters. '
+      +withp+' have a PnL row; '+(tot-withp)+' do not — those sit outside the '
+      +'sub-$100k cohort and exist only in wallet_clusters. Confidence: '
+      +'<span class="cl cl-high">high</span> = one shared low-degree signer, '
+      +'<span class="cl cl-medium">medium</span> = same-transaction or an overlapping signer.</div>'+
     '<div class="tablebox"><table><thead><tr>'+
-      '<th class="l"></th><th class="l">Tag</th><th>Wallets</th>'+
-      '<th data-gsort="1" style="cursor:pointer">Combined PnL SOL '+(gSortDir<0?'▼':'▲')+'</th>'+
-      '<th>Combined SOL in</th><th class="l">Earliest first buy</th><th class="l">Latest last sell</th>'+
-      '<th class="l">Tokens</th></tr></thead><tbody>'+(body||'<tr><td colspan="8" class="l muted">no tags</td></tr>')+'</tbody></table></div>';
+      '<th class="l"></th><th class="l">Cluster</th><th class="l">Signal</th><th class="l">Confidence</th>'+
+      '<th>Wallets</th><th>With PnL</th><th>No PnL</th><th>Combined PnL</th><th class="l">Evidence</th>'+
+    '</tr></thead><tbody>'+(body||'<tr><td colspan="9" class="l muted">no clusters</td></tr>')+'</tbody></table></div>';
 }
 
 function render(){

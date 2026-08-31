@@ -14,7 +14,7 @@ import type { Pool } from '../store/db.js';
 import { getRecentRecords } from '../store/records.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard, renderRecordListPanel } from './views.js';
-import { renderCatePnlPage, type CatePnlRow } from './cate-pnl.js';
+import { renderCatePnlPage, type CatePnlRow, type ClusterRow } from './cate-pnl.js';
 
 export interface WebServerOptions {
   pool: Pool;
@@ -129,16 +129,25 @@ export function createWebServer(opts: WebServerOptions): Server {
       // A finished analysis rather than a monitor: one small static table, read
       // whole and handed to the browser to sort and paginate.
       const r = await pool.query(
-        `select token, chain, quote_asset, wallet, tag, tag_source, first_buy_time_utc, first_buy_mcap_usd,
-                last_sell_time_utc, n_buys, n_sells, sol_in, sol_out, realized_pnl_sol,
-                realized_pnl_usd, tokens_still_held, hold_min, sold_out
-           from wallet_pnl
-          order by token, realized_pnl_sol desc`,
+        // LEFT join: the union tab must keep its exact row set. A wallet with
+        // no cluster keeps its row with nulls rather than disappearing.
+        `select p.token, p.chain, p.quote_asset, p.wallet, p.tag, p.tag_source,
+                p.first_buy_time_utc, p.first_buy_mcap_usd, p.last_sell_time_utc,
+                p.n_buys, p.n_sells, p.sol_in, p.sol_out, p.realized_pnl_sol,
+                p.realized_pnl_usd, p.tokens_still_held, p.hold_min, p.sold_out,
+                c.cluster_id, c.signal as cluster_signal, c.confidence as cluster_confidence
+           from wallet_pnl p
+           left join wallet_clusters c
+             on c.chain = p.chain and c.wallet = p.wallet
+          order by p.token, p.realized_pnl_sol desc`,
       );
       const rows: CatePnlRow[] = r.rows.map((x: Record<string, unknown>) => ({
         token: String(x.token ?? 'CATE'),
         chain: String(x.chain ?? 'solana'),
         quote_asset: String(x.quote_asset ?? 'SOL'),
+        cluster_id: x.cluster_id == null ? null : String(x.cluster_id),
+        cluster_signal: x.cluster_signal == null ? null : String(x.cluster_signal),
+        cluster_confidence: x.cluster_confidence == null ? null : String(x.cluster_confidence),
         wallet: String(x.wallet),
         tag: x.tag === null ? null : String(x.tag),
         tag_source: x.tag_source === null ? null : String(x.tag_source),
@@ -155,7 +164,23 @@ export function createWebServer(opts: WebServerOptions): Server {
         hold_min: x.hold_min === null ? null : Number(x.hold_min),
         sold_out: Boolean(x.sold_out),
       }));
-      sendHtml(res, 200, renderCatePnlPage(rows, new Date()));
+      // Every cluster row, including wallets with no PnL — that is the point
+      // of the separate table and the Groups tab depends on it.
+      const cr = await pool.query(
+        `select c.chain, c.wallet, c.cluster_id, c.signal, c.evidence, c.confidence,
+                c.cluster_size,
+                exists (select 1 from wallet_pnl p
+                         where p.chain = c.chain and p.wallet = c.wallet) as has_pnl
+           from wallet_clusters c
+          order by c.cluster_id, c.wallet`,
+      );
+      const clusters: ClusterRow[] = cr.rows.map((x: Record<string, unknown>) => ({
+        chain: String(x.chain), wallet: String(x.wallet),
+        cluster_id: String(x.cluster_id), signal: String(x.signal),
+        evidence: String(x.evidence), confidence: String(x.confidence),
+        cluster_size: Number(x.cluster_size ?? 0), has_pnl: x.has_pnl === true,
+      }));
+      sendHtml(res, 200, renderCatePnlPage(rows, clusters, new Date()));
       return;
     }
 

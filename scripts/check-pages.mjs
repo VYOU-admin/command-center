@@ -22,10 +22,22 @@ const SAMPLE_PNL = [{
   last_sell_time_utc: null, n_buys: 1, n_sells: 0,
   sol_in: 1, sol_out: 0, realized_pnl_sol: 0, realized_pnl_usd: 0,
   tokens_still_held: 100, hold_min: null, sold_out: false,
+  cluster_id: 'ntf-c001', cluster_signal: 'shared_signer', cluster_confidence: 'high',
 }];
 
+// A clustered wallet with NO PnL row: 259 of 274 look like this, and the Groups
+// tab exists to show them, so the gate must exercise that path.
+const SAMPLE_CLUSTERS = [
+  { chain: 'robinhood', wallet: '0xaaa0000000000000000000000000000000000001',
+    cluster_id: 'ntf-c001', signal: 'shared_signer', evidence: '0xsigner',
+    confidence: 'high', cluster_size: 2, has_pnl: false },
+  { chain: 'solana', wallet: 'So11111111111111111111111111111111111111112',
+    cluster_id: 'ntf-c001', signal: 'shared_signer', evidence: '0xsigner',
+    confidence: 'high', cluster_size: 2, has_pnl: true },
+];
+
 const pages = [
-  ['cate-pnl', () => renderCatePnlPage(SAMPLE_PNL, new Date())],
+  ['cate-pnl', () => renderCatePnlPage(SAMPLE_PNL, SAMPLE_CLUSTERS, new Date())],
   ['dashboard', () => renderDashboard({ monitors: [], panels: [], overall: 'ok', generatedAt: new Date() })],
 ];
 
