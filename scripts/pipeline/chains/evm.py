@@ -130,6 +130,28 @@ def discover(rpc, token: str, pool_manager: str, from_block: int, log=print):
             "head": head}
 
 
+def supply_events(rpc, token: str, from_block: int, to_block: int, log=print):
+    """
+    Mint and burn events, so mcap uses the supply that existed at each block.
+
+    NTF burned 49.2M of 1,000,000,000 across its six-hour window — 4.9%. A
+    constant supply therefore overstates late mcap by up to that much, which is
+    enough to move a wallet across a $100k threshold: 0xd2d259f7 sits at
+    $99,732 on the curve and $100,063 on a flat 1B.
+    """
+    mints = get_logs(rpc, from_block, to_block, token, [TRANSFER, ZERO32])
+    burns = get_logs(rpc, from_block, to_block, token, [TRANSFER, None, ZERO32])
+    ev = []
+    for l in mints:
+        ev.append((int(l["blockNumber"], 16), int(l["data"], 16) / DEC))
+    for l in burns:
+        ev.append((int(l["blockNumber"], 16), -int(l["data"], 16) / DEC))
+    ev.sort()
+    log(f"  supply events: {len(mints):,} mints, {len(burns):,} burns, "
+        f"net {sum(d for _, d in ev):+,.0f}")
+    return ev
+
+
 def transfers_of(receipt: dict, token: str):
     return [(addr_of(l["topics"][1]), addr_of(l["topics"][2]), int(l["data"], 16) / DEC)
             for l in (receipt.get("logs") or [])

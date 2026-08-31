@@ -65,7 +65,9 @@ def load_cached(path):
         if q in (None, "") or tk in (None, ""):
             continue
         out.append({"signature": r.get("signature") or r.get("tx_hash"),
-                    "block_time": int(r["block_time"]), "wallet": w, "side": r["side"],
+                    "block_time": int(r["block_time"]),
+                    "block_number": int(r["block_number"]) if r.get("block_number") else None,
+                    "wallet": w, "side": r["side"],
                     "quote_amount": float(q), "token_amount": float(tk),
                     "pool_token_amount": float(pool or 0),
                     "attribution": r.get("attribution", "cached")})
@@ -89,6 +91,27 @@ def phase2_trades(args, rpc, venue):
     return trades, by_w
 
 
+def load_circular(path, venue):
+    """Transactions where the pool manager both sends and receives the token.
+    The attributed wallet there is a tip recipient, not the trader."""
+    pm = (venue or {}).get("pool_manager", "").lower()
+    tok = (venue or {}).get("token", "").lower()
+    circ = set()
+    if not os.path.exists(path):
+        print(f"  receipts file not found: {path}")
+        return circ
+    with open(path) as fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            t = (r.get("v") or {}).get("transfers") or []
+            if any(a == pm for a, _, _ in t) and any(b == pm for _, b, _ in t):
+                circ.add(r["k"])
+    return circ
+
+
 def phase3_mcap(args, trades, venue, rate_fn, supply):
     hr("PHASE 3 — MCAP AT FIRST BUY")
     first = {}
@@ -99,7 +122,8 @@ def phase3_mcap(args, trades, venue, rate_fn, supply):
         if pool <= 0:
             continue
         px = t["quote_amount"] / pool
-        first[t["wallet"]] = px * supply.at(int(t["block_time"])) * rate_fn(int(t["block_time"]))
+        skey = int(t.get("block_number") or 0) or int(t["block_time"])
+        first[t["wallet"]] = px * supply.at(skey) * rate_fn(int(t["block_time"]))
     v = sorted(first.values())
     if not v:
         print("  no buys found"); return first, []
@@ -177,7 +201,20 @@ def main():
     ap.add_argument("--chain", required=True, choices=["solana", "robinhood"])
     ap.add_argument("--mcap-threshold", type=float, required=True)
     ap.add_argument("--cached-trades")
+    ap.add_argument("--receipts", help="receipts JSONL, enables circular-arb exclusion on EVM")
+    ap.add_argument("--no-cohort-filters", action="store_true",
+                    help="skip circular-arb and excess-seller exclusion (diagnostic only)")
     ap.add_argument("--from-block", type=int, default=48_000_000)
+    ap.add_argument("--to-block", type=int, default=0,
+                    help="bound the Initialize scan; 0 = head. Discovery over ~2M "
+                         "blocks times out on the public RPC.")
+    ap.add_argument("--supply", type=float, default=0.0,
+                    help="override total supply when discovery is skipped")
+    ap.add_argument("--pool-manager", default=PM_4663)
+    ap.add_argument("--flat-supply", action="store_true",
+                    help="skip the supply curve (diagnostic; overstates early mcap)")
+    ap.add_argument("--token-for-filters", default="",
+                    help="token contract, for circular-arb detection when discovery is skipped")
     ap.add_argument("--write", action="store_true", help="load to Postgres (off by default)")
     ap.add_argument("--compare", action="store_true", help="compare to wallet_pnl, never write")
     ap.add_argument("--skip-discovery", action="store_true")
@@ -208,10 +245,66 @@ def main():
     print(f"  METHOD: {mode}")
     print(f"  basis: {rep['basis']}")
 
-    supply_whole = (venue or {}).get("supply_whole") or 1.0
-    supply = pricing.SupplyCurve(supply_whole, [])
-    first, under = phase3_mcap(args, trades, venue, rate_fn, supply)
-    cohort = under if under else list(by_w)
+    # ---- supply curve ----
+    supply_whole = args.supply or (venue or {}).get("supply_whole") or 0.0
+    if venue is None and args.token_for_filters:
+        venue = {"pool_manager": args.pool_manager, "token": args.token_for_filters.lower(),
+                 "supply_whole": supply_whole}
+    if not supply_whole:
+        raise SystemExit("no supply available: run discovery (drop --skip-discovery) "
+                         "or the mcap phase cannot be computed")
+    hr("SUPPLY")
+    events = []
+    if args.chain == "robinhood" and not args.flat_supply:
+        blks = [int(t["block_number"]) for t in trades if t.get("block_number")]
+        if blks:
+            events = evm_chain.supply_events(rpc, args.address.lower(),
+                                             min(blks), max(blks) + 1, log=print)
+    supply = pricing.SupplyCurve(supply_whole, events)
+    print(f"  current supply {supply_whole:,.0f}")
+    print(f"  {supply.describe()}")
+    if not events:
+        print("  NOTE: no supply curve — the current total is used at every point.")
+        if args.chain == "solana":
+            print("  Solana burn events are not reconstructed here; mcap early in a")
+            print("  window is overstated by whatever has since been burned.")
+    # mcap is keyed on block number where a curve exists, else on time
+    key_fn = (lambda t: int(t.get("block_number") or 0)) if events else (lambda t: 0)
+
+    # ---- cohort filters, applied in the runner ----
+    hr("COHORT FILTERS")
+    excluded = {}
+    kept_trades = trades
+    if not args.no_cohort_filters and args.receipts:
+        circ = load_circular(args.receipts, venue)
+        before = len(kept_trades)
+        kept_trades = [t for t in kept_trades if t.get("signature") not in circ]
+        excluded["circular_arb_rows"] = before - len(kept_trades)
+        print(f"  circular-arb transactions: {len(circ):,}  rows removed: {excluded['circular_arb_rows']:,}")
+    else:
+        print("  circular-arb exclusion: SKIPPED (no --receipts given)")
+    by_w = defaultdict(list)
+    for t in kept_trades:
+        by_w[t["wallet"]].append(t)
+
+    first, under = phase3_mcap(args, kept_trades, venue, rate_fn, supply)
+
+    # excess sellers: computed on the FULL trade set, as the reference did
+    full_by_w = defaultdict(list)
+    for t in trades:
+        full_by_w[t["wallet"]].append(t)
+    excess = set()
+    for w, ts in full_by_w.items():
+        b = sum(float(t["token_amount"]) for t in ts if t["side"] == "buy")
+        sl = sum(float(t["token_amount"]) for t in ts if t["side"] == "sell")
+        if sl - b > 1:
+            excess.add(w)
+    print(f"  excess sellers (sold more than bought): {len(excess):,}")
+
+    cohort = [w for w in under if w not in excess] if under else \
+             [w for w in by_w if w not in excess]
+    print(f"  COHORT: {len(under) if under else len(by_w):,} under threshold "
+          f"-> {len(cohort):,} after removing excess sellers")
     rows = phase4_pnl(by_w, cohort, rate_fn, {"buy": 0.0, "sell": 0.0})
 
     if args.compare:

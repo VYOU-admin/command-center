@@ -184,3 +184,67 @@ project at least five times.
 window_hours, first and last swap timestamps, block range, swaps in window,
 unique transactions, fully-covered flag, and both balance columns plus
 balance_delta.
+
+---
+
+## Run complete (2026-08-31) — reported, NOT loaded
+
+Nothing written to `wallet_pnl` or `wallet_clusters`. AI untouched.
+Output: `data/pons_wallet_pnl.csv` (1,046 rows).
+
+### Measured, not assumed
+
+| Quantity | Value |
+|---|---|
+| Fee rate | **0.0000% both sides** (buy n=3,458, sell n=2,194; median ratio 1.000000) |
+| Circular arb (V3 analogue) | **1 transaction** — caught something, not zero |
+| Trades decoded | 5,660 from 5,657 txs (4 multi-swap) |
+| Wallets attributed | 1,057 (cohort 1,046) |
+| USD method | constant $1,769.72/ETH — ETH moved 1.5% over the window, under the 5% bar |
+| Pool price at head | $0.25632716 (block 51,165,960), mcap $256,327,163 |
+
+V3 takes its fee inside pool accounting rather than as a token-side skim, so 0%
+is the correct answer here and not a decode failure. NTF's 2% came from a V4
+hook, which is a property of that token, not of the venue.
+
+### DEFECT FOUND AND FIXED — silent zero balances
+
+The first `balanceOf` pass mapped any absent `result` to `0.0`. **490 of 1,046
+reads were HTTP 429 and became fake zero balances**, which then presented as
+"332 wallets hold tokens on our books but nothing on chain" — a decode crisis
+that did not exist. `scripts/pons_balances.py` now retries per response and
+aborts rather than emitting a value the node never returned. Corrected counts:
+nonzero at boundary 44 -> **382**; still_holding 117 -> **170**.
+
+Same family as the fabricated `Transfer` topic hash earlier in this run, which
+matched zero logs across 100k blocks and looked like a clean pull.
+
+### Decode validation (boundary block 9,106,777)
+
+| Check | Result |
+|---|---|
+| Transfer-log completeness (raw net == on-chain) | **1,046/1,046 (100.0%)** |
+| Decode implied == on-chain, all wallets | 983/1,046 (94.0%) |
+| **Wallets that only ever touched this pool** | **476/476 (100.0%)** |
+| ... of those, with a NONZERO balance | **154/154 (100.0%)** |
+| Mismatched wallets having off-pool transfers | **63/63 (100.0%)** |
+
+The pool-only subset is the check that carries weight: where the tracked pool is
+the whole story the decode reproduces chain state exactly, including 154 nonzero
+amounts. Every single mismatch involves movement outside the pool, which is scope
+rather than error. Head-block matching is intentionally NOT used as a decode
+check — head is six weeks past the window, so disagreement there is expected.
+
+### Threshold captured everything — it is doing no work
+
+`--mcap-threshold 10000000` admitted **1,051 of 1,051 wallets (100.0%)**.
+First-buy mcap ran $2,800 to **$394,932**, so the ceiling is 25x above the
+highest value any wallet actually bought at. The cohort is defined entirely by
+the 4-hour window, not by the threshold. Flagged rather than silently accepted.
+
+### Results
+
+Cohort 1,046 (1,051 sub-threshold buyers minus 11 excess sellers, 5 overlap).
+Realized $78,192 total; median **$0.32**; 534 winners / 259 losers / 253 flat.
+Top wallet $5,622. 170 still holding, $7,868,329 unrealized — highly concentrated,
+median holder just $2. Only 1 wallet opened with a sell.
