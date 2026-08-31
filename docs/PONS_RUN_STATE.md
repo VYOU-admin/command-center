@@ -248,3 +248,58 @@ Cohort 1,046 (1,051 sub-threshold buyers minus 11 excess sellers, 5 overlap).
 Realized $78,192 total; median **$0.32**; 534 winners / 259 losers / 253 flat.
 Top wallet $5,622. 170 still holding, $7,868,329 unrealized — highly concentrated,
 median holder just $2. Only 1 wallet opened with a sell.
+
+---
+
+## LOADED (2026-08-31) — verified against the live database
+
+Loaded via `scripts/pons_load.mjs`, one transaction, every statement scoped to
+`token='PONS'` or `cluster_id like 'pons-%'`. **AI was not touched.**
+
+Dry run before the write: `wallet_pnl` token='PONS' 0 rows, `cluster_id like
+'pons-%'` 0 rows, `wallet_pnl_tokens` absent, union invariant already holding at
+1,335 = 1,335.
+
+| Table | Rows | After |
+|---|---|---|
+| `wallet_pnl` | **1,046 upserted** | 2,381 total (CATE 556, CYBERLEEK 268, NTF 511, PONS 1,046) |
+| `wallet_clusters` | **363 inserted** | 912 total; robinhood `shared_signer` 196 -> 559 rows, 69 -> 124 clusters |
+| `wallet_pnl_tokens` | **1 upserted** | new table, one row per (token, chain) |
+
+Verified from a fresh connection, not from a clean script exit:
+- union invariant `count(*) = count(distinct (wallet, token))` = **2,381 = 2,381**
+- the dashboard's own lateral-aggregate join returns **2,381** rows, no fan-out
+- PONS field counts: off_pool 570, still_holding 170, balance_match 983,
+  pre_window_entry 1, null first_buy_mcap 0
+- `wallet_pnl` where token='AI': **0**
+
+Served page executed in a DOM: **0 JS errors**, pager reads `1–50 of 1046`, all
+new columns present, and the 1,335 non-PONS rows carry NULL balances rather than
+fabricated zeros.
+
+### Clusters
+
+`shared_signer` only. Signer sizes ran 2..19 and then jumped to 95, 111, 117,
+126 — a degree gap of 76 — so those four are infrastructure and were excluded,
+leaving 55 operator clusters over 226 wallets.
+
+`same_transaction` produced **0 clusters**, stated rather than omitted. PONS had
+5,657 transactions for 5,662 swaps, so almost no transaction contained two cohort
+wallets. NTF produced 131 because its flow was batched. A real structural
+difference between the tokens, not a filter matching nothing by accident.
+
+### Threshold, recorded but not binding
+
+`--mcap-threshold 10000000` is stored as supplied, and `first_buy_mcap_usd` is
+stored per wallet as computed. `threshold_binding` is **false** with the reason
+recorded on the token row and rendered on the tab, so the column can never be
+read as a filter that selected something. Future tokens use the same schema and
+some thresholds will bite.
+
+### Defects from this run
+
+Both are now on the standing list in `docs/FAILURE_MODES.md`: the fabricated
+`Transfer` topic hash that matched zero logs across 100,000 blocks, and the
+`balanceOf` reader mapping absent results to `0.0`, which turned 490 HTTP 429s
+into fake zero balances. The second is the more dangerous pattern — an error path
+that emits a plausible value instead of failing.
