@@ -106,3 +106,81 @@ distribution with percentiles and histogram, the threshold applied (flag if it
 captures under 3% or over 40%), cohort size, median PnL, top 10, and a
 hand-checkable FIFO walkthrough for the top wallet. **Stop there. Do not load
 until the operator confirms.**
+
+---
+
+## Window bound — REPLACES the threshold-derived bound (2026-08-31)
+
+The threshold-derived bound is abandoned for PONS. The 4.2 hours of pulled data
+was an artifact of a transport stall at block 9,113,156, not a property of the
+token, so it could not be used to locate a $10M crossing (highest mcap in the
+pulled range was $528,072, 5.3% of threshold).
+
+New standard input, supplied per token like the mcap threshold:
+
+    --window-hours <N>   measured from the first swap in the tracked pool
+
+For PONS: `--window-hours 4`.
+
+| Field | Value |
+|---|---|
+| window_hours | 4 |
+| first swap block | 8,963,150 |
+| first swap timestamp | 2026-07-13T20:42:21Z |
+| window ends | 2026-07-14T00:42:21Z |
+| **boundary block** | **9,106,777** |
+| swaps in window | **5,662** |
+| unique transactions in window | **5,657** |
+| fully covered | **yes** (pull reached 4.18 h) |
+| swaps past boundary, discarded | 666 |
+
+The boundary block was found by binary search on real block timestamps, not by
+interpolating a seconds-per-block rate, which would drift across 143,627 blocks.
+
+The mcap threshold ($10,000,000) remains a recorded input and is still computed
+per wallet as `first_buy_mcap_usd`. It no longer bounds the pull.
+
+## Balance spec — TWO columns, never one
+
+    implied_balance  tokens_bought - tokens_sold, from decoded swaps in the
+                     tracked pool within the window
+    onchain_balance  balanceOf read at head, one call per cohort wallet,
+                     NEVER inferred from buys minus sells
+    balance_delta    onchain_balance - implied_balance
+    balance_match    boolean; tolerance chosen from the observed distribution,
+                     not an arbitrary constant. Report the tolerance and why.
+
+The block at which the balanceOf reads were taken is recorded on every row.
+
+**A per-wallet mismatch is expected and is not an error.** `implied` covers the
+tracked pool within the window; `onchain` is the whole chain at head. A negative
+delta means disposal outside the window or outside the tracked pool. A positive
+delta means acquisition elsewhere. Both are information, not bugs.
+
+Aggregate divergence IS a decode check, and is reported as one: match count and
+percentage, the distribution of `balance_delta`, and the match rate split by
+attribution path. A path-specific divergence points at the decoder rather than
+at real off-window activity.
+
+## Additional per-wallet columns
+
+    tokens_bought, tokens_sold      native token units
+    unrealized_pnl_usd              onchain_balance valued at the pool price
+                                    read at head, with price and block stamped
+                                    on the row
+    still_holding                   boolean
+
+## Circular-arb rule on V3
+
+The rule was defined for V4, where one PoolManager singleton both sends and
+receives the token in a single transaction. PONS is V3: each pool is its own
+contract, so the analogue is the POOL CONTRACT itself both sending and
+receiving. The row count it catches must be reported. **If it catches zero, say
+so plainly** — a filter that matches nothing has looked like success on this
+project at least five times.
+
+## Dashboard tab must surface
+
+window_hours, first and last swap timestamps, block range, swaps in window,
+unique transactions, fully-covered flag, and both balance columns plus
+balance_delta.
