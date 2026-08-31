@@ -14,7 +14,9 @@ import type { Pool } from '../store/db.js';
 import { getRecentRecords } from '../store/records.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard, renderRecordListPanel } from './views.js';
-import { renderCatePnlPage, type CatePnlRow, type ClusterRow } from './cate-pnl.js';
+import {
+  renderCatePnlPage, type CatePnlRow, type ClusterRow, type TokenMetaRow,
+} from './cate-pnl.js';
 
 export interface WebServerOptions {
   pool: Pool;
@@ -136,6 +138,11 @@ export function createWebServer(opts: WebServerOptions): Server {
                 p.n_buys, p.n_sells, p.sol_in, p.sol_out, p.realized_pnl_sol,
                 p.realized_pnl_usd, p.tokens_still_held, p.hold_min, p.sold_out,
                 p.rate_basis, p.pre_window_entry,
+                -- null for tokens loaded before the balance spec existed; the
+                -- page shows an em dash rather than inventing a zero.
+                p.tokens_bought, p.tokens_sold, p.implied_balance,
+                p.onchain_balance, p.balance_delta, p.balance_match,
+                p.unrealized_pnl_usd, p.still_holding, p.has_off_pool_activity,
                 c.cluster_id, c.cluster_signal, c.cluster_confidence, c.cluster_count
            from wallet_pnl p
            -- AGGREGATED, not a plain join. wallet_clusters is keyed
@@ -180,6 +187,20 @@ export function createWebServer(opts: WebServerOptions): Server {
         tokens_still_held: Number(x.tokens_still_held ?? 0),
         hold_min: x.hold_min === null ? null : Number(x.hold_min),
         sold_out: Boolean(x.sold_out),
+        // NULL and 0 are different facts here. A wallet with no balance read is
+        // not a wallet holding nothing, so nulls are preserved rather than
+        // coerced — the same confusion that made 490 rate-limited reads look
+        // like real zero balances during the PONS run.
+        tokens_bought: x.tokens_bought == null ? null : Number(x.tokens_bought),
+        tokens_sold: x.tokens_sold == null ? null : Number(x.tokens_sold),
+        implied_balance: x.implied_balance == null ? null : Number(x.implied_balance),
+        onchain_balance: x.onchain_balance == null ? null : Number(x.onchain_balance),
+        balance_delta: x.balance_delta == null ? null : Number(x.balance_delta),
+        balance_match: x.balance_match == null ? null : x.balance_match === true,
+        unrealized_pnl_usd: x.unrealized_pnl_usd == null ? null : Number(x.unrealized_pnl_usd),
+        still_holding: x.still_holding == null ? null : x.still_holding === true,
+        has_off_pool_activity: x.has_off_pool_activity == null ? null
+          : x.has_off_pool_activity === true,
       }));
       // Every cluster row, including wallets with no PnL — that is the point
       // of the separate table and the Groups tab depends on it.
@@ -197,7 +218,52 @@ export function createWebServer(opts: WebServerOptions): Server {
         evidence: String(x.evidence), confidence: String(x.confidence),
         cluster_size: Number(x.cluster_size ?? 0), has_pnl: x.has_pnl === true,
       }));
-      sendHtml(res, 200, renderCatePnlPage(rows, clusters, new Date()));
+      // One record per (token, chain): the window the cohort was cut from, the
+      // supplied threshold and whether it actually bound anything. Guarded on
+      // to_regclass so an environment without the table serves the page instead
+      // of 500-ing.
+      const tmq = await pool.query(
+        `select case when to_regclass('public.wallet_pnl_tokens') is null then null
+                     else 1 end as present`,
+      );
+      let tokenMeta: TokenMetaRow[] = [];
+      if (tmq.rows[0]?.present === 1) {
+        const tm = await pool.query(
+          `select token, chain, quote_asset, dex, dex_version, pool_address,
+                  window_hours, window_start_utc, window_end_utc,
+                  first_swap_block, boundary_block, swaps_in_window, unique_txs,
+                  fully_covered, mcap_threshold_usd, threshold_binding,
+                  threshold_note, fee_rate_buy, fee_rate_sell, cohort_size,
+                  price_usd, price_block, balance_block, decode_check
+             from wallet_pnl_tokens`,
+        );
+        tokenMeta = tm.rows.map((x: Record<string, unknown>) => ({
+          token: String(x.token), chain: String(x.chain),
+          quote_asset: String(x.quote_asset ?? ''),
+          dex: x.dex == null ? null : String(x.dex),
+          dex_version: x.dex_version == null ? null : String(x.dex_version),
+          pool_address: x.pool_address == null ? null : String(x.pool_address),
+          window_hours: x.window_hours == null ? null : Number(x.window_hours),
+          window_start_utc: x.window_start_utc == null ? null : String(x.window_start_utc),
+          window_end_utc: x.window_end_utc == null ? null : String(x.window_end_utc),
+          first_swap_block: x.first_swap_block == null ? null : Number(x.first_swap_block),
+          boundary_block: x.boundary_block == null ? null : Number(x.boundary_block),
+          swaps_in_window: x.swaps_in_window == null ? null : Number(x.swaps_in_window),
+          unique_txs: x.unique_txs == null ? null : Number(x.unique_txs),
+          fully_covered: x.fully_covered == null ? null : x.fully_covered === true,
+          mcap_threshold_usd: x.mcap_threshold_usd == null ? null : Number(x.mcap_threshold_usd),
+          threshold_binding: x.threshold_binding == null ? null : x.threshold_binding === true,
+          threshold_note: x.threshold_note == null ? null : String(x.threshold_note),
+          fee_rate_buy: x.fee_rate_buy == null ? null : Number(x.fee_rate_buy),
+          fee_rate_sell: x.fee_rate_sell == null ? null : Number(x.fee_rate_sell),
+          cohort_size: x.cohort_size == null ? null : Number(x.cohort_size),
+          price_usd: x.price_usd == null ? null : Number(x.price_usd),
+          price_block: x.price_block == null ? null : Number(x.price_block),
+          balance_block: x.balance_block == null ? null : Number(x.balance_block),
+          decode_check: x.decode_check == null ? null : String(x.decode_check),
+        }));
+      }
+      sendHtml(res, 200, renderCatePnlPage(rows, clusters, new Date(), tokenMeta));
       return;
     }
 

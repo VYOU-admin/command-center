@@ -69,6 +69,59 @@ export interface CatePnlRow {
   tokens_still_held: number;
   hold_min: number | null;
   sold_out: boolean;
+  /** Token units bought and sold inside the tracked pool and window. */
+  tokens_bought: number | null;
+  tokens_sold: number | null;
+  /** TWO BALANCE COLUMNS, NEVER ONE. `implied_balance` is bought minus sold
+   *  from decoded swaps in the tracked pool; `onchain_balance` is a balanceOf
+   *  read at a stated block. They answer different questions and a per-wallet
+   *  disagreement is information, not a bug — it means the wallet moved tokens
+   *  outside the pool or the window. Null means never measured, which is not
+   *  the same fact as zero. */
+  implied_balance: number | null;
+  onchain_balance: number | null;
+  balance_delta: number | null;
+  balance_match: boolean | null;
+  unrealized_pnl_usd: number | null;
+  still_holding: boolean | null;
+  /** True when the wallet moved this token to or from a non-pool address
+   *  inside the window, so its realized PnL covers the tracked pool only. */
+  has_off_pool_activity: boolean | null;
+}
+
+/**
+ * One row per (token, chain): how the cohort was cut, and what bounded it.
+ *
+ * `threshold_binding` exists so a threshold column is never misread as a filter
+ * that selected something. PONS admitted 1,051 of 1,051 wallets against a $10M
+ * ceiling because the highest first-buy market cap was $394,932 — the cohort is
+ * defined by its window, not by the threshold. Other tokens will bind.
+ */
+export interface TokenMetaRow {
+  token: string;
+  chain: string;
+  quote_asset: string;
+  dex: string | null;
+  dex_version: string | null;
+  pool_address: string | null;
+  window_hours: number | null;
+  window_start_utc: string | null;
+  window_end_utc: string | null;
+  first_swap_block: number | null;
+  boundary_block: number | null;
+  swaps_in_window: number | null;
+  unique_txs: number | null;
+  fully_covered: boolean | null;
+  mcap_threshold_usd: number | null;
+  threshold_binding: boolean | null;
+  threshold_note: string | null;
+  fee_rate_buy: number | null;
+  fee_rate_sell: number | null;
+  cohort_size: number | null;
+  price_usd: number | null;
+  price_block: number | null;
+  balance_block: number | null;
+  decode_check: string | null;
 }
 
 /** A wallet_clusters row. Independent of wallet_pnl and its cohort filter. */
@@ -88,6 +141,7 @@ export function renderCatePnlPage(
   rows: CatePnlRow[],
   clusters: ClusterRow[],
   generatedAt: Date,
+  tokenMeta: TokenMetaRow[] = [],
 ): string {
   const tokens = [...new Set(rows.map((r) => r.token))].sort();
   return `<!doctype html>
@@ -151,6 +205,7 @@ export function renderCatePnlPage(
   tbody tr.sel { background:rgba(108,182,255,.10); }
   tbody tr.grouphead td { background:rgba(108,182,255,.10); font-weight:600; color:var(--link); cursor:pointer; }
   .pos { color:var(--ok); } .neg { color:var(--bad); }
+  .bad { color:var(--bad); font-weight:600; }
   .wallet { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; border-bottom:1px dotted var(--muted); }
   .wallet:hover { color:var(--link); }
   .tag { display:inline-block; font-size:11px; padding:1px 7px; border-radius:999px; background:rgba(108,182,255,.15); color:var(--link); cursor:text; }
@@ -189,6 +244,7 @@ export function renderCatePnlPage(
 const ROWS = ${JSON.stringify(rows)};
 const CLUSTERS = ${JSON.stringify(clusters)};
 const TOKENS = ${JSON.stringify(tokens)};
+const TOKENMETA = ${JSON.stringify(tokenMeta)};
 const PER = 50;
 let tab = '__all';
 let sortKey='realized_pnl_sol', sortDir=-1, page=1, mode='flat';
@@ -202,7 +258,10 @@ const F = {};   // active filters
 
 const NUMCOLS=[['n_buys','Buys'],['n_sells','Sells'],['sol_in','SOL in'],['sol_out','SOL out'],
   ['realized_pnl_sol','PnL SOL'],['realized_pnl_usd','PnL USD'],['tokens_still_held','Held'],
-  ['hold_min','Hold min'],['first_buy_mcap_usd','Buy mcap $']];
+  ['hold_min','Hold min'],['first_buy_mcap_usd','Buy mcap $'],
+  ['tokens_bought','Bought'],['tokens_sold','Sold'],['implied_balance','Implied bal'],
+  ['onchain_balance','On-chain bal'],['balance_delta','Bal delta'],
+  ['unrealized_pnl_usd','Unreal USD']];
 const COLS=[
   {k:'_sel', t:'', l:true, kind:'sel'},
   {k:'wallet',t:'Wallet',l:true,kind:'wallet'},
@@ -216,6 +275,17 @@ const COLS=[
   {k:'realized_pnl_sol',t:'PnL SOL',kind:'pnl',d:3},{k:'realized_pnl_usd',t:'PnL USD',kind:'pnl',d:0},
   {k:'tokens_still_held',t:'Held',kind:'num',d:0},{k:'hold_min',t:'Hold min',kind:'num',d:1},
   {k:'sold_out',t:'Sold out',kind:'bool'},
+  {k:'tokens_bought',t:'Bought',kind:'num',d:0},
+  {k:'tokens_sold',t:'Sold',kind:'num',d:0},
+  // Both balances, side by side and never collapsed into one. Implied is our
+  // decode of the tracked pool; on-chain is a balanceOf read at a stated block.
+  {k:'implied_balance',t:'Implied bal',kind:'num',d:0},
+  {k:'onchain_balance',t:'On-chain bal',kind:'num',d:0},
+  {k:'balance_delta',t:'Bal delta',kind:'num',d:0},
+  {k:'balance_match',t:'Bal match',kind:'bool'},
+  {k:'unrealized_pnl_usd',t:'Unreal USD',kind:'usd',d:0},
+  {k:'still_holding',t:'Holding',kind:'bool'},
+  {k:'has_off_pool_activity',t:'Off-pool',kind:'bool'},
 ];
 const nz=(v)=>v===null||v===undefined||v==='';
 const fmt=(v,d)=>nz(v)?'<span class="muted">—</span>':Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -504,6 +574,7 @@ function renderTable(){
       '<button class="btn" id="bulkset" '+(sel.size?'':'disabled')+'>Tag selected</button>'+
       '<button class="btn" id="bulkclear" '+(sel.size?'':'disabled')+'>Clear tag</button>'+
     '</div>'+
+    tokenNote()+
     basisNote()+
     (tab==='NTF'
       // Stated on the tab rather than in a commit message: the number is a
@@ -525,6 +596,69 @@ function renderTable(){
  * SOL moved 39% across CATE's month and 38.8% across CYBERLEEK's fortnight; ETH
  * moved 0.8% across NTF's six hours, which is why only NTF gets a constant.
  */
+/**
+ * The token record: the window the cohort was cut from, and what bounded it.
+ *
+ * THE THRESHOLD LINE IS THE POINT OF THIS PANEL. A "Buy mcap $" column next to
+ * a supplied threshold reads as though the threshold selected something. For
+ * PONS it did not — every wallet was admitted — and that has to be visible
+ * beside the column rather than buried in a commit message.
+ */
+function tokenNote(){
+  if(tab==='__all'||tab==='__groups') return '';
+  var m=null;
+  TOKENMETA.forEach(function(x){ if(x.token===tab) m=x; });
+  if(!m) return '';
+  var rows=tokenRows();
+  var bits=[];
+  if(m.window_hours!=null) bits.push('<b>Window</b> '+esc(m.window_hours)+' h');
+  if(m.window_start_utc) bits.push(esc(m.window_start_utc)+' &rarr; '+esc(m.window_end_utc||'?'));
+  if(m.first_swap_block!=null&&m.boundary_block!=null)
+    bits.push('<b>Blocks</b> '+Number(m.first_swap_block).toLocaleString('en-US')+
+      '&ndash;'+Number(m.boundary_block).toLocaleString('en-US'));
+  if(m.swaps_in_window!=null) bits.push('<b>Swaps</b> '+Number(m.swaps_in_window).toLocaleString('en-US'));
+  if(m.unique_txs!=null) bits.push('<b>Txs</b> '+Number(m.unique_txs).toLocaleString('en-US'));
+  if(m.fully_covered!=null)
+    bits.push('<b>Fully covered</b> '+(m.fully_covered?'yes':'<span class="bad">no</span>'));
+  if(m.dex_version) bits.push('<b>Venue</b> '+esc((m.dex||'')+' '+m.dex_version));
+  if(m.fee_rate_buy!=null)
+    bits.push('<b>Fee</b> buy '+(m.fee_rate_buy*100).toFixed(4)+'% / sell '+
+      (m.fee_rate_sell*100).toFixed(4)+'%');
+
+  // aggregate balance comparison, the decode check
+  var withBal=rows.filter(function(r){return r.onchain_balance!=null;});
+  var bal='';
+  if(withBal.length){
+    var mt=withBal.filter(function(r){return r.balance_match===true;}).length;
+    var imp=0,onc=0,off=0;
+    withBal.forEach(function(r){
+      imp+=Number(r.implied_balance||0); onc+=Number(r.onchain_balance||0);
+      if(r.has_off_pool_activity) off++;
+    });
+    bal='<br><b>Balances.</b> Two columns, never one: <i>implied</i> is our decode '+
+      'of this pool inside the window, <i>on-chain</i> is a balanceOf read at block '+
+      (m.balance_block!=null?Number(m.balance_block).toLocaleString('en-US'):'?')+'. '+
+      'Implied total '+imp.toLocaleString('en-US',{maximumFractionDigits:0})+
+      ', on-chain total '+onc.toLocaleString('en-US',{maximumFractionDigits:0})+
+      ', matching '+mt+' of '+withBal.length+' wallets. A per-wallet delta is '+
+      'expected where a wallet traded outside this pool and is not an error.'+
+      (off?' <b>'+off+'</b> wallets have off-pool activity, so their realized PnL '+
+        'covers this pool only.':'');
+  }
+  var thr='';
+  if(m.mcap_threshold_usd!=null){
+    thr='<br><b>Threshold.</b> Supplied &minus;&minus;mcap-threshold $'+
+      Number(m.mcap_threshold_usd).toLocaleString('en-US')+'. '+
+      (m.threshold_binding===false
+        ? '<span class="bad">It selected nothing</span> &mdash; '+esc(m.threshold_note||'')+
+          '. The cohort here is defined by the window, not by this ceiling, so the '+
+          '&ldquo;Buy mcap $&rdquo; column must not be read as a filter that bit.'
+        : 'This threshold is binding for this token.');
+  }
+  var dc=m.decode_check?'<br><b>Decode check.</b> '+esc(m.decode_check):'';
+  return '<div class="note">'+bits.join(' &middot; ')+thr+bal+dc+'</div>';
+}
+
 function basisNote(){
   var rows = tab==='__all' ? ROWS : ROWS.filter(function(r){return r.token===tab;});
   var bas = [];
