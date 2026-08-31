@@ -35,6 +35,10 @@ import { escapeHtml } from './views.js';
 
 export interface CatePnlRow {
   token: string;
+  /** Which chain the wallet trades on — decides the explorer link. */
+  chain: string;
+  /** What realized_pnl is denominated in. SOL and ETH are not comparable. */
+  quote_asset: string;
   wallet: string;
   tag: string | null;
   /** 'auto' | 'manual' | null. A regroup rewrites only its own rows. */
@@ -97,6 +101,10 @@ export function renderCatePnlPage(rows: CatePnlRow[], generatedAt: Date): string
   .tablebox { background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:auto; max-height:58vh; }
   table { border-collapse:separate; border-spacing:0; width:100%; font-size:13px; }
   thead th { position:sticky; top:0; z-index:2; background:var(--panel); border-bottom:1px solid var(--border); text-align:right; padding:8px 9px; white-space:nowrap; cursor:pointer; user-select:none; font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .note { margin:10px 0; padding:9px 12px; border:1px solid var(--border); border-left:3px solid var(--link); border-radius:6px; font-size:12px; color:var(--muted); background:var(--panel); }
+  thead th.nosort { cursor:default; opacity:.75; }
+  a.exp { color:var(--muted); text-decoration:none; font-size:11px; }
+  a.exp:hover { color:var(--link); }
   thead th.l { text-align:left; } thead th:hover { color:var(--text); }
   thead th .arrow { opacity:.5; font-size:9px; }
   tbody td { border-bottom:1px solid var(--border); padding:6px 9px; text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
@@ -174,7 +182,11 @@ const ACOLS=[
   {k:'tag',t:'Tag',l:true,kind:'tag'},
   {k:'tokens_touched',t:'Tokens',kind:'int'},
   {k:'tokens',t:'Token list',l:true,kind:'tokens'},
-  {k:'total_pnl_sol',t:'Total PnL SOL',kind:'pnl',d:3},
+  {k:'quote_assets',t:'Quote',l:true,kind:'quote'},
+  // MIXED UNITS: a wallet may hold SOL-quoted and ETH-quoted PnL. Summing or
+  // ordering those would be meaningless, so this column carries no sort on the
+  // union tab. Per-token tabs are single-asset and keep their sort.
+  {k:'total_pnl_sol',t:'Total PnL (mixed)',kind:'pnl',d:3,nosort:true},
   {k:'total_sol_in',t:'Total SOL in',kind:'num',d:3},
   {k:'total_sol_out',t:'Total SOL out',kind:'num',d:3},
   {k:'total_buys',t:'Buys',kind:'int'},
@@ -193,10 +205,13 @@ function unionRows(){
   for(const r of ROWS){
     let u=by.get(r.wallet);
     if(!u){ u={wallet:r.wallet, tag:null, _tags:new Set(), _manual:false, _tok:new Set(),
+      _q:new Set(), _chain:new Set(),
       total_pnl_sol:0, total_sol_in:0, total_sol_out:0, total_buys:0, total_sells:0,
       earliest_first_buy:null, latest_last_sell:null};
       by.set(r.wallet,u); }
     u._tok.add(r.token);
+    if(r.quote_asset) u._q.add(r.quote_asset);
+    if(r.chain) u._chain.add(r.chain);
     if(r.tag){ u._tags.add(r.tag); if(r.tag_source==='manual') u._manual=true; }
     u.total_pnl_sol+=r.realized_pnl_sol; u.total_sol_in+=r.sol_in; u.total_sol_out+=r.sol_out;
     u.total_buys+=r.n_buys; u.total_sells+=r.n_sells;
@@ -208,6 +223,8 @@ function unionRows(){
   for(const u of by.values()){
     u.tokens=[...u._tok].sort().join(', ');
     u.tokens_touched=u._tok.size;
+    u.quote_assets=[...u._q].sort().join(' + ');
+    u.chain=u._chain.size===1?[...u._chain][0]:'mixed';
     // A wallet tagged differently per token shows both rather than silently
     // picking one.
     u.tag=u._tags.size?[...u._tags].sort().join(' / '):null;
@@ -297,7 +314,16 @@ function ordered(){
 function cell(r,c){
   const v=r[c.k];
   if(c.kind==='sel') return '<input type="checkbox" class="rowsel" data-w="'+r.wallet+'"'+(sel.has(r.wallet)?' checked':'')+'>';
-  if(c.kind==='wallet') return '<span class="wallet" data-w="'+r.wallet+'" title="'+r.wallet+'">'+r.wallet.slice(0,4)+'…'+r.wallet.slice(-4)+'</span>';
+  if(c.kind==='quote') return '<span class="muted">'+esc(String(v||''))+'</span>';
+  if(c.kind==='wallet'){
+    // Explorer differs per chain; a Solscan link for an EVM address is a dead
+    // end, so the chain on the row decides. 'mixed' gets no link rather than a
+    // wrong one.
+    var href = r.chain==='solana' ? 'https://solscan.io/account/'+r.wallet
+             : (r.chain==='robinhood' ? 'https://robinhoodchain.blockscout.com/address/'+r.wallet : null);
+    var lbl='<span class="wallet" data-w="'+r.wallet+'" title="'+r.wallet+'">'+r.wallet.slice(0,4)+'…'+r.wallet.slice(-4)+'</span>';
+    return href? lbl+' <a class="exp" href="'+href+'" target="_blank" rel="noopener" title="explorer">&#8599;</a>' : lbl;
+  }
   if(c.kind==='tag') return v
     ? '<span class="tag'+(r.tag_source==='manual'?' man':'')+'" data-edit="'+r.wallet+'">'+esc(v)+'</span>'
     : '<span class="tagempty" data-edit="'+r.wallet+'">+ tag</span>';
@@ -363,8 +389,12 @@ function renderTable(){
   const slice=all.slice((page-1)*PER,page*PER);
   const head='<tr>'+C.map(c=>c.kind==='sel'
       ? '<th class="l"><input type="checkbox" id="selall"></th>'
-      : '<th class="'+(c.l?'l':'')+'" data-k="'+c.k+'">'+c.t+
-        ((isU||mode==='flat')&&curKey()===c.k?' <span class="arrow">'+(curDir()<0?'▼':'▲')+'</span>':'')+'</th>').join('')+'</tr>';
+      : (c.nosort
+          // No data-k means the delegated click handler never matches it.
+          // Mixed SOL/ETH cannot be ordered meaningfully on the union tab.
+          ? '<th class="'+(c.l?'l':'')+' nosort" title="mixed quote assets - not sortable">'+c.t+'</th>'
+          : '<th class="'+(c.l?'l':'')+'" data-k="'+c.k+'">'+c.t+
+            ((isU||mode==='flat')&&curKey()===c.k?' <span class="arrow">'+(curDir()<0?'▼':'▲')+'</span>':'')+'</th>')).join('')+'</tr>';
   const body=slice.map(x=>{
     if(x.head) return '<tr class="grouphead"><td colspan="'+C.length+'">'+esc(x.head.tag)+
       ' · '+x.head.rs.length+' wallets · combined '+(x.head.sum>=0?'+':'')+x.head.sum.toFixed(2)+' SOL</td></tr>';
@@ -398,6 +428,13 @@ function renderTable(){
       '<button class="btn" id="bulkset" '+(sel.size?'':'disabled')+'>Tag selected</button>'+
       '<button class="btn" id="bulkclear" '+(sel.size?'':'disabled')+'>Clear tag</button>'+
     '</div>'+
+    (tab==='NTF'
+      // Stated on the tab rather than in a commit message: the number is a
+      // property of the data, and anyone reading these rows needs it.
+      ? '<div class="note">PnL covers our pool only (poolId 0xf7579d2f…), which is '
+        + '60.7% of NTF swap activity. 64 other NTF pools exist and are not indexed, '
+        + 'so the full NTF position of a wallet may be larger than shown.</div>'
+      : '')+
     '<div class="tablebox"><table><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>'+
     '<div class="pager">'+pg+'</div>';
   window.__rows=rowsOnly;

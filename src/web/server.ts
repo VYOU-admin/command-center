@@ -129,7 +129,7 @@ export function createWebServer(opts: WebServerOptions): Server {
       // A finished analysis rather than a monitor: one small static table, read
       // whole and handed to the browser to sort and paginate.
       const r = await pool.query(
-        `select token, wallet, tag, tag_source, first_buy_time_utc, first_buy_mcap_usd,
+        `select token, chain, quote_asset, wallet, tag, tag_source, first_buy_time_utc, first_buy_mcap_usd,
                 last_sell_time_utc, n_buys, n_sells, sol_in, sol_out, realized_pnl_sol,
                 realized_pnl_usd, tokens_still_held, hold_min, sold_out
            from wallet_pnl
@@ -137,6 +137,8 @@ export function createWebServer(opts: WebServerOptions): Server {
       );
       const rows: CatePnlRow[] = r.rows.map((x: Record<string, unknown>) => ({
         token: String(x.token ?? 'CATE'),
+        chain: String(x.chain ?? 'solana'),
+        quote_asset: String(x.quote_asset ?? 'SOL'),
         wallet: String(x.wallet),
         tag: x.tag === null ? null : String(x.tag),
         tag_source: x.tag_source === null ? null : String(x.tag_source),
