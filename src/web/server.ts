@@ -135,6 +135,7 @@ export function createWebServer(opts: WebServerOptions): Server {
                 p.first_buy_time_utc, p.first_buy_mcap_usd, p.last_sell_time_utc,
                 p.n_buys, p.n_sells, p.sol_in, p.sol_out, p.realized_pnl_sol,
                 p.realized_pnl_usd, p.tokens_still_held, p.hold_min, p.sold_out,
+                p.rate_basis, p.pre_window_entry,
                 c.cluster_id, c.signal as cluster_signal, c.confidence as cluster_confidence
            from wallet_pnl p
            left join wallet_clusters c
@@ -148,6 +149,8 @@ export function createWebServer(opts: WebServerOptions): Server {
         cluster_id: x.cluster_id == null ? null : String(x.cluster_id),
         cluster_signal: x.cluster_signal == null ? null : String(x.cluster_signal),
         cluster_confidence: x.cluster_confidence == null ? null : String(x.cluster_confidence),
+        rate_basis: x.rate_basis == null ? null : String(x.rate_basis),
+        pre_window_entry: x.pre_window_entry === true,
         wallet: String(x.wallet),
         tag: x.tag === null ? null : String(x.tag),
         tag_source: x.tag_source === null ? null : String(x.tag_source),

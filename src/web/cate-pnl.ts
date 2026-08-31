@@ -43,6 +43,13 @@ export interface CatePnlRow {
   cluster_id: string | null;
   cluster_signal: string | null;
   cluster_confidence: string | null;
+  /** How realized_pnl_usd was priced — a method for the Solana tokens, a
+   *  constant for NTF. Shown in the UI because a USD figure with no visible
+   *  basis invites being read as live-priced. */
+  rate_basis: string | null;
+  /** True when the wallet sold tokens it never bought in our window, so its
+   *  PnL rests on a cost basis we cannot see. */
+  pre_window_entry: boolean;
   wallet: string;
   tag: string | null;
   /** 'auto' | 'manual' | null. A regroup rewrites only its own rows. */
@@ -127,6 +134,8 @@ export function renderCatePnlPage(
   .cl-medium { background:rgba(200,170,80,.13); color:#c2a34e; border:1px solid rgba(200,170,80,.32); }
   .cl-low { background:rgba(200,90,90,.13); color:#c26a6a; border:1px solid rgba(200,90,90,.32); }
   .sig { font-size:10px; color:var(--muted); }
+  .zb { display:inline-block; padding:0 5px; border-radius:3px; font-size:10px; font-weight:600;
+        background:rgba(200,140,60,.15); color:#c98c3c; border:1px solid rgba(200,140,60,.4); }
   .nopnl { font-size:10px; color:var(--muted); border:1px dashed var(--border); border-radius:3px; padding:0 4px; }
   .note { margin:10px 0; padding:9px 12px; border:1px solid var(--border); border-left:3px solid var(--link); border-radius:6px; font-size:12px; color:var(--muted); background:var(--panel); }
   thead th.nosort { cursor:default; opacity:.75; }
@@ -155,6 +164,8 @@ export function renderCatePnlPage(
   .cl-medium { background:rgba(200,170,80,.13); color:#c2a34e; border:1px solid rgba(200,170,80,.32); }
   .cl-low { background:rgba(200,90,90,.13); color:#c26a6a; border:1px solid rgba(200,90,90,.32); }
   .sig { font-size:10px; color:var(--muted); }
+  .zb { display:inline-block; padding:0 5px; border-radius:3px; font-size:10px; font-weight:600;
+        background:rgba(200,140,60,.15); color:#c98c3c; border:1px solid rgba(200,140,60,.4); }
   .nopnl { font-size:10px; color:var(--muted); border:1px dashed var(--border); border-radius:3px; padding:0 4px; }
   .note { background:rgba(242,163,60,.10); border:1px solid var(--warn); border-radius:8px; padding:8px 12px; font-size:12px; color:var(--text); margin-bottom:12px; }
   #toast { position:fixed; bottom:22px; left:50%; transform:translateX(-50%); padding:8px 16px; border-radius:8px; font-size:13px; font-weight:600; opacity:0; transition:opacity .18s; pointer-events:none; background:var(--link); color:#0b0e13; z-index:50; }
@@ -180,7 +191,7 @@ let tab = '__all';
 let sortKey='realized_pnl_sol', sortDir=-1, page=1, mode='flat';
 // The union view has its own sort default: wallets seen across several tokens
 // are the interesting ones, so they lead regardless of size.
-let aSortKey='tokens_touched', aSortDir=-1;
+let aSortKey='total_pnl_usd', aSortDir=-1;
 let gSortDir=-1;
 const sel = new Set();
 const open = new Set();
@@ -222,7 +233,8 @@ const ACOLS=[
   // MIXED UNITS: a wallet may hold SOL-quoted and ETH-quoted PnL. Summing or
   // ordering those would be meaningless, so this column carries no sort on the
   // union tab. Per-token tabs are single-asset and keep their sort.
-  {k:'total_pnl_sol',t:'Total PnL (mixed)',kind:'pnl',d:3,nosort:true},
+  {k:'total_pnl_usd',t:'Total PnL USD',kind:'usd',d:0},
+  {k:'total_pnl_sol',t:'Native (mixed)',kind:'pnl',d:3,nosort:true},
   {k:'total_sol_in',t:'Total SOL in',kind:'num',d:3},
   {k:'total_sol_out',t:'Total SOL out',kind:'num',d:3},
   {k:'total_buys',t:'Buys',kind:'int'},
@@ -242,7 +254,8 @@ function unionRows(){
     let u=by.get(r.wallet);
     if(!u){ u={wallet:r.wallet, tag:null, _tags:new Set(), _manual:false, _tok:new Set(),
       _q:new Set(), _chain:new Set(),
-      total_pnl_sol:0, total_sol_in:0, total_sol_out:0, total_buys:0, total_sells:0,
+      total_pnl_sol:0, total_pnl_usd:0, total_sol_in:0, total_sol_out:0, total_buys:0, total_sells:0,
+      pre_window_entry:false, _basis:new Set(),
       earliest_first_buy:null, latest_last_sell:null};
       by.set(r.wallet,u); }
     u._tok.add(r.token);
@@ -251,7 +264,10 @@ function unionRows(){
                       u.cluster_confidence=r.cluster_confidence; }
     if(r.chain) u._chain.add(r.chain);
     if(r.tag){ u._tags.add(r.tag); if(r.tag_source==='manual') u._manual=true; }
-    u.total_pnl_sol+=r.realized_pnl_sol; u.total_sol_in+=r.sol_in; u.total_sol_out+=r.sol_out;
+    u.total_pnl_sol+=r.realized_pnl_sol;
+    u.total_pnl_usd+=(r.realized_pnl_usd||0);
+    if(r.pre_window_entry) u.pre_window_entry=true;
+    if(r.rate_basis) u._basis.add(r.rate_basis); u.total_sol_in+=r.sol_in; u.total_sol_out+=r.sol_out;
     u.total_buys+=r.n_buys; u.total_sells+=r.n_sells;
     if(r.first_buy_time_utc && (!u.earliest_first_buy || r.first_buy_time_utc<u.earliest_first_buy))
       u.earliest_first_buy=r.first_buy_time_utc;
@@ -262,6 +278,7 @@ function unionRows(){
     u.tokens=[...u._tok].sort().join(', ');
     u.tokens_touched=u._tok.size;
     u.quote_assets=[...u._q].sort().join(' + ');
+    u.rate_basis=[...u._basis][0]||null;
     u.chain=u._chain.size===1?[...u._chain][0]:'mixed';
     // A wallet tagged differently per token shows both rather than silently
     // picking one.
@@ -352,6 +369,12 @@ function ordered(){
 function cell(r,c){
   const v=r[c.k];
   if(c.kind==='sel') return '<input type="checkbox" class="rowsel" data-w="'+r.wallet+'"'+(sel.has(r.wallet)?' checked':'')+'>';
+  if(c.kind==='usd'){
+    if(v===null||v===undefined||v==='') return '<span class="muted">—</span>';
+    var nu=Number(v);
+    return '<span class="'+(nu>0?'pos':nu<0?'neg':'')+'">'+(nu>0?'+':'')+
+      nu.toLocaleString(undefined,{maximumFractionDigits:0})+'</span>';
+  }
   if(c.kind==='quote') return '<span class="muted">'+esc(String(v||''))+'</span>';
   if(c.kind==='cluster'){
     if(!r.cluster_id) return '<span class="muted">—</span>';
@@ -369,6 +392,7 @@ function cell(r,c){
     var href = r.chain==='solana' ? 'https://solscan.io/account/'+r.wallet
              : (r.chain==='robinhood' ? 'https://robinhoodchain.blockscout.com/address/'+r.wallet : null);
     var lbl='<span class="wallet" data-w="'+r.wallet+'" title="'+r.wallet+'">'+r.wallet.slice(0,4)+'…'+r.wallet.slice(-4)+'</span>';
+    if(r.pre_window_entry) lbl += ' <span class="zb" title="sold tokens it never bought in our window — PnL rests on a cost basis we cannot see">no basis</span>';
     return href? lbl+' <a class="exp" href="'+href+'" target="_blank" rel="noopener" title="explorer">&#8599;</a>' : lbl;
   }
   if(c.kind==='tag') return v
@@ -475,6 +499,7 @@ function renderTable(){
       '<button class="btn" id="bulkset" '+(sel.size?'':'disabled')+'>Tag selected</button>'+
       '<button class="btn" id="bulkclear" '+(sel.size?'':'disabled')+'>Clear tag</button>'+
     '</div>'+
+    basisNote()+
     (tab==='NTF'
       // Stated on the tab rather than in a commit message: the number is a
       // property of the data, and anyone reading these rows needs it.
@@ -485,6 +510,30 @@ function renderTable(){
     '<div class="tablebox"><table><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>'+
     '<div class="pager">'+pg+'</div>';
   window.__rows=rowsOnly;
+}
+
+/**
+ * The pricing basis, stated on the page.
+ *
+ * Per-trade USD PnL does NOT equal native PnL times any single rate, so anyone
+ * reconciling the two columns by hand will fail unless the method is visible.
+ * SOL moved 39% across CATE's month and 38.8% across CYBERLEEK's fortnight; ETH
+ * moved 0.8% across NTF's six hours, which is why only NTF gets a constant.
+ */
+function basisNote(){
+  var rows = tab==='__all' ? ROWS : ROWS.filter(function(r){return r.token===tab;});
+  var bas = [];
+  rows.forEach(function(r){ if(r.rate_basis && bas.indexOf(r.rate_basis)<0) bas.push(r.rate_basis); });
+  if(!bas.length) return '';
+  var cate = rows.some(function(r){return r.token==='CATE';});
+  return '<div class="note">'+
+    '<b>USD basis.</b> '+bas.map(function(b){return esc(b);}).join(' · ')+
+    '<br>Per-trade USD is not native PnL multiplied by one rate — each trade is '+
+    'priced at its own hour, so the two columns will not reconcile by hand.'+
+    (cate ? '<br><b>CATE native PnL was recomputed from net flow to FIFO on 2026-08-31.</b> '+
+            '38 wallets changed, all upward, totalling +537.28 SOL. Figures differing '+
+            'from an earlier screenshot have that reason.' : '')+
+    '</div>';
 }
 
 function renderGroups(){
