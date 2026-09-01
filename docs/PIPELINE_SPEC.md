@@ -29,6 +29,19 @@ after it selected the wrong venue.
 
 ## 3. Steps, in order
 
+Run by `scripts/run_token.py`, one command, checkpointed under
+`<scratch>/run/<TOKEN>/` so a crash resumes without re-pulling:
+
+    python3 scripts/run_token.py --token <addr> --pool <addr|poolId> \
+        --mcap-threshold <usd> --window-hours <n> --chain robinhood
+
+It stops after the report and never writes to Postgres. `--load` builds the load
+payload only; applying it stays a separate, explicit act.
+
+Every constraint in section 4 is recorded by `pipeline/constraints.py`. A
+constraint that is never recorded counts as SKIPPED and the run aborts before
+reporting — silence is not evidence.
+
 1. **Resolve the pool.** DexScreener gives venue, version and the counter-asset;
    confirm on-chain. On v3 read `token0()`/`token1()` from the pool rather than
    inferring order from address sort.
@@ -236,12 +249,17 @@ CoinGecko listing, hook fees and no fee, and both chains.
 
 ## 10. Known gaps and hardcoded values
 
-- **Not one command.** Steps are per-token scripts (`pons_*.py`, `ai_*.py`) that
-  share `scripts/pipeline/` helpers. `run_pipeline.py` covers only part.
-- **Hardcoded constants:** the chain-4663 PoolManager address, both Swap topic0
-  values, the Transfer topic0, the RPC endpoints, and the scratchpad path.
-  Constants must be copied from working code — a fabricated Transfer topic once
-  matched zero logs across 100,000 blocks and looked like a clean pull.
+- **Constants live in `config/pipeline.yaml`** — topic hashes, selectors, RPC
+  endpoints, rate limits, the chain-4663 PoolManager. They must be copied from
+  working code, never recalled: a fabricated Transfer topic once matched zero
+  logs across 100,000 blocks and looked like a clean pull.
+- The **scratchpad path** is still a default in `run_token.py`, overridable with
+  `PIPELINE_SCRATCH`.
+- **Boundary blocks are ambiguous within a tied second.** This chain produces
+  sub-second blocks, so many share one timestamp. `run_token.py` takes the LAST
+  block with `timestamp <= end`; the original PONS run took the first block at
+  that second, nine blocks earlier. The definition changes which swaps fall
+  inside the window (one, for PONS).
 - **Receipts are filtered to two token addresses** (base and quote) at pull time.
   Native value and all other token legs are discarded, so questions about what a
   wallet actually spent cannot be answered later without a re-pull.
