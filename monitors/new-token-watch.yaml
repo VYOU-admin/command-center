@@ -18,7 +18,9 @@ id: new-token-watch
 name: New Token Watch
 source: new-token-watch
 enabled: true
-schedule: 1h
+# Four cycles an hour, one stagger group each, so every wallet is still covered
+# hourly while each cycle issues a quarter of the requests.
+schedule: 15m
 
 alerts:
   # Content alerts go to the new-token channel (DISCORD_WEBHOOK_NEWTOKEN).
@@ -65,7 +67,14 @@ options:
   # 20,000 is well inside what this endpoint serves for bulk logs (the swap
   # puller has used 25,000 throughout), and the sweep has used 20,000 since day
   # one. A window that still comes back too large is split by PublicRpc.logs.
+  # One group's transfers per cycle. Group is derived from the wallet address,
+  # so it never changes as the watchlist grows.
+  watchlist_groups: 4
+
   watchlist_chunk: 200
   transfer_block_window: 20000
   sweep_block_window: 20000
-  min_interval_ms: 800
+  # 4,000 ms is the MEASURED point where 429s stop on this endpoint: at 800 ms
+  # 15 of 20 requests were refused, at 2,500 ms 6 of 20, at 4,000 ms none. Every
+  # duration projection assumes this pacing.
+  min_interval_ms: 4000

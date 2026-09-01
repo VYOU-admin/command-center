@@ -35,7 +35,7 @@ import type { AdapterContext, SourceAdapter } from './types.js';
 import { requireString } from './types.js';
 import type { PoolClient } from '../store/db.js';
 import { migrate } from './new-token-watch/schema.js';
-import { loadWatchlist, type WatchWallet } from './new-token-watch/watchlist.js';
+import { loadWatchlist, groupOf, type WatchWallet } from './new-token-watch/watchlist.js';
 import { PublicRpc, topicAddress, padAddress, type RpcLog } from './new-token-watch/rpc.js';
 import { renderMessages, type HitRow, type MessagePart } from './new-token-watch/message.js';
 
@@ -175,8 +175,26 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     // ---- inbound transfers to watchlist wallets --------------------------
     const watchlist = await loadWatchlist(ctx.db, chain);
     const byWallet = new Map(watchlist.map((w) => [w.wallet, w]));
+
+    // STAGGERED GROUPS. One group's transfers per cycle, four cycles an hour, so
+    // every wallet is still covered once an hour while each cycle issues a
+    // quarter of the requests. Which group runs is read off the wall clock
+    // rather than a stored counter: a counter drifts if a cycle is skipped or
+    // runs twice, whereas the quarter-hour is self-correcting and needs no state.
+    const groups = Math.max(1, Math.floor(num(o, 'watchlist_groups', 1)));
+    const activeGroup = groups > 1
+      ? Math.floor(new Date().getUTCMinutes() / (60 / groups)) % groups
+      : 0;
+    const inGroup = groups > 1
+      ? watchlist.filter((w) => groupOf(w.wallet, groups) === activeGroup)
+      : watchlist;
+    ctx.log.info('stagger group', {
+      groups, activeGroup, walletsInGroup: inGroup.length, watchlistTotal: watchlist.length,
+      chunks: Math.ceil(inGroup.length / chunkSize),
+    });
+
     const lo = head - Math.floor(perHour * lookbackH);
-    const addrs = watchlist.map((w) => padAddress(w.wallet));
+    const addrs = inGroup.map((w) => padAddress(w.wallet));
     const transfers: RpcLog[] = [];
     for (let i = 0; i < addrs.length; i += chunkSize) {
       const part = addrs.slice(i, i + chunkSize);
@@ -317,6 +335,7 @@ const newTokenWatch: SourceAdapter<RunResult> = {
         tokens: new Set(out.map((h) => h.token)).size,
         wallets: new Set(out.map((h) => h.wallet)).size,
         rows: out.length, durationMs: Date.now() - started,
+        activeGroup, groups, walletsInGroup: inGroup.length,
       },
       sweptFrom, sweptTo: head,
     }];
@@ -373,12 +392,13 @@ const newTokenWatch: SourceAdapter<RunResult> = {
       `insert into new_token_cycle_stats (ran_at, head_block, block_seconds, requests,
          transfers_seen, venue_transfers, distinct_tokens, cache_hits, cache_misses,
          cache_negative, tokens_alerted, wallets_alerted, rows_written, swept_from,
-         swept_to, duration_ms)
-       values (now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+         swept_to, duration_ms, group_index, group_count, wallets_in_group)
+       values (now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
       [r.stats.head, r.stats.blockSeconds, r.stats.requests, r.stats.transfers,
        r.stats.venueTransfers, r.stats.distinctTokens, r.stats.cacheHits, r.stats.cacheMisses,
        r.stats.cacheNegatives, r.stats.tokens, r.stats.wallets, rows, r.sweptFrom,
-       r.sweptTo, r.stats.durationMs]);
+       r.sweptTo, r.stats.durationMs, r.stats.activeGroup, r.stats.groups,
+       r.stats.walletsInGroup]);
 
     // Rolling retention. token_pool_first is DELIBERATELY not in here.
     const cut = `now() - interval '${Math.floor(retentionH)} hours'`;

@@ -17,6 +17,26 @@ export interface WatchWallet {
   crossToken: boolean;
 }
 
+/**
+ * Which stagger group a wallet belongs to.
+ *
+ * DERIVED FROM THE ADDRESS, never from its position in the list. An index-based
+ * assignment (i % N) looks equivalent and is not: inserting one wallet shifts
+ * every later wallet into a different group, so on the next run those wallets
+ * are pulled in a different cycle and the hour either double-covers them or
+ * misses them entirely. An address is immutable, so its group is fixed for the
+ * life of the wallet no matter how the watchlist grows or shrinks.
+ *
+ * The last 8 hex characters are used because addresses are uniformly
+ * distributed there; the leading bytes are not (vanity prefixes, contract
+ * factories).
+ */
+export function groupOf(wallet: string, groups: number): number {
+  const n = Number.parseInt(wallet.slice(-8), 16);
+  if (!Number.isFinite(n)) throw new Error(`cannot derive a group from ${wallet}`);
+  return ((n % groups) + groups) % groups;
+}
+
 export async function loadWatchlist(db: Pool, chain: string): Promise<WatchWallet[]> {
   const { rows } = await db.query(
     `with pnl_positive as (

@@ -68,6 +68,11 @@ export async function migrate(client: PoolClient): Promise<void> {
       swept_to           bigint,
       duration_ms        int
     )`);
+  // Added after the table existed, so create-if-not-exists would not add them.
+  for (const col of ['group_index int', 'group_count int', 'wallets_in_group int']) {
+    await client.query(
+      `alter table new_token_cycle_stats add column if not exists ${col}`);
+  }
   await client.query(`
     create table if not exists new_token_cursor (
       chain            text primary key,
