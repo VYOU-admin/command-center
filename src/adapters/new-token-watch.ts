@@ -37,6 +37,7 @@ import type { PoolClient } from '../store/db.js';
 import { migrate } from './new-token-watch/schema.js';
 import { loadWatchlist, type WatchWallet } from './new-token-watch/watchlist.js';
 import { PublicRpc, topicAddress, padAddress, type RpcLog } from './new-token-watch/rpc.js';
+import { renderMessage, type HitRow } from './new-token-watch/message.js';
 
 interface Hit {
   chain: string;
@@ -63,6 +64,8 @@ interface RunResult {
    * dropped despite being inside the 2-hour rule.
    */
   pools: { token: string; block: number; at: Date }[];
+  /** Rendered in fetch(); null when the cycle produced no hits. */
+  message: string | null;
   stats: Record<string, number>;
   sweptFrom: number;
   sweptTo: number;
@@ -218,6 +221,51 @@ const newTokenWatch: SourceAdapter<RunResult> = {
       });
     }
     const out = [...agg.values()];
+
+    // ---- render the hourly message (no send here; the spine flushes it) ---
+    let message: string | null = null;
+    if (out.length) {
+      const cl = await ctx.db.query(
+        `select lower(wallet) w, min(cluster_id) cid from wallet_clusters
+          where chain = $1 and lower(wallet) = any($2::text[]) group by 1`,
+        [chain, [...new Set(out.map((h) => h.wallet))]]);
+      const clusterOf = new Map(
+        (cl.rows as Record<string, unknown>[]).map((r) => [String(r.w), String(r.cid)]));
+      const rows: HitRow[] = out.map((h) => ({
+        token: h.token, wallet: h.wallet, cohorts: h.cohorts,
+        totalRealizedUsd: h.totalRealizedUsd, crossToken: h.crossToken,
+        poolAgeMinutes: (Date.now() - h.createdAt.getTime()) / 60_000,
+        clusterId: clusterOf.get(h.wallet) ?? null,
+      }));
+      // Symbols cost one eth_call each, so only the tokens that will actually
+      // be printed get looked up -- the lead sections are capped, and the run
+      // sits close to the spine's 5-minute ceiling.
+      const lead = rows.filter((r) => r.crossToken || r.clusterId)
+        .sort((a, b) => b.totalRealizedUsd - a.totalRealizedUsd);
+      const wanted = [...new Set(lead.map((r) => r.token))].slice(0, 30);
+      const symbols = new Map<string, string>();
+      for (const t of wanted) {
+        try {
+          const hex = String(await rpc.call('eth_call', [{ to: t, data: '0x95d89b41' }, 'latest']));
+          if (hex && hex !== '0x') {
+            const b = Buffer.from(hex.slice(2), 'hex');
+            const raw = b.length >= 64
+              ? b.subarray(64, 64 + Number(BigInt('0x' + b.subarray(32, 64).toString('hex')))).toString('utf8')
+              : b.toString('utf8');
+            const clean = raw.replace(/\0/g, '').trim();
+            if (clean) symbols.set(t, clean);
+          }
+        } catch {
+          // A missing symbol is cosmetic: the row still prints by address.
+        }
+      }
+      for (const r of rows) r.symbol = symbols.get(r.token) ?? null;
+      const start = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000);
+      const label = `${start.toISOString().slice(11, 16)}–`
+        + `${new Date(start.getTime() + 3_600_000).toISOString().slice(11, 16)} UTC`;
+      message = renderMessage(rows, label);
+    }
+
     ctx.log.info('new-token watch cycle', {
       requests: rpc.requests, transfers: transfers.length, venueTransfers: venue.length,
       distinctTokens: distinct.length, cacheHits: hits, cacheMisses: misses,
@@ -226,6 +274,7 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     });
     return [{
       hits: out,
+      message,
       pools: [...created.entries()].map(([token, block]) => ({
         token, block, at: new Date((tHead - (head - block) * blockSeconds) * 1000),
       })),
@@ -303,6 +352,20 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     const d1 = await client.query(`delete from new_token_hits where hour_bucket < ${cut}`);
     const d2 = await client.query(`delete from new_token_cycle_stats where ran_at < ${cut}`);
     ctx.log.info('retention', { hitsDeleted: d1.rowCount ?? 0, statsDeleted: d2.rowCount ?? 0 });
+
+    // Queued, not sent: the spine flushes alerts after the transaction commits.
+    if (r.message) {
+      const [head, ...body] = r.message.split('\n');
+      ctx.queueAlert({
+        // 'warning' is this spine's convention for a content alert; the levels
+        // are critical/warning/recovery and there is no informational tier.
+        level: 'warning',
+        title: (head ?? 'New-token buys').replace(/\*\*/g, ''),
+        description: body.join('\n').trim(),
+      });
+    } else {
+      ctx.log.info('no hits this cycle; nothing queued');
+    }
     return rows;
   },
 };

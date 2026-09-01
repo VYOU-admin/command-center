@@ -10,7 +10,8 @@
 #   under the 2h pool-age rule: 1,119 transfers, 53 tokens, 217 wallets,
 #      556 distinct (token, wallet) pairs per hour
 #
-# SENDS NOTHING TO DISCORD. Only the spine's failure alerts apply.
+# Sends one message per cycle to the newtoken channel. A cycle with no hits
+# sends nothing rather than an empty message.
 # KNOWN GAP: v3 launches are invisible; this keys off the v4 PoolManager.
 
 id: new-token-watch
@@ -20,7 +21,10 @@ enabled: true
 schedule: 1h
 
 alerts:
-  channel: system
+  # Content alerts go to the new-token channel (DISCORD_WEBHOOK_NEWTOKEN).
+  # Failure and recovery alerts still go to system, which the spine routes
+  # independently of this setting.
+  channel: newtoken
 
 options:
   chain: robinhood
