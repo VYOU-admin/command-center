@@ -55,7 +55,13 @@ export class PublicRpc {
         const body = (await res.json()) as { result?: unknown; error?: { message?: string } };
         if (body.error) {
           const msg = String(body.error.message ?? '');
-          if (/Too Many|timed out/i.test(msg)) {
+          // RATE LIMITING IS RETRYABLE; A QUERY THAT IS TOO BIG IS NOT.
+          // Retrying an oversized getLogs just times out again: seven attempts
+          // with backoff burns about three minutes before the caller ever gets
+          // the chance to split the window, which is what aborted the first two
+          // live cycles against the spine's 5-minute ceiling. Throw instead, so
+          // logs() splits immediately.
+          if (/Too Many/i.test(msg)) {
             await new Promise((r) => setTimeout(r, Math.min(45_000, 3000 * (attempt + 1) ** 2)));
             continue;
           }
