@@ -481,7 +481,7 @@ def run(args):
     if "fee_measured" not in L.rows:
         L.record("fee_measured", f"buy {FEE['buy']*100:.4f}% / sell {FEE['sell']*100:.4f}%, "
                                  f"from single-side transactions")
-    return dict(L=L, S=S, rpc=rpc, ven=ven, token=token, label=label, base_sym=base_sym,
+    return dict(L=L, S=S, rpc=rpc, ven=ven, token=token, label=label, base_sym=base_sym, qdec=qdec,
                 quote_sym=quote_sym, quote_addr=quote_addr, BD=BD, QD=QD, W=W, SUP=SUP,
                 supply_at=supply_at, QU=QU, rate=rate, sw=sw, by_tx=by_tx, rec=rec,
                 EXCL=EXCL, rts=rts, net_of=net_of, FEE=FEE, fee_rep=fee_rep,
@@ -619,6 +619,31 @@ def decode_and_report(C):
         if s - b > 1: excess.add(w)
     cohort = sorted(set(under) - excess)
 
+    # Price at head, for unrealized only. v3 pools expose slot0; a v4 pool has no
+    # contract of its own, so fall back to the pair's quoted USD price. Head is
+    # pinned in window.json so re-runs stay deterministic.
+    C_QU_MEAN = C["QU"]["mean"]; C_SLUG = C["chain"]["dexscreener_slug"]
+    def head_price():
+        if ven.version == "v3":
+            sl = rpc.call(ven.pool, "0x3850c7bd", hex(W["head"]))
+            if sl:
+                sq = int(sl[2:66], 16)
+                p01 = (sq / (2 ** 96)) ** 2          # token0 priced in token1
+                if p01:
+                    # slot0 gives token0 priced in token1. If the base token IS
+                    # token1, the base's price in the quote is the reciprocal.
+                    base_in_quote = (1.0 / p01) if ven.base_index == 1 else p01
+                    return {"native": base_in_quote,
+                            "usd": base_in_quote * C_QU_MEAN,
+                            "source": f"slot0 at block {W['head']:,} x the window quote rate"}
+        for pr in qp.dexscreener_pairs(C_SLUG, token):
+            if str(pr.get("pairAddress", "")).lower() == args.pool.lower() and pr.get("priceUsd"):
+                return {"native": None, "usd": float(pr["priceUsd"]),
+                        "source": "DexScreener pair priceUsd (live)"}
+        return {"native": None, "usd": None, "source": "unavailable"}
+    HP = S.json("head_price.json", head_price)
+    print(f"  price at head: ${HP['usd']}  ({HP['source']})")
+
     head_b = rpc.balances(token, cohort, W["head"], S)
     bnd_b = rpc.balances(token, cohort, W["boundary_block"], S)
     tf = rpc.logs_range(token, [TOPICS["transfer"]], W["first_block"], W["boundary_block"], S, "transfers")
@@ -669,9 +694,11 @@ def decode_and_report(C):
             "implied_balance": imp, "onchain_balance": onc,
             "balance_delta": onc - imp, "balance_match": abs(bnd - imp) <= 1e-6,
             "boundary_balance": bnd, "boundary_delta": bnd - imp,
-            "unrealized_pnl_usd": None, "still_holding": onc > 0,
+            "unrealized_pnl_usd": (onc * HP["usd"]) if HP["usd"] else None,
+            "still_holding": onc > 0,
             "has_off_pool_activity": offcnt.get(w, 0) > 0,
-            "price_usd": None, "price_block": W["head"], "balance_block": W["head"]})
+            "price_usd": HP["usd"], "price_block": W["head"], "balance_block": W["head"]})
+    C["HP"] = HP
     L.record("fifo_not_netflow",
              f"FIFO with unsold inventory at zero; differs from net flow for "
              f"{netflow_diff:,} of {len(rows):,} wallets")
@@ -810,6 +837,74 @@ def report(C, D):
     json.dump({"rows": rows}, open(S.p("rows.json"), "w"))
 
 
+def build_payload(C, D):
+    """rows + clusters + token record, ready for scripts/load_tokens.mjs."""
+    rows, trades, args = D["rows"], D["trades"], C["args"]
+    label, EXCL = C["label"], C["EXCL"]
+    cohort = {r["wallet"] for r in rows}
+    sig = {h: (v or {}).get("from", "") for h, v in C["rec"].items()}
+    txw = defaultdict(set)
+    for t in trades:
+        if t["wallet"] in cohort: txw[t["tx"]].add(t["wallet"])
+    bysig = defaultdict(set)
+    for tx, ws in txw.items():
+        sg = sig.get(tx, "")
+        if not sg or sg in EXCL: continue
+        for w in ws:
+            if w != sg: bysig[sg].add(w)
+    cand = {k: v for k, v in bysig.items() if len(v) > 1}
+    sizes = sorted({len(v) for v in cand.values()})
+    gap, cut = 0, None
+    for i in range(1, len(sizes)):
+        if sizes[i] - sizes[i - 1] > gap and sizes[i] >= 10:
+            gap, cut = sizes[i] - sizes[i - 1], sizes[i]
+    pre = label.lower()
+    clusters = []; n = 0; dropped = 0
+    for sg, ws in sorted(cand.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if cut and len(ws) >= cut: dropped += 1; continue
+        n += 1
+        for w in sorted(ws):
+            clusters.append({"chain": args.chain, "wallet": w, "cluster_id": f"{pre}-s{n:03d}",
+                             "signal": "shared_signer", "evidence": sg,
+                             "confidence": "high", "cluster_size": len(ws)})
+    m = 0
+    for tx, ws in sorted(txw.items()):
+        if len(ws) < 2: continue
+        m += 1
+        for w in sorted(ws):
+            clusters.append({"chain": args.chain, "wallet": w, "cluster_id": f"{pre}-t{m:03d}",
+                             "signal": "same_transaction", "evidence": tx,
+                             "confidence": "high", "cluster_size": len(ws)})
+    print(f"\nCLUSTERS  shared_signer {n} (infrastructure cut at >= {cut}, gap {gap}, "
+          f"{dropped} dropped)   same_transaction {m}")
+    if m == 0:
+        print("  same_transaction produced ZERO clusters. Stated as a zero.")
+    W, QU, HP = C["W"], C["QU"], C["HP"]
+    tok = {"token": label, "chain": args.chain, "token_address": C["token"],
+           "pool_address": args.pool, "dex": "uniswap", "dex_version": C["ven"].version,
+           "quote_asset": C["quote_sym"], "quote_address": C["quote_addr"],
+           "quote_decimals": C["qdec"], "total_supply": C["SUP"]["last"],
+           "window_hours": args.window_hours,
+           "window_start_utc": utc(W["first_ts"]), "window_end_utc": utc(W["end_ts"]),
+           "first_swap_block": W["first_block"], "boundary_block": W["boundary_block"],
+           "swaps_in_window": len(C["sw"]), "unique_txs": len(C["by_tx"]),
+           "fully_covered": True, "mcap_threshold_usd": args.mcap_threshold,
+           "threshold_binding": D["binding"],
+           "threshold_note": (f"highest first-buy mcap was ${max(D['mc'].values()):,.0f} against a "
+                              f"${args.mcap_threshold:,.0f} ceiling, {len(D['under']):,} of "
+                              f"{len(D['mc']):,} admitted"),
+           "fee_rate_buy": C["FEE"]["buy"], "fee_rate_sell": C["FEE"]["sell"],
+           "usd_method": QU["mode"], "rate_basis": QU["basis"],
+           "price_usd": HP["usd"], "price_block": W["head"], "balance_block": W["head"],
+           "cohort_size": len(rows),
+           "decode_check": (f"pool-only subset reproduces the on-chain balance for "
+                            f"{sum(1 for r in rows if not r['has_off_pool_activity'] and abs(r['boundary_delta'])<=1e-6):,}"
+                            f"/{sum(1 for r in rows if not r['has_off_pool_activity']):,} wallets. "
+                            f"Boundary is the LAST block with timestamp <= window end. "
+                            f"Infrastructure excluded at the candidate stage.")}
+    return {"rows": rows, "clusters": clusters, "token": tok}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--token", required=True)
@@ -827,7 +922,7 @@ def main():
     report(C, D)
     if a.load:
         p = C["S"].p("load_payload.json")
-        json.dump({"rows": D["rows"]}, open(p, "w"))
+        json.dump(build_payload(C, D), open(p, "w"))
         print(f"\nLOAD PAYLOAD WRITTEN: {p}")
         print("  The database is reachable only from inside Railway, so applying it is a")
         print("  separate step: upload this file and run scripts/load_tokens.mjs --dry first.")

@@ -49,10 +49,24 @@ reporting — silence is not evidence.
 3. **Window.** Find the first swap in this pool, add `--window-hours`, and locate
    the boundary block by **binary search on actual block timestamps**. Never
    interpolate a seconds-per-block rate; it drifts across 10^5 blocks.
+
+   **The boundary is the LAST block whose timestamp is ≤ the window end.** This
+   chain produces sub-second blocks, so many blocks share a single timestamp and
+   "the boundary block" is ambiguous within that tied second — on PONS, blocks
+   9,106,777 through 9,106,786 all carry timestamp 1783989741. Taking the last
+   is the stricter reading of "at or before the window end"; taking the first
+   silently truncates the window by the width of the tie. The two readings differ
+   by nine blocks and one swap on PONS.
 4. **Resolve the quote asset to USD** (§5).
 5. **Choose the USD method** from the quote's movement across this window:
    spread ≤ 5% → a constant; above → per-trade hourly. A measurement, not a
    preference.
+
+   **The constant is the mean of the price points inside the window, ±1 hour.**
+   Series are fetched with a wider margin so the window edges can be
+   interpolated, but that margin must not enter the average: including it prices
+   the cohort partly on hours it never traded in. The two conventions differ by
+   0.05% on PONS.
 6. **Pull swaps** in the window from the public RPC, paced and checkpointed.
 7. **Reconstruct supply.** `totalSupply()` at the first and boundary blocks via
    archive, plus every mint/burn Transfer inside the window. The two must
@@ -255,11 +269,12 @@ CoinGecko listing, hook fees and no fee, and both chains.
   logs across 100,000 blocks and looked like a clean pull.
 - The **scratchpad path** is still a default in `run_token.py`, overridable with
   `PIPELINE_SCRATCH`.
-- **Boundary blocks are ambiguous within a tied second.** This chain produces
-  sub-second blocks, so many share one timestamp. `run_token.py` takes the LAST
-  block with `timestamp <= end`; the original PONS run took the first block at
-  that second, nine blocks earlier. The definition changes which swaps fall
-  inside the window (one, for PONS).
+- **Head-block figures move between runs.** `onchain_balance`,
+  `unrealized_pnl_usd` and `price_usd` are read at head, which means "now", so
+  re-running a token changes them even when the decode is byte-identical. Head is
+  pinned in the window checkpoint so a resumed run stays self-consistent. The
+  PONS reload moved 19 balances and 162 unrealized figures for this reason alone.
+  Only `boundary_balance`, read at a fixed in-window block, is stable across runs.
 - **Receipts are filtered to two token addresses** (base and quote) at pull time.
   Native value and all other token legs are discarded, so questions about what a
   wallet actually spent cannot be answered later without a re-pull.
