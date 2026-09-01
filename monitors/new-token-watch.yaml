@@ -47,7 +47,12 @@ options:
 
   # Measured ceilings on this chain: >1,000 topic selectors is rejected, 500
   # addresses over 2,000 blocks times out, 200 over 10,000 blocks is reliable.
-  watchlist_chunk: 200
-  transfer_block_window: 10000
+  # 2,480 addresses / 250 = 10 chunks x 2 windows = 20 requests, down from 52.
+  # The container's per-request latency to the public RPC is far higher than a
+  # local run's, and 52 requests did not fit the spine's 5-minute ceiling.
+  # A window that times out is split automatically, so a too-large window
+  # degrades into two smaller queries rather than failing the run.
+  watchlist_chunk: 250
+  transfer_block_window: 20000
   sweep_block_window: 20000
-  min_interval_ms: 1100
+  min_interval_ms: 800
