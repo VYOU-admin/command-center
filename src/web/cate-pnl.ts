@@ -499,6 +499,7 @@ function cell(r,c){
     '<span class="tag" data-jump="'+esc(t)+'" data-jw="'+r.wallet+'" title="open the '+esc(t)+' tab filtered to this wallet">'+esc(t)+'</span>').join(' ');
   if(c.kind==='time') return nz(v)?'<span class="muted">—</span>':'<span class="muted">'+String(v).replace('T',' ').replace('Z','')+'</span>';
   if(c.kind==='bool') return v?'yes':'<span class="muted">no</span>';
+  if(c.kind==='text') return nz(v)?'<span class="muted">—</span>':esc(String(v));
   if(c.kind==='int') return nz(v)?'<span class="muted">—</span>':v;
   if(c.kind==='pnl'){ if(nz(v)) return '<span class="muted">—</span>';
     const n=Number(v); return '<span class="'+(n>0?'pos':n<0?'neg':'')+'">'+(n>0?'+':'')+fmt(n,c.d)+'</span>'; }
@@ -697,6 +698,106 @@ function basisNote(){
     '</div>';
 }
 
+/**
+ * Cross-token tab: wallets appearing in more than one cohort on chain robinhood.
+ *
+ * DERIVED, NOT CONFIGURED. The per-token columns come from whatever tokens are
+ * present in wallet_pnl for this chain, so loading a fifth token makes its
+ * column and its wallets appear here with no code change.
+ */
+var xSortKey='total_realized_usd', xSortDir=-1;
+var _clMemo=null;
+function clustersFor(w){
+  if(!_clMemo){ _clMemo={};
+    CLUSTERS.forEach(function(c){
+      if(c.chain!=='robinhood') return;
+      (_clMemo[c.wallet]=_clMemo[c.wallet]||[]).push(c.cluster_id); }); }
+  var a=_clMemo[w];
+  if(!a) return '';
+  var u=[]; a.forEach(function(x){ if(u.indexOf(x)<0) u.push(x); });
+  return u.sort().join(' ');
+}
+function crossTokens(){
+  var ts=[];
+  ROWS.forEach(function(r){ if(r.chain==='robinhood'&&ts.indexOf(r.token)<0) ts.push(r.token); });
+  return ts.sort();
+}
+function crossRows(){
+  var by={};
+  ROWS.forEach(function(r){ if(r.chain!=='robinhood') return;
+    (by[r.wallet]=by[r.wallet]||[]).push(r); });
+  var toks=crossTokens(), out=[];
+  Object.keys(by).forEach(function(w){
+    var rs=by[w], seen=[];
+    rs.forEach(function(r){ if(seen.indexOf(r.token)<0) seen.push(r.token); });
+    if(seen.length<2) return;
+    var o={wallet:w, chain:'robinhood', n_tokens:seen.length,
+           tokens:seen.slice().sort().join(', '), total_realized_usd:0,
+           clusters:clustersFor(w)};
+    toks.forEach(function(t){ o['pnl_'+t]=null; o['hold_'+t]=null; });
+    rs.forEach(function(r){
+      o['pnl_'+r.token]=Number(r.realized_pnl_usd||0);
+      o['hold_'+r.token]=(r.still_holding===true);
+      o.total_realized_usd+=Number(r.realized_pnl_usd||0); });
+    out.push(o); });
+  return out;
+}
+function XCOLS(){
+  var toks=crossTokens();
+  var c=[{k:'wallet',t:'Wallet',l:true,kind:'wallet'},
+         {k:'n_tokens',t:'Tokens',kind:'int'},
+         {k:'tokens',t:'Token list',l:true,kind:'text'}];
+  toks.forEach(function(t){ c.push({k:'pnl_'+t,t:t+' PnL USD',kind:'usd',d:0}); });
+  c.push({k:'total_realized_usd',t:'Total PnL USD',kind:'usd',d:0});
+  toks.forEach(function(t){ c.push({k:'hold_'+t,t:t+' holding',kind:'bool'}); });
+  c.push({k:'clusters',t:'Clusters',l:true,kind:'text'});
+  return c;
+}
+function crossFiltered(){
+  var rs=crossRows();
+  var lo=F.x_mintok!==undefined&&F.x_mintok!==''?Number(F.x_mintok):null;
+  var hi=F.x_maxtok!==undefined&&F.x_maxtok!==''?Number(F.x_maxtok):null;
+  var tlo=F.x_mintotal!==undefined&&F.x_mintotal!==''?Number(F.x_mintotal):null;
+  var thi=F.x_maxtotal!==undefined&&F.x_maxtotal!==''?Number(F.x_maxtotal):null;
+  rs=rs.filter(function(r){
+    if(lo!==null&&r.n_tokens<lo) return false;
+    if(hi!==null&&r.n_tokens>hi) return false;
+    if(tlo!==null&&r.total_realized_usd<tlo) return false;
+    if(thi!==null&&r.total_realized_usd>thi) return false;
+    return true; });
+  var k=xSortKey, d=xSortDir;
+  rs.sort(function(a,b){
+    var x=a[k], y=b[k];
+    if(x===null||x===undefined) return 1;
+    if(y===null||y===undefined) return -1;
+    if(typeof x==='number'&&typeof y==='number') return (x-y)*d;
+    if(typeof x==='boolean') return ((x?1:0)-(y?1:0))*d;
+    return String(x).localeCompare(String(y))*d; });
+  return rs;
+}
+function renderCross(){
+  var C=XCOLS(), rs=crossFiltered();
+  document.getElementById('sub').textContent='· cross-token · '+rs.length+' wallets';
+  var head='<tr>'+C.map(function(c){
+    return '<th class="'+(c.l?'l':'')+'" data-k="'+c.k+'">'+c.t+
+      (xSortKey===c.k?' <span class="arrow">'+(xSortDir<0?'▼':'▲')+'</span>':'')+'</th>'; }).join('')+'</tr>';
+  var body=rs.map(function(r){
+    return '<tr>'+C.map(function(c){ return '<td class="'+(c.l?'l':'')+'">'+cell(r,c)+'</td>'; }).join('')+'</tr>'; }).join('');
+  document.getElementById('view').innerHTML=
+    '<div class="filters"><div class="frow">'+
+      '<div class="f"><label>Token count</label><div class="pair">'+
+        '<input class="num" type="number" step="1" placeholder="min" data-f="x_mintok" value="'+(F.x_mintok??'')+'">'+
+        '<span>–</span><input class="num" type="number" step="1" placeholder="max" data-f="x_maxtok" value="'+(F.x_maxtok??'')+'"></div></div>'+
+      '<div class="f"><label>Total PnL USD</label><div class="pair">'+
+        '<input class="num" type="number" step="any" placeholder="min" data-f="x_mintotal" value="'+(F.x_mintotal??'')+'">'+
+        '<span>–</span><input class="num" type="number" step="any" placeholder="max" data-f="x_maxtotal" value="'+(F.x_maxtotal??'')+'"></div></div>'+
+      '<button class="btn" id="clearf">Clear filters</button>'+
+    '</div></div>'+
+    '<div class="toolbar"><button class="btn" id="export">Export CSV</button>'+
+      '<span style="flex:1"></span><span class="count">'+rs.length+' wallets</span></div>'+
+    '<div class="tablebox"><table><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>';
+}
+
 function renderGroups(){
   // READS wallet_clusters, NOT wallet_pnl.tag. The whole reason the table is
   // separate is that 259 of 274 clustered wallets have no PnL row at all — the
@@ -766,8 +867,11 @@ function render(){
   document.getElementById('tabs').innerHTML =
     '<button class="'+(tab==='__all'?'on':'')+'" data-tab="__all">All wallets</button>'+
     TOKENS.map(t=>'<button class="'+(tab===t?'on':'')+'" data-tab="'+t+'">'+esc(t)+'</button>').join('')+
+    '<button class="'+(tab==='__cross'?'on':'')+'" data-tab="__cross">Cross-token</button>'+
     '<button class="'+(tab==='__groups'?'on':'')+'" data-tab="__groups">Groups</button>';
-  if(tab==='__groups') renderGroups(); else renderTable();
+  if(tab==='__cross') renderCross();
+  else if(tab==='__groups') renderGroups();
+  else renderTable();
 }
 
 async function saveTag(wallets, tag){
@@ -813,6 +917,17 @@ function exportCsv(){
   // Exactly what is on screen, in the order it is on screen, with FULL
   // addresses -- the table truncates for reading, a CSV that did so would be
   // useless for anything downstream.
+  if(tab==='__cross'){
+    const xr=crossFiltered(), xc=XCOLS().map(c=>c.k);
+    const qq=(v)=>{ if(v===null||v===undefined) return '';
+      const t=String(v); return /[",]/.test(t)?'"'+t.replace(/"/g,'""')+'"':t; };
+    const out=[xc.join(',')].concat(xr.map(r=>xc.map(c=>qq(r[c])).join(','))).join(String.fromCharCode(10))+String.fromCharCode(10);
+    const st=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+    const el=document.createElement('a');
+    el.href=URL.createObjectURL(new Blob([out],{type:'text/csv'}));
+    el.download='cross-token_wallets_'+st+'.csv';
+    el.click(); URL.revokeObjectURL(el.href); return;
+  }
   const rows=ordered().filter(x=>x.r).map(x=>x.r);
   const cols = tab==='__all'
     ? ['wallet','tag','tokens_touched','tokens','total_pnl_sol','total_sol_in','total_sol_out',
@@ -855,7 +970,8 @@ document.addEventListener('click',(e)=>{
   if(exp){ const t=exp.dataset.exp; open.has(t)?open.delete(t):open.add(t); render(); return; }
   const th=e.target.closest('th[data-k]');
   if(th){ const k=th.dataset.k;
-    if(tab==='__all'){ if(aSortKey===k) aSortDir=-aSortDir; else {aSortKey=k;aSortDir=-1;} }
+    if(tab==='__cross'){ if(xSortKey===k) xSortDir=-xSortDir; else {xSortKey=k;xSortDir=-1;} }
+    else if(tab==='__all'){ if(aSortKey===k) aSortDir=-aSortDir; else {aSortKey=k;aSortDir=-1;} }
     else { if(mode!=='flat') mode='flat';
       if(sortKey===k) sortDir=-sortDir; else {sortKey=k;sortDir=-1;} }
     page=1; render(); return; }
