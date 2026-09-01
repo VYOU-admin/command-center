@@ -470,20 +470,34 @@ def run(args):
 
     # -- 9: fee, measured from unambiguous single-side transactions -----------
     fees = {"buy": [], "sell": []}
+    # UNAMBIGUOUS MEANS THE WHOLE TRANSACTION IS ONE-SIDED, not that it holds at
+    # most two swaps. The old rule capped transactions at two swaps, which found
+    # ZERO samples on a token averaging 3.0 swaps per transaction and correctly
+    # refused to report. A transaction whose swaps are all buys (or all sells)
+    # lets the trader's net be compared against the summed pool amounts, however
+    # many swaps it contains; mixing sides is what makes a net uninterpretable.
     for h, g in by_tx.items():
-        if len(g) > 2: continue
         v = rec.get(h)
         if not v: continue
-        rt = rts(v); net = net_of(v)
+        rt = rts(v)
+        net = net_of(v)
         mv = {k: x for k, x in net.items()
               if abs(x) > 1e-12 and k not in EXCL and k not in rt}
-        for l in g:
-            ba, _qa = ven.amounts(l["data"])
-            if ba == 0: continue
-            side = ven.side(ba)
-            if sum(1 for x in g if ven.side(ven.amounts(x["data"])[0]) == side) != 1:
-                continue
-            pool_amt = abs(ba) / BD
+        for side in ("buy", "sell"):
+            same = [l for l in g if ven.amounts(l["data"])[0] != 0
+                    and ven.side(ven.amounts(l["data"])[0]) == side]
+            # EXACTLY ONE SWAP OF THIS SIDE is the unambiguity condition, and it
+            # is the only one that holds across both venue shapes seen so far:
+            #   - a one-sided transaction (PONS, QUANT)
+            #   - a buy paired with a hook fee recipient dumping its cut, where
+            #     the other side belongs to a round-tripper (AI, BONER)
+            # Requiring the WHOLE transaction to be one-sided found zero samples
+            # on BONER, which averages 3.0 swaps per transaction, and requiring
+            # at most two swaps found zero for the same reason. Both were caught
+            # by the constraint ledger rather than shipped.
+            if len(same) != 1: continue
+            pool_amt = abs(ven.amounts(same[0]["data"])[0]) / BD
+            if pool_amt <= 0: continue
             cand = {k: x for k, x in mv.items() if (x > 0) == (side == "buy")}
             if not cand: continue
             w = max(cand.items(), key=lambda kv: abs(kv[1]))[0]
@@ -519,9 +533,50 @@ def resolve_quote(rpc, chain, ven, quote_addr, quote_sym, qdec, W, S):
     kind = qp.classify(quote_sym, quote_addr)
     t0, t1 = W["first_ts"], W["end_ts"]
     if kind == "stable":
-        return {"mode": "constant", "mean": 1.0, "ts": [], "px": [],
-                "tier": 0, "spread_pct": 0.0,
-                "basis": f"constant 1.00 USD/{quote_sym} (USD stablecoin)"}
+        # THE PEG IS MEASURED, NOT ASSUMED. The spec says tier 0 is "1.0,
+        # verified not assumed", and until now the code simply returned 1.0 --
+        # a documented guarantee that was never implemented. A depegged or
+        # thinly-traded stablecoin would have priced an entire cohort wrong
+        # with nothing to show for it.
+        peg, note = None, "no reference pool predating the window; PEG UNVERIFIED"
+        cands = [c for c in qp.candidate_references(chain["dexscreener_slug"],
+                                                    quote_addr, quote_sym, t0)
+                 if c["other_kind"] == "native"]
+        if cands:
+            c = cands[0]
+            ver = (c["labels"] or ["v3"])[0].lower()
+            other = str(c["other_address"]).lower()
+            rv = Venue(ver, c["pair"], quote_addr, other, chain.get("v4_pool_manager"), TOPICS)
+            odec = 18 if other == ZERO else int(rpc.call(other, SEL["decimals"]), 16)
+            rl = rpc.logs_range(rv.log_address, rv.log_topics,
+                                W["first_block"], W["boundary_block"], S, "peg_ref")
+            bt = rpc.block_ts(sorted({int(l["blockNumber"], 16) for l in rl}), S, "peg_ref_bt")
+            ets, epx = pricing_mod.fetch_hourly(chain["coingecko_id"], t0, t1)
+            eat = lambda t: epx[min(range(len(ets)), key=lambda i: abs(ets[i] - t))]
+            pts = []
+            for l in rl:
+                qa, oa = rv.amounts(l["data"])
+                if qa == 0 or oa == 0: continue
+                q_ = abs(qa) / 10 ** qdec; o_ = abs(oa) / 10 ** odec
+                if q_ <= 0: continue
+                t = bt[int(l["blockNumber"], 16)]
+                pts.append((o_ / q_) * eat(t))
+            if pts:
+                peg = statistics.median(pts)
+                dev = 100.0 * abs(peg - 1.0)
+                note = (f"peg measured at {peg:.4f} USD from the {quote_sym}/"
+                        f"{c['other_symbol']} {c['dex']} {ver} pool {c['pair'][:14]}.. "
+                        f"({len(pts)} in-window swaps, {dev:.2f}% from 1.00)")
+            else:
+                note = (f"reference pool {c['pair'][:14]}.. had no in-window swaps; "
+                        f"PEG UNVERIFIED")
+        # Within 1% the peg is treated as exactly 1.00; beyond that the measured
+        # value is used and the deviation is stated rather than absorbed.
+        use = 1.0 if (peg is None or abs(peg - 1.0) <= 0.01) else peg
+        flag = "" if (peg is not None and abs(peg - 1.0) <= 0.01) else "  ** "
+        return {"mode": "constant", "mean": use, "ts": [], "px": [], "tier": 0,
+                "spread_pct": 0.0, "peg_measured": peg,
+                "basis": f"constant {use:.4f} USD/{quote_sym} (USD stablecoin; {note}){flag}"}
     if kind == "native":
         ts, px = pricing_mod.fetch_hourly(chain["coingecko_id"], t0, t1)
         mode, _fn, rep = qp.choose_method(ts, px, t0, t1)
@@ -567,18 +622,26 @@ def resolve_quote(rpc, chain, ven, quote_addr, quote_sym, qdec, W, S):
     cov = sum(1 for h in range(t0 // 3600, t1 // 3600 + 1) if h in hours)
     series = sorted((h * 3600 + 1800, statistics.median(v)) for h, v in hours.items())
     ts = [a for a, _ in series]; px = [b for _, b in series]
+    # THE DECISION IS MADE ON THE SAME SERIES THAT DOES THE PRICING.
+    # This previously measured the spread across RAW PER-SWAP prices while
+    # pricing from hourly medians. In a thin reference pool a single wick then
+    # decides the method: HIMS reported a 188.58% spread and flipped to
+    # per_trade while its hourly series moved only 4.6%. Tier 1 never had this
+    # problem because it takes both from CoinGecko's hourly points, so tier 2
+    # now matches it.
     mode, _fn, rep = qp.choose_method(ts, px, t0, t1)
-    mean = statistics.mean(inw) if inw else rep["mean"]
-    lo_, hi_ = (min(inw), max(inw)) if inw else (rep["min"], rep["max"])
-    spread = 100 * (hi_ - lo_) / mean if mean else 0.0
-    mode = "constant" if spread <= LIM["constant_rate_max_spread_pct"] else "per_trade"
+    mean, spread = rep["mean"], rep["spread_pct"]
+    raw_spread = (100 * (max(inw) - min(inw)) / statistics.mean(inw)) if inw else 0.0
     return {"mode": mode, "mean": mean, "ts": ts, "px": px, "tier": 2,
             "spread_pct": spread, "coverage": f"{cov}/{need}", "ref_pool": c["pair"],
+            "raw_swap_spread_pct": raw_spread,
             "basis": (f"{'constant %.4f' % mean if mode=='constant' else 'hourly'} "
                       f"USD/{quote_sym}, from the {quote_sym}/{c['other_symbol']} "
                       f"{c['dex']} {ver} pool {c['pair']} ({len(inw)} in-window swaps, "
                       f"{cov}/{need} hours covered; {quote_sym} moved {spread:.2f}% across "
-                      f"the window, bar is {LIM['constant_rate_max_spread_pct']:.0f}%)")}
+                      f"the window on hourly medians, bar is "
+                      f"{LIM['constant_rate_max_spread_pct']:.0f}%; raw per-swap range "
+                      f"{raw_spread:.1f}% reflects thin-pool wicks and is not used)")}
 
 
 def decode_and_report(C):
@@ -686,7 +749,7 @@ def decode_and_report(C):
     rows, netflow_diff = [], 0
     for w in cohort:
         ts = sorted(byw[w], key=lambda x: (x["block"], x["logIndex"]))
-        lots = deque(); real = 0.0; bought = sold = qin = qout = 0.0
+        lots = deque(); real = 0.0; real_usd = 0.0; bought = sold = qin = qout = 0.0
         nb = ns = 0; fb = ls = None
         for t in ts:
             u = t["quote"] / t["token"] if t["token"] else 0.0
@@ -695,11 +758,21 @@ def decode_and_report(C):
                 if fb is None: fb = t["t"]
             else:
                 need = t["token"]; sold += t["token"]; qout += t["quote"]; ns += 1; ls = t["t"]
+                # THE CHOSEN USD METHOD IS APPLIED HERE, not merely reported.
+                # Each sell is priced at its own hour under per_trade; under
+                # constant, rate() returns the same number every time, so one
+                # path serves both. Multiplying native PnL by the window mean was
+                # silently wrong for any token whose quote actually moved, and
+                # BONER's quote moved 188% across its window.
+                r_t = rate(t["t"])
                 while need > 1e-15 and lots:
                     lot = lots[0]; take = min(need, lot[0])
-                    real += take * (u - lot[1]); lot[0] -= take; need -= take
+                    g = take * (u - lot[1])
+                    real += g; real_usd += g * r_t
+                    lot[0] -= take; need -= take
                     if lot[0] <= 1e-15: lots.popleft()
-                if need > 1e-15: real += need * u     # unsold inventory valued at zero
+                if need > 1e-15:                      # unsold inventory valued at zero
+                    real += need * u; real_usd += need * u * r_t
         if abs(real - (qout - qin)) > 1e-9: netflow_diff += 1
         imp = bought - sold
         onc = head_b[w] / BD; bnd = bnd_b[w] / BD
@@ -708,7 +781,7 @@ def decode_and_report(C):
             "first_buy_time_utc": utc(fb) if fb else None,
             "last_sell_time_utc": utc(ls) if ls else None,
             "n_buys": nb, "n_sells": ns, "sol_in": qin, "sol_out": qout,
-            "realized_pnl_sol": real, "realized_pnl_usd": real * C["QU"]["mean"],
+            "realized_pnl_sol": real, "realized_pnl_usd": real_usd,
             "tokens_still_held": sum(l[0] for l in lots),
             "hold_min": (ls - fb) / 60.0 if (fb and ls) else None,
             "sold_out": imp <= 1e-6, "pre_window_entry": ts[0]["side"] == "sell",
@@ -856,8 +929,12 @@ def report(C, D):
                 run_ += g
                 P(f"  SELL {t['token']:>15,.2f} @ {u:.4e}  proceeds {t['quote']:>10.6f}  "
                   f"gain {g:+.6f}  running {run_:+.6f}  blk {t['block']:,}")
-        P(f"  TOTAL {run_:+.6f} {C['quote_sym']} x ${C['QU']['mean']:,.4f} = "
-          f"${run_*C['QU']['mean']:,.2f}   unsold {sum(l[0] for l in lots):,.2f}")
+        wrow = next((x for x in rows if x["wallet"] == w), None)
+        usd_total = wrow["realized_pnl_usd"] if wrow else run_ * C["QU"]["mean"]
+        how = ("each sell priced at its own hour" if C["QU"]["mode"] == "per_trade"
+               else f"constant ${C['QU']['mean']:,.4f}/{C['quote_sym']}")
+        P(f"  TOTAL {run_:+.6f} {C['quote_sym']} = ${usd_total:,.2f}  ({how})"
+          f"   unsold {sum(l[0] for l in lots):,.2f}")
     P("\n" + C["L"].report())
     P(f"\nNOT LOADED. Run again with --load to build the payload.")
     json.dump({"rows": rows}, open(S.p("rows.json"), "w"))
