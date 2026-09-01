@@ -139,3 +139,25 @@ entry is there, and is applied **at the candidate stage** so an excluded address
 never becomes a row rather than being filtered out afterwards. Per-run additions
 (the tracked pool contract, and round-trippers detected for that token) are
 resolved by the pipeline and passed in.
+
+## 9. A documented guarantee the code did not implement
+
+The most corrosive kind, because the documentation is what everyone checks
+against. Nothing errors; the guarantee is simply absent, and the doc is the
+reason nobody looks.
+
+- **Receipt checkpointing, found 2026-09-01.** `docs/PIPELINE_SPEC.md` stated the
+  pipeline is "checkpointed at every expensive stage — a crash resumes without
+  re-pulling", and `run_token.py` was built to that promise. But the receipts
+  stage resolved all transactions in memory and wrote the checkpoint file only
+  after the entire stage succeeded. On QUANT that meant `receipts.jsonl` sat at
+  zero bytes for ten minutes across 4,955 fetches; a crash at receipt 4,900
+  would have lost every one of them. The gap was visible only because the file
+  was watched directly while the stage ran. Receipts now append per batch.
+
+**Rule.** A guarantee written in a spec is a claim about code, and claims about
+code are checked by exercising them, not by reading them back. When a document
+promises resumability, idempotence or atomicity, kill the process mid-stage and
+confirm the promise holds. The same applies to the reverse direction: the
+`fully_covered` flag in the same run was hardcoded `true`, asserting a property
+nothing measured.

@@ -915,6 +915,10 @@ def build_payload(C, D):
            "first_swap_block": W["first_block"], "boundary_block": W["boundary_block"],
            "swaps_in_window": len(C["sw"]), "unique_txs": len(C["by_tx"]),
            "fully_covered": bool(W.get("fully_covered", True)),
+           # Measured coverage, not the requested window. The two differ exactly
+           # when the pool is younger than --window-hours.
+           "covered_hours": round((min(W.get("boundary_ts", W["end_ts"]), W["end_ts"])
+                                   - W["first_ts"]) / 3600.0, 4),
            "mcap_threshold_usd": args.mcap_threshold,
            "threshold_binding": D["binding"],
            "threshold_note": (f"highest first-buy mcap was ${max(D['mc'].values()):,.0f} against a "

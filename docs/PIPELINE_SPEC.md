@@ -256,11 +256,34 @@ holds regardless of what happened in between.
 | CATE | solana | pump.fun → PumpSwap | SOL (native) | — | 556 |
 | CYBERLEEK | solana | Raydium CPMM | SOL (native) | — | 268 |
 | NTF | robinhood | uniswap v4 | ETH (native) | 2% / 0% | 511 |
-| PONS | robinhood | uniswap v3 | WETH (ERC-20) | 0% / 0% | 1,045 |
+| PONS | robinhood | uniswap v3 | WETH (ERC-20) | 0% / 0% | 1,046 |
 | AI | robinhood | uniswap v4 | NVDA (arbitrary ERC-20) | 1% / 0% | 1,163 |
+| QUANT | robinhood | uniswap v4 | SPY (arbitrary ERC-20) | 0% / 0% | 1,357 |
 
 Covered: both Uniswap versions, native and ERC-20 quotes, a quote with no
 CoinGecko listing, hook fees and no fee, and both chains.
+
+QUANT was the first token the wrapper handled **from scratch** rather than
+reproducing a known result, and the first tier-2 route to run through a **v4**
+reference pool (SPY/USDG, created 47.7 days before the window, 2,158 in-window
+swaps, 5/5 hours covered, SPY moved 1.04%). It is also the first token whose
+infrastructure exclusion caught **zero** candidates, and the first whose top
+wallet ended the window still holding inventory.
+
+### Defects that run exposed
+
+Three, all in the wrapper rather than the decode:
+
+1. **`fully_covered` was hardcoded `true`** in both the report and the payload.
+   A pool younger than `--window-hours` would have had its boundary collapse
+   onto chain head and been analysed over a short window while reporting full
+   coverage. Coverage is now measured against head, reported with actual hours,
+   and stored as `covered_hours` alongside the boolean. AI and PONS predate the
+   measurement and carry a null `covered_hours` until their next reload.
+2. **Receipts were not incrementally checkpointed** — see FAILURE_MODES.md item 9.
+3. **stdout was block-buffered**, so a backgrounded run produced an empty log for
+   ten minutes and progress had to be read from checkpoint files on disk. Now
+   line-buffered.
 
 ## 10. Known gaps and hardcoded values
 
