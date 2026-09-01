@@ -46,6 +46,7 @@ interface Hit {
   transfers: number;
   createdBlock: number;
   createdAt: Date;
+  poolId: string | null;
   cohorts: number;
   totalRealizedUsd: number;
   crossToken: boolean;
@@ -63,7 +64,7 @@ interface RunResult {
    * cached, that token would be unresolvable on this cycle and silently
    * dropped despite being inside the 2-hour rule.
    */
-  pools: { token: string; block: number; at: Date }[];
+  pools: { token: string; block: number; at: Date; poolId: string | null }[];
   /** Rendered in fetch(); null when the cycle produced no hits. */
   message: string | null;
   stats: Record<string, number>;
@@ -135,12 +136,16 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     const initLogs = sweptFrom <= head
       ? await rpc.logsRange({ address: PM, topics: [INIT] }, sweptFrom, head, sweepWindow)
       : [];
-    const created = new Map<string, number>();
+    // topics[1] is the poolId, which is what DexScreener uses as the pair
+    // address on v4 and therefore what a link needs. Earlier versions read only
+    // the two currency topics and threw the poolId away.
+    const created = new Map<string, { block: number; poolId: string }>();
     for (const l of initLogs) {
       const block = Number.parseInt(l.blockNumber, 16);
+      const poolId = String(l.topics[1] ?? '').toLowerCase();
       for (const t of [topicAddress(l.topics[2]), topicAddress(l.topics[3])]) {
         const prev = created.get(t);
-        if (prev === undefined || block < prev) created.set(t, block);
+        if (prev === undefined || block < prev.block) created.set(t, { block, poolId });
       }
     }
     ctx.log.info('initialize sweep', {
@@ -164,30 +169,35 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     const distinct = [...new Set(venue.map((l) => l.address.toLowerCase()))];
     const cached = distinct.length
       ? await ctx.db.query(
-          `select token, created_block, created_at, older_than_sweep
+          `select token, created_block, created_at, older_than_sweep, pool_id
              from token_pool_first where chain = $1 and token = any($2::text[])`,
           [chain, distinct])
       : { rows: [] as Record<string, unknown>[] };
-    const cache = new Map<string, { block: number | null; at: Date | null; old: boolean }>();
+    const cache = new Map<string, { block: number | null; at: Date | null; old: boolean; poolId: string | null }>();
     for (const r of cached.rows as Record<string, unknown>[]) {
       cache.set(String(r.token), {
         block: r.created_block === null ? null : Number(r.created_block),
         at: r.created_at ? new Date(String(r.created_at)) : null,
         old: r.older_than_sweep === true,
+        poolId: r.pool_id === null || r.pool_id === undefined ? null : String(r.pool_id),
       });
     }
     let hits = 0, misses = 0, negatives = 0;
-    const resolved = new Map<string, { block: number; at: Date } | null>();
+    const resolved = new Map<string, { block: number; at: Date; poolId: string | null } | null>();
     for (const token of distinct) {
       const c = cache.get(token);
       if (c) {
         hits++;
-        resolved.set(token, c.old || c.block === null || !c.at ? null : { block: c.block, at: c.at });
+        // A cache row written before poolId was captured has none; the sweep may
+        // still know it, so prefer the sweep's value when the cache lacks one.
+        const swept = created.get(token);
+        resolved.set(token, c.old || c.block === null || !c.at ? null
+          : { block: c.block, at: c.at, poolId: c.poolId ?? swept?.poolId ?? null });
         continue;
       }
       misses++;
-      const block = created.get(token);
-      if (block === undefined) {
+      const entry = created.get(token);
+      if (entry === undefined) {
         // Not created inside any window we have swept, so it is older than our
         // coverage. Cached as a NEGATIVE so it is never looked up again.
         negatives++;
@@ -195,8 +205,8 @@ const newTokenWatch: SourceAdapter<RunResult> = {
         continue;
       }
       resolved.set(token, {
-        block,
-        at: new Date((tHead - (head - block) * blockSeconds) * 1000),
+        block: entry.block, poolId: entry.poolId,
+        at: new Date((tHead - (head - entry.block) * blockSeconds) * 1000),
       });
     }
 
@@ -216,7 +226,7 @@ const newTokenWatch: SourceAdapter<RunResult> = {
       if (existing) { existing.transfers++; continue; }
       agg.set(key, {
         chain, token, wallet, transfers: 1,
-        createdBlock: r.block, createdAt: r.at,
+        createdBlock: r.block, createdAt: r.at, poolId: r.poolId,
         cohorts: w.cohorts, totalRealizedUsd: w.totalRealizedUsd, crossToken: w.crossToken,
       });
     }
@@ -236,6 +246,7 @@ const newTokenWatch: SourceAdapter<RunResult> = {
         totalRealizedUsd: h.totalRealizedUsd, crossToken: h.crossToken,
         poolAgeMinutes: (Date.now() - h.createdAt.getTime()) / 60_000,
         clusterId: clusterOf.get(h.wallet) ?? null,
+        poolId: h.poolId,
       }));
       // Symbols cost one eth_call each, so only the tokens that will actually
       // be printed get looked up -- the lead sections are capped, and the run
@@ -275,8 +286,9 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     return [{
       hits: out,
       message,
-      pools: [...created.entries()].map(([token, block]) => ({
-        token, block, at: new Date((tHead - (head - block) * blockSeconds) * 1000),
+      pools: [...created.entries()].map(([token, e]) => ({
+        token, block: e.block, poolId: e.poolId,
+        at: new Date((tHead - (head - e.block) * blockSeconds) * 1000),
       })),
       stats: {
         head, blockSeconds, requests: rpc.requests, transfers: transfers.length,
@@ -303,14 +315,15 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     for (let i = 0; i < r.pools.length; i += 500) {
       const b = r.pools.slice(i, i + 500);
       const res = await client.query(
-        `insert into token_pool_first (token, chain, created_block, created_at, older_than_sweep)
-         select * from unnest($1::text[], $2::text[], $3::bigint[], $4::timestamptz[], $5::boolean[])
+        `insert into token_pool_first (token, chain, created_block, created_at, older_than_sweep, pool_id)
+         select * from unnest($1::text[], $2::text[], $3::bigint[], $4::timestamptz[], $5::boolean[], $6::text[])
          on conflict (token) do update set
            created_block = least(token_pool_first.created_block, excluded.created_block),
            created_at = least(token_pool_first.created_at, excluded.created_at),
-           older_than_sweep = false`,
+           older_than_sweep = false,
+           pool_id = coalesce(token_pool_first.pool_id, excluded.pool_id)`,
         [b.map((p) => p.token), b.map(() => chain), b.map((p) => p.block),
-         b.map((p) => p.at), b.map(() => false)]);
+         b.map((p) => p.at), b.map(() => false), b.map((p) => p.poolId)]);
       cached += res.rowCount ?? 0;
     }
     ctx.log.info('pool cache', { observed: r.pools.length, written: cached });
@@ -354,7 +367,8 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     ctx.log.info('retention', { hitsDeleted: d1.rowCount ?? 0, statsDeleted: d2.rowCount ?? 0 });
 
     // Queued, not sent: the spine flushes alerts after the transaction commits.
-    if (r.message) {
+    const sendAlerts = ctx.options.send_alerts !== false;
+    if (r.message && sendAlerts) {
       const [head, ...body] = r.message.split('\n');
       ctx.queueAlert({
         // 'warning' is this spine's convention for a content alert; the levels
@@ -363,6 +377,9 @@ const newTokenWatch: SourceAdapter<RunResult> = {
         title: (head ?? 'New-token buys').replace(/\*\*/g, ''),
         description: body.join('\n').trim(),
       });
+    } else if (r.message) {
+      ctx.log.info('send_alerts is false; message rendered but not queued',
+        { chars: r.message.length });
     } else {
       ctx.log.info('no hits this cycle; nothing queued');
     }
