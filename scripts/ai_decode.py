@@ -13,9 +13,11 @@ Locked constraints, carried unchanged:
   - circular arb: exclude txs where the PoolManager both sends AND receives AI
   - fee rate MEASURED from unambiguous single-swap trades, never assumed
 """
-import json, os, time, statistics, requests
+import json, os, sys, time, statistics, requests
 from collections import defaultdict
 from dotenv import load_dotenv
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pipeline import infrastructure as infra
 S = ("/private/tmp/claude-501/-Users-tomordishnica-projects-command-center/"
      "ad1af308-f68f-4c04-aff1-e23be68c2214/scratchpad")
 load_dotenv('.env')
@@ -44,6 +46,10 @@ def al(m, p, tries=8):
             return j
         except Exception: time.sleep(min(30,1.2*(a+1)**2))
     return None
+
+EXCL = infra.excluded_set("robinhood", [PM])
+print(f"infrastructure exclusions in force: {len(EXCL)} addresses (global list; on v4 "
+      f"the tracked pool has no contract of its own and the PoolManager covers it)")
 
 sw = json.load(open(S+"/ai_swaps.json"))
 rec = {}
@@ -98,7 +104,7 @@ def round_trippers(v):
         if addr != AI: continue
         if "0x"+a == PM: got.add("0x"+b)
         if "0x"+b == PM: gave.add("0x"+a)
-    return (got & gave) - {PM, ZERO}
+    return (got & gave) - EXCL
 
 rt_all = set()
 for h, v in rec.items(): rt_all |= round_trippers(v)
@@ -117,7 +123,7 @@ for h, g in by_tx.items():
     rt = round_trippers(v)
     net = net_of(v, AI)
     mv = {k: x for k, x in net.items()
-          if abs(x) > 1e-12 and k not in (PM, ZERO) and k not in rt}
+          if abs(x) > 1e-12 and k not in EXCL and k not in rt}
     for l in g:
         d = l["data"][2:]
         a0 = i128(d[0:64])
@@ -146,7 +152,9 @@ print(f"  => implied fee: buy {out['buy']*100:.4f}%  sell {out['sell']*100:.4f}%
 # ---- block timestamps, every distinct trade block ----
 blocks = sorted({int(l["blockNumber"], 16) for l in sw})
 print(f"\ntimestamping {len(blocks):,} distinct blocks")
-bt = {}; todo = blocks; rnd = 0
+BTP = S + "/ai_blocktimes.json"
+bt = {int(k): v for k, v in json.load(open(BTP)).items()} if os.path.exists(BTP) else {}
+todo = [b for b in blocks if b not in bt]; rnd = 0
 while todo and rnd < 12:
     rnd += 1; fail = []
     for i in range(0, len(todo), 20):
@@ -163,6 +171,7 @@ while todo and rnd < 12:
     todo = sorted(set(fail))
     print(f"  round {rnd}: {len(bt):,}/{len(blocks):,}, retrying {len(todo):,}", flush=True)
 if todo: raise SystemExit(f"{len(todo)} blocks unresolved -- refusing partial timestamps")
+json.dump(bt, open(BTP, "w"))
 
 # ---- decode ----
 trades = []; paths = defaultdict(int); nomover = 0
@@ -173,7 +182,7 @@ for h, g in by_tx.items():
     rt = round_trippers(v)
     net = net_of(v, AI)
     mv = {k: x for k, x in net.items()
-          if abs(x) > 1e-12 and k not in (PM, ZERO) and k not in rt}
+          if abs(x) > 1e-12 and k not in EXCL and k not in rt}
     for l in g:
         d = l["data"][2:]
         a0 = i128(d[0:64]); a1 = i128(d[64:128])

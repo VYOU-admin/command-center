@@ -1,0 +1,71 @@
+# Addresses that must never be attributed a trade, on ANY token.
+#
+# WHY THIS FILE EXISTS. The exclusion used to be implicit and venue-scoped: a v4
+# run excluded the v4 PoolManager because it was the venue being indexed, and a
+# v3 run did not exclude it at all. Routers hop through the v4 PoolManager while
+# trading a v3 pool, so it accumulated a balance and entered the PONS cohort as
+# though it were a trader, holding 19.8% of that token's unrealized total. An
+# exclusion list scoped to one venue silently fails on another, so this list is
+# global and applies regardless of which venue a token trades on.
+#
+# APPLIED AT THE CANDIDATE STAGE, before cohort selection, so an excluded address
+# never becomes a row rather than being filtered out afterwards.
+#
+# Extend by editing this file. No decode code changes.
+
+chains:
+  robinhood:
+
+    # ---- venue infrastructure ------------------------------------------------
+    - address: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+      label: uniswap-v4-poolmanager
+      reason: >
+        The Uniswap v4 singleton. It is one side of every v4 swap and holds pool
+        reserves for every v4 pool at once. Routers hop through it even when the
+        tracked pool is v3, which is exactly how it entered the PONS cohort.
+
+    - address: "0x0000000000000000000000000000000000000000"
+      label: zero-address
+      reason: >
+        Mint and burn counterparty. A transfer to or from it changes supply and
+        is never a trade.
+
+    - address: "0x000000000000000000000000000000000000dead"
+      label: burn-address
+      reason: >
+        Conventional burn sink. Does not reduce totalSupply, so it is invisible
+        to a mint/burn supply reconstruction, but it is not a trader either.
+        120.7M PONS was sent here inside the PONS window.
+
+    # ---- routers and aggregators --------------------------------------------
+    # These move very large volumes across many wallets in a single window. They
+    # are intermediaries: attributing a trade to one credits the router rather
+    # than the person who placed the order.
+    - address: "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"
+      label: router-b92fe925
+      reason: >
+        1,634 transfers moving 1.06B AI inside the 4h AI window, and 243.8M PONS
+        inside the PONS window. Appears against many unrelated cohort wallets on
+        both tokens, which is the router signature.
+
+    - address: "0xb01ca24bd01be40ee950a8746cf7546134442049"
+      label: router-b01ca24b
+      reason: >
+        Largest non-pool destination of cohort PONS in its window at 623.9M
+        tokens, and 151.6M AI in the AI window.
+
+    - address: "0x8876789976decbfcbbbe364623c63652db8c0904"
+      label: router-88767899
+      reason: >
+        235 transfers moving 496.7M AI inside the AI window against many
+        distinct cohort wallets.
+
+# Addresses excluded per-run rather than globally, resolved by the pipeline:
+#
+#   tracked_pool      the pool contract being indexed. On v3 this is the pool's
+#                     own address; on v4 the pool has no contract of its own and
+#                     the PoolManager above covers it.
+#   round_trippers    wallets that both receive from and send to the pool inside
+#                     one transaction. These are fee recipients, not traders, and
+#                     they are token-specific, so they are detected per run
+#                     rather than listed here. AI has exactly 2.

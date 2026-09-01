@@ -143,3 +143,37 @@ round-trippers are all excluded from attribution candidates.
 
 Not corrected without instruction. The general fix is an infrastructure exclusion
 list applied to every token regardless of the venue being indexed.
+
+---
+
+## LOADED (2026-08-31), with the infrastructure exclusion applied
+
+| Table | AI | PONS reload |
+|---|---|---|
+| `wallet_pnl` | **1,163 upserted**, 0 stale removed | **1,045 upserted**, **1 stale removed** |
+| `wallet_clusters` | **621 inserted** (42 shared_signer) | **363 replaced** (55 shared_signer) |
+| `wallet_pnl_tokens` | 1 upserted | 1 upserted |
+
+Verified from a fresh connection: 3,543 rows total, union invariant
+`count(*) = count(distinct (wallet, token))` = **3,543 = 3,543**, dashboard
+lateral join also 3,543 with no fan-out, and **0 infrastructure addresses
+anywhere in `wallet_pnl`**. CATE (556), CYBERLEEK (268) and NTF (511) unchanged
+with identical realized totals. Served page executed in a DOM: **0 JS errors**,
+AI tab renders `1–50 of 1163` with the full token record.
+
+### Effect of the exclusion on PONS
+
+The exclusion blocked the v4 PoolManager as an attribution candidate on 12 swaps
+and the tracked pool itself on 1 swap. Cohort **1,046 -> 1,045**; the single
+removed row was the PoolManager.
+
+    realized   $78,192.13 -> $78,184.46   excluded row carried $7.66
+    difference beyond the excluded row: $0.000000
+    unrealized $7,868,329 -> $6,307,550   (-$1,560,779, the PoolManager's holding)
+
+Realized PnL is unchanged apart from the excluded row, to the cent.
+
+`same_transaction` again produced 0 clusters for both tokens, stated rather than
+omitted: on PONS almost no transaction contains two cohort wallets, and on AI the
+dominant transaction shape is one buyer plus a fee recipient, and fee recipients
+are excluded.

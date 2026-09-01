@@ -113,13 +113,29 @@ removes and what the removed rows actually contain. An exclusion that fires on a
 majority of transactions is a finding to investigate, not a filter to apply. The
 same discipline as a filter that matches nothing, in the opposite direction.
 
-## 8. Infrastructure addresses entering a cohort as traders
+## 8. An exclusion list scoped to one venue silently fails on another
 
-- **PONS.** The Uniswap V4 PoolManager sits in the loaded PONS cohort as a
-  trader, holding 19.8% of that token's unrealized total. PONS is a v3 pool, so
-  the v4 PoolManager was not on any exclusion list for that run, yet routers hop
-  through it and it accumulates balances.
+**The general form: any exclusion scoped to the venue being indexed will miss
+that venue's contracts when a DIFFERENT venue is indexed.** Nothing errors. The
+excluded thing simply is not excluded, and it arrives as ordinary-looking data.
 
-**Rule.** Exclude venue infrastructure — pool managers, routers, fee recipients,
-the zero address — from attribution candidates on EVERY token, not only when the
-address happens to be the venue being indexed.
+- **PONS, found 2026-08-31.** Exclusions were implicit and venue-scoped: a v4 run
+  excluded the v4 PoolManager because it happened to be the venue being decoded,
+  and a v3 run excluded nothing of the sort. But routers hop through the v4
+  PoolManager while trading a v3 pool, so it accumulated PONS and entered that
+  cohort as a trader — **holding 19.8% of the token's entire unrealized total**
+  ($1,560,779 of $7,868,329). It was found only incidentally, while reading the
+  PoolManager address off the NTF indexer for an unrelated run.
+
+Its realized PnL was $7.66, so realized figures were almost unaffected. That is
+part of why it survived: the number that was badly wrong was one nobody was
+reading closely, while the number under scrutiny looked fine.
+
+**Rule.** Venue infrastructure — pool managers, routers, fee recipients, the zero
+and burn addresses, the tracked pool itself — is excluded on EVERY token
+regardless of which venue that token trades on. The list lives in
+`config/infrastructure.yaml`, is global rather than per-venue, states why each
+entry is there, and is applied **at the candidate stage** so an excluded address
+never becomes a row rather than being filtered out afterwards. Per-run additions
+(the tracked pool contract, and round-trippers detected for that token) are
+resolved by the pipeline and passed in.
