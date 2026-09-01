@@ -1,0 +1,49 @@
+# New-token watch — known wallets buying tokens that just launched.
+#
+# MEASURED BEFORE BUILDING (2026-09-01), on chain 4663:
+#   17,642 pools created per 24h (mean 735/hour, range 396-1,102)
+#   183,201 swaps/hour across 3,042 pools; 117,101 in pools under 24h old
+#   -> pool-first attribution needs ~117k receipts/hour = ~3.6h of fetching.
+#      It cannot keep up with an hourly cycle, so this is wallet-first.
+#   7,700 inbound transfers/hour to the watchlist, of which 1,980 come from
+#      the PoolManager (an actual swap rather than an airdrop)
+#   under the 2h pool-age rule: 1,119 transfers, 53 tokens, 217 wallets,
+#      556 distinct (token, wallet) pairs per hour
+#
+# SENDS NOTHING TO DISCORD. Only the spine's failure alerts apply.
+# KNOWN GAP: v3 launches are invisible; this keys off the v4 PoolManager.
+
+id: new-token-watch
+name: New Token Watch
+source: new-token-watch
+enabled: false   # flipped to true is the go-live step; reported before first run
+schedule: 1h
+
+alerts:
+  channel: system
+
+options:
+  chain: robinhood
+  # No ALCHEMY_API_KEY in the deployed service, and none is needed: every call
+  # here is served by the free public endpoint.
+  rpc_url: https://rpc.mainnet.chain.robinhood.com
+  pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+  # Topic hashes are COPIED FROM WORKING CODE, never recalled. Initialize was
+  # identified empirically: it is the only 4-topic PoolManager event carrying
+  # QUANT's poolId at its known creation block, with 160 data bytes and both
+  # currency topics address-shaped.
+  initialize_topic: "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
+  transfer_topic: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+  max_pool_age_minutes: 120
+  lookback_hours: 1
+  bootstrap_hours: 24
+  retention_hours: 24
+
+  # Measured ceilings on this chain: >1,000 topic selectors is rejected, 500
+  # addresses over 2,000 blocks times out, 200 over 10,000 blocks is reliable.
+  watchlist_chunk: 200
+  transfer_block_window: 10000
+  sweep_block_window: 20000
+  min_interval_ms: 1100
