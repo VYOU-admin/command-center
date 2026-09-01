@@ -52,6 +52,17 @@ interface Hit {
 
 interface RunResult {
   hits: Hit[];
+  /**
+   * EVERY pool creation observed in this cycle's sweep, not just the ones that
+   * produced a hit.
+   *
+   * This is a correctness requirement, not an optimisation. Sweeps are
+   * incremental, so a token created 90 minutes ago appears in the PREVIOUS
+   * cycle's sweep and in no later one. If only hit-producing tokens were
+   * cached, that token would be unresolvable on this cycle and silently
+   * dropped despite being inside the 2-hour rule.
+   */
+  pools: { token: string; block: number; at: Date }[];
   stats: Record<string, number>;
   sweptFrom: number;
   sweptTo: number;
@@ -215,6 +226,9 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     });
     return [{
       hits: out,
+      pools: [...created.entries()].map(([token, block]) => ({
+        token, block, at: new Date((tHead - (head - block) * blockSeconds) * 1000),
+      })),
       stats: {
         head, blockSeconds, requests: rpc.requests, transfers: transfers.length,
         venueTransfers: venue.length, distinctTokens: distinct.length,
@@ -233,21 +247,24 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     const chain = String(ctx.options.chain);
     const retentionH = num(ctx.options, 'retention_hours', 24);
 
-    // Cache every token resolved this cycle, positives and negatives alike.
-    const seen = new Map<string, Hit>();
-    for (const h of r.hits) if (!seen.has(h.token)) seen.set(h.token, h);
-    if (seen.size) {
-      const toks = [...seen.keys()];
-      await client.query(
+    // Cache every creation this sweep observed. Chunked: a bootstrap sweep
+    // carries thousands of tokens and one unnest of that size is a large
+    // parameter payload.
+    let cached = 0;
+    for (let i = 0; i < r.pools.length; i += 500) {
+      const b = r.pools.slice(i, i + 500);
+      const res = await client.query(
         `insert into token_pool_first (token, chain, created_block, created_at, older_than_sweep)
          select * from unnest($1::text[], $2::text[], $3::bigint[], $4::timestamptz[], $5::boolean[])
          on conflict (token) do update set
            created_block = least(token_pool_first.created_block, excluded.created_block),
            created_at = least(token_pool_first.created_at, excluded.created_at),
            older_than_sweep = false`,
-        [toks, toks.map(() => chain), toks.map((t) => seen.get(t)!.createdBlock),
-         toks.map((t) => seen.get(t)!.createdAt), toks.map(() => false)]);
+        [b.map((p) => p.token), b.map(() => chain), b.map((p) => p.block),
+         b.map((p) => p.at), b.map(() => false)]);
+      cached += res.rowCount ?? 0;
     }
+    ctx.log.info('pool cache', { observed: r.pools.length, written: cached });
 
     const bucket = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000);
     let rows = 0;

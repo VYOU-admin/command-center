@@ -38,7 +38,11 @@ options:
 
   max_pool_age_minutes: 120
   lookback_hours: 1
-  bootstrap_hours: 24
+  # Only needs to exceed max_pool_age_minutes, NOT 24h. Anything created before
+  # the swept range is necessarily older than the age rule and is dropped, so a
+  # 24h bootstrap bought nothing and cost 4m47s of the spine's hard 5-minute run
+  # ceiling, aborting the first live cycle.
+  bootstrap_hours: 3
   retention_hours: 24
 
   # Measured ceilings on this chain: >1,000 topic selectors is rejected, 500
