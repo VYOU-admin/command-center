@@ -16,7 +16,7 @@
 id: new-token-watch
 name: New Token Watch
 source: new-token-watch
-enabled: false   # flipped to true is the go-live step; reported before first run
+enabled: true
 schedule: 1h
 
 alerts:
