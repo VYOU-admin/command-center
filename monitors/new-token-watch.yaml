@@ -60,7 +60,12 @@ options:
   # local run's, and 52 requests did not fit the spine's 5-minute ceiling.
   # A window that times out is split automatically, so a too-large window
   # degrades into two smaller queries rather than failing the run.
+  # 6,344 watchlist wallets / 200 = 32 chunks. At a 20,000-block window that is
+  # 2 windows per chunk instead of 4, so 64 transfer requests rather than 128.
+  # 20,000 is well inside what this endpoint serves for bulk logs (the swap
+  # puller has used 25,000 throughout), and the sweep has used 20,000 since day
+  # one. A window that still comes back too large is split by PublicRpc.logs.
   watchlist_chunk: 200
-  transfer_block_window: 10000
+  transfer_block_window: 20000
   sweep_block_window: 20000
   min_interval_ms: 800

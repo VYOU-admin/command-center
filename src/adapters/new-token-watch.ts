@@ -134,9 +134,25 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     // ---- sweep Initialize, incremental from the cursor -------------------
     const cur = await ctx.db.query(
       `select last_swept_block from new_token_cursor where chain = $1`, [chain]);
-    const sweptFrom = cur.rows.length
+    // THE CATCH-UP IS BOUNDED. Without this the sweep grows for every hour the
+    // monitor is down, so a run that failed on duration makes the next run
+    // longer and more likely to fail again -- a spiral, not a blip. Anything
+    // older than bootstrap_hours is necessarily older than max_pool_age_minutes
+    // and would be dropped by the age rule regardless, so skipping it costs
+    // nothing except the wasted requests it avoids.
+    const floorBlock = head - Math.floor(perHour * bootstrapH);
+    const rawFrom = cur.rows.length
       ? Number(cur.rows[0].last_swept_block) + 1
-      : head - perHour * bootstrapH;
+      : floorBlock;
+    const sweptFrom = Math.max(rawFrom, floorBlock);
+    const skippedBlocks = Math.max(0, sweptFrom - rawFrom);
+    if (skippedBlocks > 0) {
+      ctx.log.warn('sweep catch-up capped at bootstrap_hours', {
+        cursorWanted: rawFrom, sweepingFrom: sweptFrom, skippedBlocks,
+        skippedHours: Number((skippedBlocks / perHour).toFixed(2)),
+        bootstrapHours: bootstrapH,
+      });
+    }
     const initLogs = sweptFrom <= head
       ? await rpc.logsRange({ address: PM, topics: [INIT] }, sweptFrom, head, sweepWindow)
       : [];
