@@ -295,6 +295,28 @@ function toast(msg,err){const t=document.getElementById('toast');t.textContent=m
 
 function tokenRows(){ return ROWS.filter(r=>r.token===tab); }
 
+/**
+ * The quote asset is a property of the TOKEN, not of the page.
+ *
+ * These headers were hardcoded to SOL in the CATE era. CATE and CYBERLEEK quote
+ * in SOL, NTF in ETH, PONS in WETH and AI in NVDA, so a fixed "SOL in" header
+ * mislabels three of five tabs. The union tab spans several quote assets at
+ * once and so gets a generic label rather than any one asset's name.
+ */
+function quoteOf(){
+  if(tab==='__all'||tab==='__groups') return 'quote';
+  var qs=[];
+  tokenRows().forEach(function(r){ if(r.quote_asset&&qs.indexOf(r.quote_asset)<0) qs.push(r.quote_asset); });
+  return qs.length===1?qs[0]:'quote';
+}
+function colTitle(c){
+  var Q=quoteOf();
+  if(c.k==='sol_in') return Q+' in';
+  if(c.k==='sol_out') return Q+' out';
+  if(c.k==='realized_pnl_sol') return 'PnL '+Q;
+  return c.t;
+}
+
 const ACOLS=[
   {k:'_sel',t:'',l:true,kind:'sel'},
   {k:'wallet',t:'Wallet',l:true,kind:'wallet'},
@@ -307,9 +329,9 @@ const ACOLS=[
   // ordering those would be meaningless, so this column carries no sort on the
   // union tab. Per-token tabs are single-asset and keep their sort.
   {k:'total_pnl_usd',t:'Total PnL USD',kind:'usd',d:0},
-  {k:'total_pnl_sol',t:'Native (mixed)',kind:'pnl',d:3,nosort:true},
-  {k:'total_sol_in',t:'Total SOL in',kind:'num',d:3},
-  {k:'total_sol_out',t:'Total SOL out',kind:'num',d:3},
+  {k:'total_pnl_sol',t:'PnL quote (mixed)',kind:'pnl',d:3,nosort:true},
+  {k:'total_sol_in',t:'Total quote in',kind:'num',d:3},
+  {k:'total_sol_out',t:'Total quote out',kind:'num',d:3},
   {k:'total_buys',t:'Buys',kind:'int'},
   {k:'total_sells',t:'Sells',kind:'int'},
   {k:'earliest_first_buy',t:'Earliest first buy',l:true,kind:'time'},
@@ -492,7 +514,7 @@ function summary(rows){
 function filterBar(){
   const tags=[...new Set(tokenRows().filter(r=>r.tag).map(r=>r.tag))].sort();
   const numF=NUMCOLS.map(([k,t])=>
-    '<div class="f"><label>'+t+'</label><div class="pair">'+
+    '<div class="f"><label>'+colTitle({k:k,t:t})+'</label><div class="pair">'+
     '<input class="num" type="number" step="any" placeholder="min" data-f="min_'+k+'" value="'+(F['min_'+k]??'')+'">'+
     '<span>–</span><input class="num" type="number" step="any" placeholder="max" data-f="max_'+k+'" value="'+(F['max_'+k]??'')+'"></div></div>').join('');
   return '<div class="filters"><div class="frow">'+
@@ -538,12 +560,12 @@ function renderTable(){
       : (c.nosort
           // No data-k means the delegated click handler never matches it.
           // Mixed SOL/ETH cannot be ordered meaningfully on the union tab.
-          ? '<th class="'+(c.l?'l':'')+' nosort" title="mixed quote assets - not sortable">'+c.t+'</th>'
-          : '<th class="'+(c.l?'l':'')+'" data-k="'+c.k+'">'+c.t+
+          ? '<th class="'+(c.l?'l':'')+' nosort" title="mixed quote assets - not sortable">'+colTitle(c)+'</th>'
+          : '<th class="'+(c.l?'l':'')+'" data-k="'+c.k+'">'+colTitle(c)+
             ((isU||mode==='flat')&&curKey()===c.k?' <span class="arrow">'+(curDir()<0?'▼':'▲')+'</span>':'')+'</th>')).join('')+'</tr>';
   const body=slice.map(x=>{
     if(x.head) return '<tr class="grouphead"><td colspan="'+C.length+'">'+esc(x.head.tag)+
-      ' · '+x.head.rs.length+' wallets · combined '+(x.head.sum>=0?'+':'')+x.head.sum.toFixed(2)+' SOL</td></tr>';
+      ' · '+x.head.rs.length+' wallets · combined '+(x.head.sum>=0?'+':'')+x.head.sum.toFixed(2)+' '+quoteOf()+'</td></tr>';
     return '<tr class="'+(sel.has(x.r.wallet)?'sel':'')+'">'+
       C.map(c=>'<td class="'+(c.l?'l':'')+'">'+cell(x.r,c)+'</td>').join('')+'</tr>';
   }).join('');
