@@ -103,7 +103,7 @@ class Rpc:
             raise SystemExit(f"{method} failed: {r}")
         return r[0]["result"]
 
-    def resolve_all(self, items, make_call, extract, label):
+    def resolve_all(self, items, make_call, extract, label, on_batch=None):
         """
         Batch every item and RETRY the ones that did not come back. Aborts rather
         than returning a partial map.
@@ -126,6 +126,7 @@ class Rpc:
                         v = None
                     if v is None: fail.append(x); continue
                     out[x] = v; got.add(x)
+                    if on_batch is not None: on_batch(x, v)
                 fail += [x for x in ch if x not in got and x not in fail]
             todo = sorted(set(fail), key=str)
             print(f"    {label} round {rnd}: {len(out):,}/{len(items):,}, "
@@ -236,6 +237,14 @@ class Rpc:
         if todo:
             print(f"    receipts: {len(have):,} cached, {len(todo):,} to fetch")
             fh = open(ck, "a")
+            written = [0]
+            def sink(h, v):
+                # INCREMENTAL CHECKPOINT. Writing only after the whole stage
+                # succeeded meant a crash 4,900 receipts in lost all of them,
+                # which is not "checkpointed at every expensive stage".
+                fh.write(json.dumps({"k": h, "v": v}) + "\n")
+                written[0] += 1
+                if written[0] % 200 == 0: fh.flush()
             got = self.resolve_all(todo,
                 lambda j, h: {"jsonrpc": "2.0", "id": j,
                               "method": "eth_getTransactionReceipt", "params": [h]},
@@ -247,9 +256,8 @@ class Rpc:
                                           if l["address"].lower() in keep_addrs
                                           and l["topics"][0].lower() == TOPICS["transfer"]
                                           and len(l["topics"]) >= 3]}) if r else None,
-                "receipts")
-            for h, v in got.items():
-                fh.write(json.dumps({"k": h, "v": v}) + "\n"); have[h] = v
+                "receipts", on_batch=sink)
+            have.update(got)
             fh.close()
         return have
 
@@ -337,9 +345,24 @@ def run(args):
         if first is None: raise SystemExit("no swaps found in this pool")
         fb = int(first["blockNumber"], 16); ft = ts(fb)
         end = ft + int(args.window_hours * 3600)
-        return {"head": head, "first_block": fb, "first_ts": ft, "end_ts": end,
-                "boundary_block": find(end, fb, head), "method": "binary search on block timestamps"}
+        bnd = find(end, fb, head)
+        # COVERAGE IS MEASURED, NOT ASSERTED. A pool younger than --window-hours
+        # cannot fill its window: the boundary collapses onto head and the run
+        # silently analyses a short window unless this is checked.
+        head_ts = ts(head)
+        return {"head": head, "head_ts": head_ts, "first_block": fb, "first_ts": ft,
+                "end_ts": end, "boundary_block": bnd,
+                "boundary_ts": ts(bnd), "fully_covered": head_ts >= end,
+                "method": "binary search on block timestamps"}
     W = S.json("window.json", win)
+    covered_h = (min(W.get("boundary_ts", W["end_ts"]), W["end_ts"]) - W["first_ts"]) / 3600.0
+    if not W.get("fully_covered", True):
+        L.record("window_coverage",
+                 f"NOT FULLY COVERED: chain head is {utc(W.get('head_ts', 0))}, window ends "
+                 f"{utc(W['end_ts'])}; only {covered_h:.2f}h of {args.window_hours}h available")
+    else:
+        L.record("window_coverage",
+                 f"fully covered: {covered_h:.2f}h of {args.window_hours}h requested")
     L.record("window_binary_search",
              f"blocks {W['first_block']:,}..{W['boundary_block']:,} "
              f"({utc(W['first_ts'])} -> {utc(W['end_ts'])}), {W['method']}")
@@ -718,8 +741,11 @@ def report(C, D):
     P("=" * 72)
     P(f"\nWINDOW  {C['args'].window_hours}h   blocks {W['first_block']:,}..{W['boundary_block']:,}")
     P(f"  {utc(W['first_ts'])} -> {utc(W['end_ts'])}")
-    P(f"  swaps in window {len(C['sw']):,}   unique transactions {len(C['by_tx']):,}   "
-      f"fully covered yes (pulled first block to boundary inclusive)")
+    fc = W.get("fully_covered", True)
+    ch = (min(W.get("boundary_ts", W["end_ts"]), W["end_ts"]) - W["first_ts"]) / 3600.0
+    P(f"  swaps in window {len(C['sw']):,}   unique transactions {len(C['by_tx']):,}")
+    P(f"  fully_covered = {str(fc).lower()}   {ch:.2f}h of {C['args'].window_hours}h covered"
+      + ("" if fc else f"   ** the chain has not reached the window end ({utc(W['end_ts'])}) **"))
     P(f"\nSUPPLY  first {C['SUP']['first']:,.4f}   last {C['SUP']['last']:,.4f}   "
       f"{C['SUP']['mints']} mints / {C['SUP']['burns']} burns   reconciles")
     P(f"\nQUOTE   {C['QU']['basis']}")
@@ -888,7 +914,8 @@ def build_payload(C, D):
            "window_start_utc": utc(W["first_ts"]), "window_end_utc": utc(W["end_ts"]),
            "first_swap_block": W["first_block"], "boundary_block": W["boundary_block"],
            "swaps_in_window": len(C["sw"]), "unique_txs": len(C["by_tx"]),
-           "fully_covered": True, "mcap_threshold_usd": args.mcap_threshold,
+           "fully_covered": bool(W.get("fully_covered", True)),
+           "mcap_threshold_usd": args.mcap_threshold,
            "threshold_binding": D["binding"],
            "threshold_note": (f"highest first-buy mcap was ${max(D['mc'].values()):,.0f} against a "
                               f"${args.mcap_threshold:,.0f} ceiling, {len(D['under']):,} of "
@@ -915,6 +942,8 @@ def main():
     ap.add_argument("--load", action="store_true",
                     help="build the load payload; still never writes to Postgres itself")
     a = ap.parse_args()
+    try: sys.stdout.reconfigure(line_buffering=True)   # progress visible when backgrounded
+    except Exception: pass
     if a.chain not in CFG["chains"]:
         raise SystemExit(f"chain {a.chain!r} not in config/pipeline.yaml")
     C = run(a)

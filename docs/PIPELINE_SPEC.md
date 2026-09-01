@@ -239,6 +239,7 @@ the largest empty run, cut above it. PONS 2..19 then 95 (gap 76); AI 2..11 then
 | match rate split by attribution path | a path-specific gap accuses the decoder |
 | circular-arb / exclusion counts | reported as numbers, including zero |
 | cross-route quote price agreement | order-of-magnitude sanity on an unfamiliar quote |
+| window coverage measured against chain head | the pool was old enough to fill the window |
 | dry-run counts, then live queries from a fresh connection | the write actually happened |
 | union invariant `count(*) == count(distinct (wallet, token))` | no fan-out |
 | served page executed in a DOM, rows counted | the page works |
