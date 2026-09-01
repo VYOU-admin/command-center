@@ -37,7 +37,7 @@ import type { PoolClient } from '../store/db.js';
 import { migrate } from './new-token-watch/schema.js';
 import { loadWatchlist, type WatchWallet } from './new-token-watch/watchlist.js';
 import { PublicRpc, topicAddress, padAddress, type RpcLog } from './new-token-watch/rpc.js';
-import { renderMessage, type HitRow } from './new-token-watch/message.js';
+import { renderMessages, type HitRow, type MessagePart } from './new-token-watch/message.js';
 
 interface Hit {
   chain: string;
@@ -65,8 +65,12 @@ interface RunResult {
    * dropped despite being inside the 2-hour rule.
    */
   pools: { token: string; block: number; at: Date; poolId: string | null }[];
-  /** Rendered in fetch(); null when the cycle produced no hits. */
-  message: string | null;
+  /**
+   * Rendered in fetch(); empty when the cycle produced no hits. Several parts
+   * when the per-token list will not fit one embed -- it splits rather than
+   * dropping tokens.
+   */
+  parts: MessagePart[];
   stats: Record<string, number>;
   sweptFrom: number;
   sweptTo: number;
@@ -233,7 +237,7 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     const out = [...agg.values()];
 
     // ---- render the hourly message (no send here; the spine flushes it) ---
-    let message: string | null = null;
+    let parts: MessagePart[] = [];
     if (out.length) {
       const cl = await ctx.db.query(
         `select lower(wallet) w, min(cluster_id) cid from wallet_clusters
@@ -274,7 +278,7 @@ const newTokenWatch: SourceAdapter<RunResult> = {
       const start = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000);
       const label = `${start.toISOString().slice(11, 16)}–`
         + `${new Date(start.getTime() + 3_600_000).toISOString().slice(11, 16)} UTC`;
-      message = renderMessage(rows, label);
+      parts = renderMessages(rows, label);
     }
 
     ctx.log.info('new-token watch cycle', {
@@ -285,7 +289,7 @@ const newTokenWatch: SourceAdapter<RunResult> = {
     });
     return [{
       hits: out,
-      message,
+      parts,
       pools: [...created.entries()].map(([token, e]) => ({
         token, block: e.block, poolId: e.poolId,
         at: new Date((tHead - (head - e.block) * blockSeconds) * 1000),
@@ -368,18 +372,19 @@ const newTokenWatch: SourceAdapter<RunResult> = {
 
     // Queued, not sent: the spine flushes alerts after the transaction commits.
     const sendAlerts = ctx.options.send_alerts !== false;
-    if (r.message && sendAlerts) {
-      const [head, ...body] = r.message.split('\n');
-      ctx.queueAlert({
+    const chars = r.parts.reduce((n, p) => n + p.description.length, 0);
+    if (r.parts.length && sendAlerts) {
+      // One queued alert per part; the spine posts each as its own message, so a
+      // long per-token list splits instead of being cut.
+      for (const p of r.parts) {
         // 'warning' is this spine's convention for a content alert; the levels
         // are critical/warning/recovery and there is no informational tier.
-        level: 'warning',
-        title: (head ?? 'New-token buys').replace(/\*\*/g, ''),
-        description: body.join('\n').trim(),
-      });
-    } else if (r.message) {
-      ctx.log.info('send_alerts is false; message rendered but not queued',
-        { chars: r.message.length });
+        ctx.queueAlert({ level: 'warning', title: p.title, description: p.description });
+      }
+      ctx.log.info('queued alert parts', { parts: r.parts.length, chars });
+    } else if (r.parts.length) {
+      ctx.log.info('send_alerts is false; parts rendered but not queued',
+        { parts: r.parts.length, chars });
     } else {
       ctx.log.info('no hits this cycle; nothing queued');
     }
