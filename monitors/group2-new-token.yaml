@@ -33,7 +33,7 @@ name: Group 2 New Token
 source: group2-new-token
 enabled: true
 
-schedule: 15m
+schedule: 5m
 
 alerts:
   # Content alerts go to DISCORD_WEBHOOK_NEWTOKEN. Failure and recovery alerts
@@ -76,7 +76,12 @@ options:
   # A TOKEN address is not a valid pair address and returns nothing.
   dexscreener_chain: robinhood
 
-  max_pool_age_minutes: 120
+  # Eligibility window. 60, not 120: measured on a live window, the 60-120m
+  # band held 29.4% of eligible TOKENS but only 13.9% of the qualifying
+  # transactions, and transactions are what the receipt phase costs. A pool
+  # first swept in this cycle is admitted whatever its age, so shortening this
+  # cannot make a launch missed during downtime unrecoverable.
+  max_pool_age_minutes: 60
   lookback_hours: 1
   # Only needs to exceed max_pool_age_minutes. Anything older than the swept
   # range is dropped by the age rule anyway, so a longer bootstrap buys nothing

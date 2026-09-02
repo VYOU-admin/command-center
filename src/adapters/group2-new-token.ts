@@ -184,11 +184,25 @@ const adapter: SourceAdapter<RunResult> = {
     // the poolId lookup later costs no extra log queries -- only receipts, and
     // only for tokens that survive the re-alert rule.
     const txsOf = new Map<string, string[]>();
+    // A POOL FIRST SWEPT IN THIS CYCLE IS ALWAYS ELIGIBLE, whatever its age.
+    // The age rule is about staleness, not about punishing downtime: if the
+    // monitor was off for ninety minutes, the cursor-based sweep catches those
+    // blocks up (bounded by bootstrap_hours) and the pools created in the gap
+    // are already older than the window the moment we first see them. Without
+    // this they would be detected, cached, and then silently dropped -- a launch
+    // missed for no reason except that we were not watching at the time.
+    // created_block >= sweptFrom is exactly "this cycle's sweep is the first one
+    // that could have seen it", and it uses only this monitor's own cursor.
+    let admittedByGrace = 0;
     for (const l of venue) {
       const token = l.address.toLowerCase();
       const r = resolved.get(token);
       if (!r) continue;
-      if (head - r.block > maxAgeBlocks) continue;
+      const firstSweptNow = r.block >= sweptFrom;
+      if (head - r.block > maxAgeBlocks) {
+        if (!firstSweptNow) continue;
+        if (!eligible.has(token)) admittedByGrace++;
+      }
       eligible.add(token);
       const wallet = topicAddress(l.topics[2]);
       if (!inList.has(wallet)) continue;
@@ -261,6 +275,7 @@ const adapter: SourceAdapter<RunResult> = {
       tokensDetected: distinct.length, tokensEligibleAge: eligible.size,
       tokensWithBuyer: withBuyer.length, tokensAlerted: lines.length,
       tokensSuppressed: suppressed, omittedNoPoolId, omittedNoPair, duplicateSymbols,
+      admittedByGrace,
       linkedFromSwap, linkedFromFallback, multiPoolIdTokens,
       ambiguousReceipts: swap.ambiguousReceipts, missingReceipts: swap.missingReceipts,
       extraRpcRequests: swap.requests,
@@ -345,13 +360,14 @@ const adapter: SourceAdapter<RunResult> = {
          tokens_eligible_age, tokens_with_buyer, tokens_alerted, tokens_suppressed,
          omitted_no_pool_id, omitted_no_pair, duplicate_symbols, linked_from_swap,
          linked_from_fallback, multi_poolid_tokens, ambiguous_receipts,
-         extra_rpc_requests, swept_from, swept_to, duration_ms, message_text)
-       values (now(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+         extra_rpc_requests, admitted_by_grace, swept_from, swept_to, duration_ms, message_text)
+       values (now(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
       [s.head, s.blockSeconds, s.requests, s.watchlistSize, s.transfers, s.venueTransfers,
        s.tokensDetected, s.tokensEligibleAge, s.tokensWithBuyer, s.tokensAlerted,
        s.tokensSuppressed, s.omittedNoPoolId, s.omittedNoPair, s.duplicateSymbols,
        s.linkedFromSwap, s.linkedFromFallback, s.multiPoolIdTokens, s.ambiguousReceipts,
-       s.extraRpcRequests, r.sweptFrom, r.sweptTo, s.durationMs, r.messageText || null]);
+       s.extraRpcRequests, s.admittedByGrace, r.sweptFrom, r.sweptTo, s.durationMs,
+       r.messageText || null]);
 
     if (r.parts.length && sendAlerts) {
       for (const p of r.parts)
