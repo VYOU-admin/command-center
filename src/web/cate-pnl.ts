@@ -194,7 +194,7 @@ export function renderCatePnlPage(
 <style>
   :root { color-scheme: light dark;
     --bg:#0e1116; --panel:#161b22; --border:#262d38; --text:#e6edf3;
-    --muted:#8b949e; --link:#6cb6ff; --ok:#2ecc71; --warn:#f2a33c; --bad:#ff6b6b; --idle:#6e7681; }
+    --muted:#8b949e; --link:#6cb6ff; --ok:#2ecc71; --warn:#f2a33c; --bad:#ff6b6b; --idle:#6e7681; --sol:#4aa3ff; }
   @media (prefers-color-scheme: light) {
     :root { --bg:#f6f8fa; --panel:#fff; --border:#d8dee4; --text:#1f2328; --muted:#636c76; --link:#0969da; } }
   * { box-sizing:border-box; }
@@ -209,12 +209,20 @@ export function renderCatePnlPage(
   .tabs button.on { color:var(--link); border-bottom-color:var(--link); }
   /* Robinhood-chain views. Chain comes from the rows, not a hardcoded list, so a
      new Solana token never turns green by accident. */
-  .tabs button.rh { color:var(--ok); }
-  .tabs button.rh.on { color:var(--ok); border-bottom-color:var(--ok); }
+  /* Tab colour is driven by the CHAIN stored on each token's rows, never by a
+     hardcoded token list -- a token loaded tomorrow gets the right colour with
+     no code change. .rh is kept because the Cross-token tab is Robinhood-scoped
+     and has no rows of its own to read a chain from. */
+  .tabs button.rh, .tabs button.ch-robinhood { color:var(--ok); }
+  .tabs button.rh.on, .tabs button.ch-robinhood.on { color:var(--ok); border-bottom-color:var(--ok); }
+  .tabs button.ch-solana { color:var(--sol); }
+  .tabs button.ch-solana.on { color:var(--sol); border-bottom-color:var(--sol); }
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-bottom:14px; }
   .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
   .card h3 { margin:0 0 5px; font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600; }
   .card .big { margin:0; font-size:20px; font-variant-numeric:tabular-nums; }
+  .fcount { display:inline-block; margin-left:6px; padding:0 6px; border-radius:8px;
+    background:var(--warn); color:#1f2328; font-size:11px; font-weight:700; }
   .filters { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
   .frow { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; }
   .f { display:flex; flex-direction:column; gap:3px; }
@@ -472,10 +480,18 @@ function filtered(){
       if(lo!==undefined && lo!=='' ){ if(nz(r[kk]) || Number(r[kk])<Number(lo)) return false; }
       if(hi!==undefined && hi!=='' ){ if(nz(r[kk]) || Number(r[kk])>Number(hi)) return false; }
     }
+    // DATETIME, not date. These windows are often under 48 hours, which a
+    // date-only bound cannot narrow at all. Both sides are normalised to
+    // YYYY-MM-DDTHH:MM:SS before comparing: stored stamps use either a space or
+    // a T separator, and ' ' sorts before 'T', so comparing them raw would
+    // silently drop rows whose separator differed from the input's.
     for(const [k,f] of [[fbK,'fb'],[lsK,'ls']]){
       const lo=F[f+'_from'], hi=F[f+'_to'];
-      if(lo){ if(nz(r[k]) || String(r[k]).slice(0,10) < lo) return false; }
-      if(hi){ if(nz(r[k]) || String(r[k]).slice(0,10) > hi) return false; }
+      if(!lo && !hi) continue;
+      if(nz(r[k])) return false;
+      const v=String(r[k]).replace(' ','T').replace('Z','').slice(0,19);
+      if(lo && v < String(lo).replace(' ','T').slice(0,19)) return false;
+      if(hi && v > String(hi).replace(' ','T').slice(0,19)) return false;
     }
     return true;
   });
@@ -568,6 +584,24 @@ function summary(rows){
   return {n:rows.length, win:p.filter(x=>x>0).length, lose:p.filter(x=>x<0).length,
           sum:p.reduce((a,b)=>a+b,0), med, tags:new Set(rows.filter(r=>r.tag).map(r=>r.tag)).size};
 }
+/** How many filters are actually narrowing the set, for the collapsed header. */
+function activeFilterCount(){
+  var n=0;
+  for(const k in F){
+    const v=F[k];
+    if(v===undefined || v===null || v==='') continue;
+    if((k==='tagMode'||k==='sold'||k==='tt') && v==='all') continue;
+    n++;
+  }
+  return n;
+}
+var showFilters = false;   // collapsed on load; a hidden filter is announced by the count
+function filterToggle(){
+  const n=activeFilterCount();
+  return '<div class="toolbar"><button class="btn" id="togglef">'+
+    (showFilters?'Hide':'Show')+' filters'+
+    (n?' <span class="fcount">'+n+' active</span>':'')+'</button></div>';
+}
 function filterBar(){
   const tags=[...new Set(tokenRows().filter(r=>r.tag).map(r=>r.tag))].sort();
   const numF=NUMCOLS.map(([k,t])=>
@@ -591,11 +625,11 @@ function filterBar(){
       ['all','yes','no'].map(v=>'<option value="'+v+'"'+(F.sold===v?' selected':'')+'>'+
         {all:'All',yes:'Yes',no:'No'}[v]+'</option>').join('')+'</select></div>'+
     '<div class="f"><label>First buy</label><div class="pair">'+
-      '<input class="date" type="date" data-f="fb_from" value="'+(F.fb_from??'')+'"><span>–</span>'+
-      '<input class="date" type="date" data-f="fb_to" value="'+(F.fb_to??'')+'"></div></div>'+
+      '<input class="date" type="datetime-local" step="1" data-f="fb_from" value="'+(F.fb_from??'')+'"><span>–</span>'+
+      '<input class="date" type="datetime-local" step="1" data-f="fb_to" value="'+(F.fb_to??'')+'"></div></div>'+
     '<div class="f"><label>Last sell</label><div class="pair">'+
-      '<input class="date" type="date" data-f="ls_from" value="'+(F.ls_from??'')+'"><span>–</span>'+
-      '<input class="date" type="date" data-f="ls_to" value="'+(F.ls_to??'')+'"></div></div>'+
+      '<input class="date" type="datetime-local" step="1" data-f="ls_from" value="'+(F.ls_from??'')+'"><span>–</span>'+
+      '<input class="date" type="datetime-local" step="1" data-f="ls_to" value="'+(F.ls_to??'')+'"></div></div>'+
     numF +
     '<div class="f"><label>&nbsp;</label><button class="btn" id="clearf">Clear filters</button></div>'+
     '</div></div>';
@@ -642,7 +676,7 @@ function renderTable(){
       '<div class="card"><h3>Median PnL</h3><p class="big '+(s.med>=0?'pos':'neg')+'">'+s.med.toFixed(3)+'</p></div>'+
       '<div class="card"><h3>Tags</h3><p class="big">'+s.tags+'</p></div>'+
     '</div>'+
-    filterBar()+
+    filterToggle()+(showFilters?filterBar():'')+
     '<div class="toolbar">'+
       (isU?'':'<button class="btn '+(mode==='flat'?'pri':'')+'" id="m-flat">Sort by column</button>'+
       '<button class="btn '+(mode==='group'?'pri':'')+'" id="m-group">Group by tag</button>')+
@@ -870,6 +904,15 @@ function renderCross(){
  */
 var oSub = 1;              // which behaviour sub-tab is open
 var oFilters = false;      // filter block starts collapsed
+/** Active count for the GROUP panel: only the filters that panel exposes. */
+function oActiveCount(){
+  var n=0;
+  for(const k of ['oq','omin','omax']){
+    const v=F[k];
+    if(v!==undefined && v!==null && v!=='') n++;
+  }
+  return n;
+}
 
 var _gmemo = null;
 function groupsOf(w){
@@ -1095,7 +1138,8 @@ function renderOdysseus(){
       card('Current price',px!=null?('$'+Number(px).toPrecision(4)):'—','read at '+esc(pwhen))+
       card('Current market cap',cap!=null?('$'+cap.toLocaleString('en-US',{maximumFractionDigits:0})):'—','read at '+esc(pwhen))+
     '</div>'+
-    '<div class="toolbar"><button class="btn" id="ofilt">'+(oFilters?'Hide':'Show')+' filters</button>'+
+    '<div class="toolbar"><button class="btn" id="ofilt">'+(oFilters?'Hide':'Show')+' filters'+
+      (oActiveCount()?' <span class="fcount">'+oActiveCount()+' active</span>':'')+'</button>'+
       '<span style="flex:1"></span><button class="btn" id="export">Export CSV</button></div>'+
     (oFilters?('<div class="filters"><div class="frow">'+
       '<div class="f"><label>Wallet search</label><input class="txt" type="text" placeholder="partial address" data-f="oq" value="'+(F.oq??'')+'"></div>'+
@@ -1195,7 +1239,7 @@ function renderGroups(){
 function render(){
   document.getElementById('tabs').innerHTML =
     '<button class="'+(tab==='__all'?'on':'')+'" data-tab="__all">All wallets</button>'+
-    TOKENS.map(t=>'<button class="'+(tab===t?'on ':'')+(chainOf(t)==='robinhood'?'rh':'')+'" data-tab="'+t+'">'+esc(t)+'</button>').join('')+
+    TOKENS.map(t=>'<button class="'+(tab===t?'on ':'')+'ch-'+esc(chainOf(t)||'unknown')+'" data-tab="'+t+'">'+esc(t)+'</button>').join('')+
     '<button class="'+(tab==='__cross'?'on ':'')+'rh" data-tab="__cross">Cross-token</button>'+
     '<button class="'+(tab==='__groups'?'on':'')+'" data-tab="__groups">Groups</button>';
   if(tab==='__cross') renderCross();
@@ -1303,6 +1347,8 @@ document.addEventListener('click',(e)=>{
   if(tb){ tab=tb.dataset.tab; page=1; sel.clear(); render(); return; }
   if(e.target.id==='clearf'){ for(const k of Object.keys(F)) delete F[k]; page=1; render(); return; }
   if(e.target.id==='ofilt'){ oFilters=!oFilters; render(); return; }
+  if(e.target.id==='togglef'||e.target.closest&&e.target.closest('#togglef')){
+    showFilters=!showFilters; render(); return; }
   const os=e.target.closest('[data-osub]');
   if(os){ oSub=Number(os.dataset.osub); render(); return; }
   if(e.target.id==='export'){ exportCsv(); return; }
