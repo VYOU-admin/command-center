@@ -70,7 +70,7 @@ const usd = (n: number): string =>
 const DEXSCREENER = 'https://dexscreener.com/robinhood/';
 const BLOCKSCOUT = 'https://robinhoodchain.blockscout.com/address/';
 
-function tokenLink(h: { token: string; symbol?: string | null; poolId?: string | null }): string {
+export function tokenLink(h: { token: string; symbol?: string | null; poolId?: string | null }): string {
   const label = h.symbol ?? shortAddr(h.token);
   return h.poolId ? `[${label}](${DEXSCREENER}${h.poolId})` : label;
 }
