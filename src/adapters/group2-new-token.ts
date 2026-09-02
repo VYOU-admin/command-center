@@ -50,6 +50,7 @@ interface RunResult {
   alerted: Alerted[];
   pools: { token: string; block: number; poolId: string; at: Date }[];
   picks: PoolPick[];
+  truncations: { token: string; transfersSeen: number; receiptsFetched: number }[];
   parts: string[];
   stats: Record<string, number>;
   sweptFrom: number;
@@ -61,25 +62,27 @@ const num = (o: Record<string, unknown>, k: string, d: number): number => {
   const v = o[k]; return typeof v === 'number' && Number.isFinite(v) ? v : d;
 };
 
-const adapter: SourceAdapter<RunResult> = {
-  type: 'group2-new-token',
-  validate(o, id) {
-    requireString(o, 'chain', id);
-    requireString(o, 'rpc_url', id);
-    requireString(o, 'pool_manager', id);
-    requireString(o, 'initialize_topic', id);
-    requireString(o, 'transfer_topic', id);
-    requireString(o, 'swap_topic', id);
-    requireString(o, 'dashboard_url', id);
-    requireString(o, 'dexscreener_chain', id);
-    if (num(o, 'min_realized_pnl_usd', -1) < 0)
-      throw new Error(`monitor "${id}": options.min_realized_pnl_usd must be >= 0`);
-    if (num(o, 'watchlist_chunk', 0) < 1 || num(o, 'watchlist_chunk', 0) > 400)
-      throw new Error(`monitor "${id}": options.watchlist_chunk must be 1..400 (measured: 500 times out)`);
+/** Mutable snapshot of how far the current cycle got, for the abort path. */
+const ABORT = {
+  started: Date.now(), requests: 0, watchlistSize: 0, transfers: 0, venueTransfers: 0,
+  tokensDetected: 0, tokensEligibleAge: 0, tokensWithBuyer: 0, tokensSuppressed: 0,
+  sweepReq: 0, transferReq: 0, receiptReq: 0,
+  reset(): void {
+    this.started = Date.now(); this.requests = 0; this.watchlistSize = 0; this.transfers = 0;
+    this.venueTransfers = 0; this.tokensDetected = 0; this.tokensEligibleAge = 0;
+    this.tokensWithBuyer = 0; this.tokensSuppressed = 0;
+    this.sweepReq = 0; this.transferReq = 0; this.receiptReq = 0;
   },
-  migrate,
+  durationMs(): number { return Date.now() - this.started; },
+  snapshot(): Record<string, number> {
+    return { requests: this.requests, transfers: this.transfers,
+      tokensDetected: this.tokensDetected, tokensWithBuyer: this.tokensWithBuyer,
+      sweepReq: this.sweepReq, transferReq: this.transferReq, receiptReq: this.receiptReq };
+  },
+};
 
-  async fetch(ctx: AdapterContext): Promise<RunResult[]> {
+async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
+    ABORT.reset();
     const o = ctx.options;
     const chain = String(o.chain);
     const PM = String(o.pool_manager).toLowerCase();
@@ -94,6 +97,10 @@ const adapter: SourceAdapter<RunResult> = {
     const sweepWindow = num(o, 'sweep_block_window', 20_000);
     const minPnl = num(o, 'min_realized_pnl_usd', 1000);
     const started = Date.now();
+    // Carried outside the try so the abort path can write what it got to.
+    let requestsExtra = 0;
+    const progress: Record<string, number> = { sweep: 0, transfers: 0, receipts: 0 };
+    const mark = (k: string, v: number): void => { progress[k] = v; };
 
     const rpc = new PublicRpc(String(o.rpc_url), num(o, 'min_interval_ms', 4000), ctx.log, ctx.signal);
     const head = await rpc.blockNumber();
@@ -124,6 +131,7 @@ const adapter: SourceAdapter<RunResult> = {
       : [];
     // topics[1] is the poolId, which is what DexScreener uses as the pair
     // address on v4 and therefore what a link needs.
+    mark('sweep', rpc.requests); ABORT.sweepReq = rpc.requests; ABORT.requests = rpc.requests;
     const created = new Map<string, { block: number; poolId: string }>();
     for (const l of initLogs) {
       const block = Number.parseInt(l.blockNumber, 16);
@@ -136,6 +144,7 @@ const adapter: SourceAdapter<RunResult> = {
 
     // ---- inbound transfers to the watchlist, no staggering ----------------
     const watchlist = await loadWatchlist(ctx.db, chain, minPnl);
+    ABORT.watchlistSize = watchlist.length;
     const inList = new Set(watchlist);
     ctx.log.info('watchlist', { wallets: watchlist.length, minRealizedUsd: minPnl,
       chunks: Math.ceil(watchlist.length / chunkSize) });
@@ -149,7 +158,11 @@ const adapter: SourceAdapter<RunResult> = {
     }
     // A TRANSFER IS NOT A BUY. Only tokens handed over by the venue contract
     // count; an airdrop arrives as an inbound transfer too.
+    mark('transfers', rpc.requests - progress.sweep!);
+    ABORT.transferReq = rpc.requests - ABORT.sweepReq; ABORT.requests = rpc.requests;
+    ABORT.transfers = transfers.length;
     const venue = transfers.filter((l) => topicAddress(l.topics[1]) === PM);
+    ABORT.venueTransfers = venue.length;
 
     // ---- pool age, cache first --------------------------------------------
     const distinct = [...new Set(venue.map((l) => l.address.toLowerCase()))];
@@ -225,13 +238,25 @@ const adapter: SourceAdapter<RunResult> = {
     }
     const candidates = withBuyer.filter((t) => (buyers.get(t)?.size ?? 0) > (highs.get(t) ?? 0));
     const suppressed = withBuyer.length - candidates.length;
+    ABORT.tokensDetected = distinct.length; ABORT.tokensEligibleAge = eligible.size;
+    ABORT.tokensWithBuyer = withBuyer.length; ABORT.tokensSuppressed = suppressed;
 
     // ---- which pool to link -----------------------------------------------
     // THE POOL THE WALLETS ACTUALLY TRADED, not the earliest one created. Only
     // candidates are looked up, which is what keeps the receipt cost small.
     const work = new Map<string, string[]>();
     for (const t of candidates) { const h = txsOf.get(t); if (h?.length) work.set(t, h); }
-    const swap = await resolveSwapPools(rpc, PM, SWAP, work, num(o, 'receipt_batch', 25));
+    const swap = await resolveSwapPools(work, {
+      url: String(o.rpc_url), poolManager: PM, swapTopic: SWAP,
+      batchSize: num(o, 'receipt_batch', 25),
+      concurrency: num(o, 'receipt_concurrency', 2),
+      intervalMs: num(o, 'receipt_interval_ms', 2000),
+      capPerToken: num(o, 'receipt_cap_per_token', 50),
+      signal: ctx.signal,
+    });
+    requestsExtra = swap.requests;
+    progress.receipts = swap.requests;
+    ABORT.receiptReq = swap.requests; ABORT.requests += swap.requests;
 
     // Confirm the swap pool is one DexScreener actually indexes; that call also
     // supplies the symbol, so it replaces a per-token eth_call.
@@ -278,7 +303,10 @@ const adapter: SourceAdapter<RunResult> = {
       admittedByGrace,
       linkedFromSwap, linkedFromFallback, multiPoolIdTokens,
       ambiguousReceipts: swap.ambiguousReceipts, missingReceipts: swap.missingReceipts,
-      extraRpcRequests: swap.requests,
+      extraRpcRequests: swap.requests, receiptRateLimited: swap.rateLimited,
+      truncatedTokens: swap.truncations.length,
+      phaseSweepReq: progress.sweep ?? 0, phaseTransferReq: progress.transfers ?? 0,
+      phaseReceiptReq: swap.requests,
       dexscreenerFailedBatches: failedBatches, durationMs: Date.now() - started,
     };
     ctx.log.info('group2 new-token cycle', stats);
@@ -290,7 +318,60 @@ const adapter: SourceAdapter<RunResult> = {
         at: new Date((tHead - (head - e.block) * blockSeconds) * 1000),
       })),
       picks, parts, stats, sweptFrom, sweptTo: head, messageText,
+      truncations: swap.truncations,
     }];
+}
+
+
+const adapter: SourceAdapter<RunResult> = {
+  type: 'group2-new-token',
+  validate(o, id) {
+    requireString(o, 'chain', id);
+    requireString(o, 'rpc_url', id);
+    requireString(o, 'pool_manager', id);
+    requireString(o, 'initialize_topic', id);
+    requireString(o, 'transfer_topic', id);
+    requireString(o, 'swap_topic', id);
+    requireString(o, 'dashboard_url', id);
+    requireString(o, 'dexscreener_chain', id);
+    if (num(o, 'min_realized_pnl_usd', -1) < 0)
+      throw new Error(`monitor "${id}": options.min_realized_pnl_usd must be >= 0`);
+    if (num(o, 'watchlist_chunk', 0) < 1 || num(o, 'watchlist_chunk', 0) > 400)
+      throw new Error(`monitor "${id}": options.watchlist_chunk must be 1..400 (measured: 500 times out)`);
+  },
+  migrate,
+
+  async fetch(ctx: AdapterContext): Promise<RunResult[]> {
+    // AN ABORTED CYCLE MUST LEAVE EVIDENCE. The scheduler only reaches persist()
+    // after fetch() resolves, so a run killed at MAX_RUN_MS used to write nothing
+    // at all -- the worst cycles were the ones with no record. This writes the
+    // partial funnel and the abort reason DIRECTLY (outside persist's
+    // transaction, which will never run) and then rethrows, so the run is still
+    // recorded as a failure rather than being quietly downgraded to a success.
+    // The row is flagged aborted so it can never be mistaken for a complete one.
+    try {
+      return await runCycle(ctx);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      try {
+        await ctx.db.query(
+          `insert into group2_cycle_stats (ran_at, requests, watchlist_size, transfers_seen,
+             venue_transfers, tokens_detected, tokens_eligible_age, tokens_with_buyer,
+             tokens_alerted, tokens_suppressed, omitted_no_pair, duration_ms,
+             phase_sweep_req, phase_transfer_req, phase_receipt_req,
+             aborted, abort_reason)
+           values (now(),$1,$2,$3,$4,$5,$6,$7,0,$8,0,$9,$10,$11,$12,true,$13)`,
+          [ABORT.requests, ABORT.watchlistSize, ABORT.transfers, ABORT.venueTransfers,
+           ABORT.tokensDetected, ABORT.tokensEligibleAge, ABORT.tokensWithBuyer,
+           ABORT.tokensSuppressed, ABORT.durationMs(), ABORT.sweepReq, ABORT.transferReq,
+           ABORT.receiptReq, msg.slice(0, 300)]);
+        ctx.log.warn('cycle aborted; partial stats written', { reason: msg, ...ABORT.snapshot() });
+      } catch (e2) {
+        ctx.log.error('could not write aborted-cycle stats',
+          { reason: msg, writeError: e2 instanceof Error ? e2.message : String(e2) });
+      }
+      throw err;
+    }
   },
 
   async persist(ctx, client: PoolClient, records): Promise<number> {
@@ -360,14 +441,17 @@ const adapter: SourceAdapter<RunResult> = {
          tokens_eligible_age, tokens_with_buyer, tokens_alerted, tokens_suppressed,
          omitted_no_pool_id, omitted_no_pair, duplicate_symbols, linked_from_swap,
          linked_from_fallback, multi_poolid_tokens, ambiguous_receipts,
-         extra_rpc_requests, admitted_by_grace, swept_from, swept_to, duration_ms, message_text)
-       values (now(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+         extra_rpc_requests, admitted_by_grace, receipt_rate_limited, truncated_tokens,
+         truncations, phase_sweep_req, phase_transfer_req, phase_receipt_req, aborted,
+         swept_from, swept_to, duration_ms, message_text)
+       values (now(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,false,$27,$28,$29,$30)`,
       [s.head, s.blockSeconds, s.requests, s.watchlistSize, s.transfers, s.venueTransfers,
        s.tokensDetected, s.tokensEligibleAge, s.tokensWithBuyer, s.tokensAlerted,
        s.tokensSuppressed, s.omittedNoPoolId, s.omittedNoPair, s.duplicateSymbols,
        s.linkedFromSwap, s.linkedFromFallback, s.multiPoolIdTokens, s.ambiguousReceipts,
-       s.extraRpcRequests, s.admittedByGrace, r.sweptFrom, r.sweptTo, s.durationMs,
-       r.messageText || null]);
+       s.extraRpcRequests, s.admittedByGrace, s.receiptRateLimited, s.truncatedTokens,
+       JSON.stringify(r.truncations), s.phaseSweepReq, s.phaseTransferReq, s.phaseReceiptReq,
+       r.sweptFrom, r.sweptTo, s.durationMs, r.messageText || null]);
 
     if (r.parts.length && sendAlerts) {
       for (const p of r.parts)

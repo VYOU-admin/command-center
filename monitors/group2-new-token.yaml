@@ -62,6 +62,30 @@ options:
   # 08:13 cycle = 1 extra request, and at most 7 on a cold cache.
   receipt_batch: 25
 
+  # RECEIPT PHASE THROUGHPUT. Measured over ten cycles, wall-clock tracks
+  # (requests - 1) x interval to within a second, so the cycle is pacing-bound
+  # and receipts were 60% of the requests in the last completed cycle.
+  #
+  # Concurrency alone cannot help while one global spacing governs every
+  # request: throughput is 1/interval whatever the concurrency. So both knobs
+  # are here, and the receipt phase no longer shares min_interval_ms.
+  #
+  # concurrency 2, NOT 4: the endpoint's concurrency limit is UNMEASURED and
+  # undocumented. What IS measured is its rate tolerance for eth_getLogs -- 0 of
+  # 20 refused at 4,000 ms, 6 of 20 at 2,500 ms -- and cycles at 16:22 and 16:37
+  # already lost 187 s and 124 s to 429/5xx backoff at the current pacing. So
+  # this starts conservative and receipt_rate_limited is recorded every cycle.
+  receipt_concurrency: 2
+  receipt_interval_ms: 2000
+
+  # Most receipts to fetch for any ONE token per cycle. Measured on a live
+  # window: 21 tokens, 338 qualifying transfers, median 5, p90 33, max 165 --
+  # the single hottest token was 48.8% of the whole receipt bill. A cap of 50
+  # truncates 1 token and cuts 14 requests to 9. A truncated token is recorded
+  # in the truncations column with what it saw against what was fetched; its
+  # pool choice is then a SAMPLE, never presented as a census.
+  receipt_cap_per_token: 50
+
   # The watchlist rule: Group 2 wallets at or above this realized PnL, in USD,
   # across all six Robinhood tokens, deduplicated. Currently 331 wallets.
   # Realized, not realized+unrealized: Group 2 is "bought and sold", so realized
