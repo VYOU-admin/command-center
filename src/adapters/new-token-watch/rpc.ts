@@ -22,6 +22,15 @@ export interface RpcLog {
 export class PublicRpc {
   private last = 0;
   public requests = 0;
+  /**
+   * ADDITIVE COUNTERS, read-only for callers. Nothing here changes behaviour;
+   * they exist because a caller could not previously tell a window that SPLIT
+   * from a request that was RETRIED, and those have very different costs: a
+   * split is one extra paced request, a retry is a paced request plus
+   * 3000*(n+1)^2 of backoff.
+   */
+  public splits = 0;
+  public retries = 0;
 
   constructor(
     private readonly url: string,
@@ -86,6 +95,7 @@ export class PublicRpc {
           signal: this.signal,
         });
         if (res.status === 429 || res.status >= 500) {
+          this.retries++;
           await new Promise((r) => setTimeout(r, Math.min(45_000, 3000 * (attempt + 1) ** 2)));
           continue;
         }
@@ -99,6 +109,7 @@ export class PublicRpc {
           // live cycles against the spine's 5-minute ceiling. Throw instead, so
           // logs() splits immediately.
           if (/Too Many/i.test(msg)) {
+            this.retries++;
             await new Promise((r) => setTimeout(r, Math.min(45_000, 3000 * (attempt + 1) ** 2)));
             continue;
           }
@@ -108,6 +119,7 @@ export class PublicRpc {
       } catch (err) {
         if (this.signal.aborted) throw err;
         if (attempt === 6) throw err;
+        this.retries++;
         await new Promise((r) => setTimeout(r, Math.min(45_000, 3000 * (attempt + 1) ** 2)));
       }
     }
@@ -138,6 +150,7 @@ export class PublicRpc {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (hi > lo && /limit|exceed|too large|timed out/i.test(msg)) {
+        this.splits++;
         const mid = Math.floor((lo + hi) / 2);
         const a = await this.logs(params, lo, mid);
         const b = await this.logs(params, mid + 1, hi);

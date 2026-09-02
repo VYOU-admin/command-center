@@ -73,6 +73,7 @@ interface RunResult {
   pools: { token: string; block: number; poolId: string; at: Date }[];
   picks: PoolPick[];
   truncations: { token: string; transfersSeen: number; receiptsFetched: number }[];
+  chunks: Record<string, number | boolean>[];
   parts: string[];
   stats: Record<string, number>;
   sweptFrom: number;
@@ -84,22 +85,46 @@ const num = (o: Record<string, unknown>, k: string, d: number): number => {
   const v = o[k]; return typeof v === 'number' && Number.isFinite(v) ? v : d;
 };
 
-/** Mutable snapshot of how far the current cycle got, for the abort path. */
+/**
+ * Mutable snapshot of how far the current cycle got, for the abort path.
+ *
+ * PHASES ARE DERIVED FROM A LIVE COUNTER, NOT ASSIGNED AT THE END OF A LOOP.
+ * The previous version set transferReq only after the transfer loop finished, so
+ * an abort mid-loop wrote 0 and the stats row said the cycle died in the sweep
+ * when it had in fact spent four minutes in the transfer scan. That single wrong
+ * number produced four wrong diagnoses in a row. Marks record where each phase
+ * ENDED; anything still running is measured against the live counter instead.
+ */
 const ABORT = {
-  started: Date.now(), requests: 0, watchlistSize: 0, transfers: 0, venueTransfers: 0,
+  started: Date.now(),
+  live: (): number => 0,          // replaced with () => rpc.requests once it exists
+  overheadAt: null as number | null,
+  sweepAt: null as number | null,
+  transfersAt: null as number | null,
+  receiptReq: 0,
+  watchlistSize: 0, transfers: 0, venueTransfers: 0,
   tokensDetected: 0, tokensEligibleAge: 0, tokensWithBuyer: 0, tokensSuppressed: 0,
-  sweepReq: 0, transferReq: 0, receiptReq: 0,
+  chunks: [] as Record<string, number | boolean>[],
   reset(): void {
-    this.started = Date.now(); this.requests = 0; this.watchlistSize = 0; this.transfers = 0;
+    this.started = Date.now(); this.live = () => 0;
+    this.overheadAt = null; this.sweepAt = null; this.transfersAt = null;
+    this.receiptReq = 0; this.watchlistSize = 0; this.transfers = 0;
     this.venueTransfers = 0; this.tokensDetected = 0; this.tokensEligibleAge = 0;
-    this.tokensWithBuyer = 0; this.tokensSuppressed = 0;
-    this.sweepReq = 0; this.transferReq = 0; this.receiptReq = 0;
+    this.tokensWithBuyer = 0; this.tokensSuppressed = 0; this.chunks = [];
   },
   durationMs(): number { return Date.now() - this.started; },
-  snapshot(): Record<string, number> {
-    return { requests: this.requests, transfers: this.transfers,
-      tokensDetected: this.tokensDetected, tokensWithBuyer: this.tokensWithBuyer,
-      sweepReq: this.sweepReq, transferReq: this.transferReq, receiptReq: this.receiptReq };
+  /** Requests per phase, correct whether or not the phase finished. */
+  phases(): { overhead: number; sweep: number; transfers: number; receipts: number; total: number } {
+    const now = this.live();
+    const overhead = this.overheadAt ?? now;
+    const sweep = (this.sweepAt ?? now) - overhead;
+    const transfers = this.sweepAt === null ? 0 : (this.transfersAt ?? now) - this.sweepAt;
+    return { overhead, sweep: Math.max(0, sweep), transfers: Math.max(0, transfers),
+      receipts: this.receiptReq, total: now + this.receiptReq };
+  },
+  snapshot(): Record<string, unknown> {
+    return { ...this.phases(), chunksDone: this.chunks.length,
+      tokensDetected: this.tokensDetected, tokensWithBuyer: this.tokensWithBuyer };
   },
 };
 
@@ -125,6 +150,7 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
     const mark = (k: string, v: number): void => { progress[k] = v; };
 
     const rpc = new PublicRpc(String(o.rpc_url), num(o, 'min_interval_ms', 4000), ctx.log, ctx.signal);
+    ABORT.live = () => rpc.requests;
     const head = await rpc.blockNumber();
 
     // Block time is MEASURED each run. It sets the lookback range and every pool
@@ -135,6 +161,7 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
     if (!(blockSeconds > 0) || !Number.isFinite(blockSeconds))
       throw new Error(`implausible block time ${blockSeconds}`);
     const perHour = Math.floor(3600 / blockSeconds);
+    ABORT.overheadAt = rpc.requests;          // head + both timestamps are done
 
     // ---- Initialize sweep, incremental from this monitor's own cursor -----
     const cur = await ctx.db.query(
@@ -153,7 +180,7 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
       : [];
     // topics[1] is the poolId, which is what DexScreener uses as the pair
     // address on v4 and therefore what a link needs.
-    mark('sweep', rpc.requests); ABORT.sweepReq = rpc.requests; ABORT.requests = rpc.requests;
+    mark('sweep', rpc.requests); ABORT.sweepAt = rpc.requests;
     const created = new Map<string, { block: number; poolId: string }>();
     for (const l of initLogs) {
       const block = Number.parseInt(l.blockNumber, 16);
@@ -174,15 +201,25 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
     const lo = head - Math.floor(perHour * lookbackH);
     const addrs = watchlist.map((w) => padAddress(w));
     const transfers: RpcLog[] = [];
-    for (let i = 0; i < addrs.length; i += chunkSize) {
+    // PER CHUNK, RECORDED AS IT GOES. Requests, elapsed time, and whether the
+    // window split or a request was retried -- a split is one extra paced
+    // request, a retry is a paced request PLUS 3000*(n+1)^2 of backoff, and
+    // those were previously indistinguishable from the outside.
+    const windowsPerChunk = Math.ceil((head - lo + 1) / transferWindow);
+    for (let i = 0, n = 0; i < addrs.length; i += chunkSize, n++) {
+      const r0 = rpc.requests, s0 = rpc.splits, y0 = rpc.retries, t0 = Date.now();
       transfers.push(...(await rpc.logsRange(
         { topics: [TRANSFER, null, addrs.slice(i, i + chunkSize)] }, lo, head, transferWindow)));
+      ABORT.chunks.push({ chunk: n, wallets: Math.min(chunkSize, addrs.length - i),
+        requests: rpc.requests - r0, expected: windowsPerChunk,
+        splits: rpc.splits - s0, retries: rpc.retries - y0,
+        ms: Date.now() - t0, logs: transfers.length });
+      ABORT.transfers = transfers.length;
     }
     // A TRANSFER IS NOT A BUY. Only tokens handed over by the venue contract
     // count; an airdrop arrives as an inbound transfer too.
     mark('transfers', rpc.requests - progress.sweep!);
-    ABORT.transferReq = rpc.requests - ABORT.sweepReq; ABORT.requests = rpc.requests;
-    ABORT.transfers = transfers.length;
+    ABORT.transfersAt = rpc.requests;
     const venue = transfers.filter((l) => topicAddress(l.topics[1]) === PM);
     ABORT.venueTransfers = venue.length;
 
@@ -278,7 +315,7 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
     });
     requestsExtra = swap.requests;
     progress.receipts = swap.requests;
-    ABORT.receiptReq = swap.requests; ABORT.requests += swap.requests;
+    ABORT.receiptReq = swap.requests;
 
     // Confirm the swap pool is one DexScreener actually indexes; that call also
     // supplies the symbol, so it replaces a per-token eth_call.
@@ -332,7 +369,7 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
       extraRpcRequests: swap.requests, receiptRateLimited: swap.rateLimited,
       truncatedTokens: swap.truncations.length,
       phaseSweepReq: progress.sweep ?? 0, phaseTransferReq: progress.transfers ?? 0,
-      phaseReceiptReq: swap.requests,
+      phaseReceiptReq: swap.requests, rpcSplits: rpc.splits, rpcRetries: rpc.retries,
       dexscreenerFailedBatches: failedBatches, durationMs: Date.now() - started,
     };
     ctx.log.info('group1 new-token cycle', stats);
@@ -344,7 +381,7 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
         at: new Date((tHead - (head - e.block) * blockSeconds) * 1000),
       })),
       picks, parts, stats, sweptFrom, sweptTo: head, messageText,
-      truncations: swap.truncations,
+      truncations: swap.truncations, chunks: ABORT.chunks,
     }];
 }
 
@@ -385,12 +422,13 @@ const adapter: SourceAdapter<RunResult> = {
              venue_transfers, tokens_detected, tokens_eligible_age, tokens_with_buyer,
              tokens_alerted, tokens_suppressed, omitted_no_pair, duration_ms,
              phase_sweep_req, phase_transfer_req, phase_receipt_req,
-             aborted, abort_reason)
-           values (now(),$1,$2,$3,$4,$5,$6,$7,0,$8,0,$9,$10,$11,$12,true,$13)`,
-          [ABORT.requests, ABORT.watchlistSize, ABORT.transfers, ABORT.venueTransfers,
+             aborted, abort_reason, chunk_timeline)
+           values (now(),$1,$2,$3,$4,$5,$6,$7,0,$8,0,$9,$10,$11,$12,true,$13,$14)`,
+          [ABORT.phases().total, ABORT.watchlistSize, ABORT.transfers, ABORT.venueTransfers,
            ABORT.tokensDetected, ABORT.tokensEligibleAge, ABORT.tokensWithBuyer,
-           ABORT.tokensSuppressed, ABORT.durationMs(), ABORT.sweepReq, ABORT.transferReq,
-           ABORT.receiptReq, msg.slice(0, 300)]);
+           ABORT.tokensSuppressed, ABORT.durationMs(), ABORT.phases().sweep,
+           ABORT.phases().transfers, ABORT.receiptReq, msg.slice(0, 300),
+           JSON.stringify(ABORT.chunks)]);
         ctx.log.warn('cycle aborted; partial stats written', { reason: msg, ...ABORT.snapshot() });
       } catch (e2) {
         ctx.log.error('could not write aborted-cycle stats',
@@ -469,14 +507,16 @@ const adapter: SourceAdapter<RunResult> = {
          linked_from_fallback, multi_poolid_tokens, ambiguous_receipts,
          extra_rpc_requests, admitted_by_grace, receipt_rate_limited, truncated_tokens,
          truncations, phase_sweep_req, phase_transfer_req, phase_receipt_req, aborted,
+         chunk_timeline, rpc_splits, rpc_retries,
          swept_from, swept_to, duration_ms, message_text)
-       values (now(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,false,$27,$28,$29,$30)`,
+       values (now(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,false,$27,$28,$29,$30,$31,$32,$33)`,
       [s.head, s.blockSeconds, s.requests, s.watchlistSize, s.transfers, s.venueTransfers,
        s.tokensDetected, s.tokensEligibleAge, s.tokensWithBuyer, s.tokensAlerted,
        s.tokensSuppressed, s.omittedNoPoolId, s.omittedNoPair, s.duplicateSymbols,
        s.linkedFromSwap, s.linkedFromFallback, s.multiPoolIdTokens, s.ambiguousReceipts,
        s.extraRpcRequests, s.admittedByGrace, s.receiptRateLimited, s.truncatedTokens,
        JSON.stringify(r.truncations), s.phaseSweepReq, s.phaseTransferReq, s.phaseReceiptReq,
+       JSON.stringify(r.chunks), s.rpcSplits, s.rpcRetries,
        r.sweptFrom, r.sweptTo, s.durationMs, r.messageText || null]);
 
     if (r.parts.length && sendAlerts) {

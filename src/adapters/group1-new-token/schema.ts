@@ -113,7 +113,8 @@ export async function migrate(client: PoolClient): Promise<void> {
                      'receipt_rate_limited int', 'truncated_tokens int',
                      'truncations jsonb', 'phase_sweep_req int',
                      'phase_transfer_req int', 'phase_receipt_req int',
-                     'aborted boolean', 'abort_reason text']) {
+                     'aborted boolean', 'abort_reason text',
+                     'chunk_timeline jsonb', 'rpc_splits int', 'rpc_retries int']) {
     await client.query(`alter table group1_cycle_stats add column if not exists ${col}`);
   }
 }
