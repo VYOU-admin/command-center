@@ -295,7 +295,11 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
     const messageText = parts.join('\n---\n');
 
     const stats = {
-      head, blockSeconds, requests: rpc.requests, watchlistSize: watchlist.length,
+      // rpc.requests counts only the PublicRpc phases; the receipt phase runs on
+      // its own limiter and its own counter, so it has to be added back or the
+      // cycle under-reports its own cost.
+      head, blockSeconds, requests: rpc.requests + swap.requests,
+      watchlistSize: watchlist.length,
       transfers: transfers.length, venueTransfers: venue.length,
       tokensDetected: distinct.length, tokensEligibleAge: eligible.size,
       tokensWithBuyer: withBuyer.length, tokensAlerted: lines.length,
