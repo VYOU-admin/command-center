@@ -95,14 +95,21 @@ export async function migrate(client: PoolClient): Promise<void> {
       omitted_no_pool_id  int,
       omitted_no_pair     int,
       duplicate_symbols   int,
-      linked_from_swap    int,
-      linked_from_fallback int,
-      multi_poolid_tokens int,
-      ambiguous_receipts  int,
-      extra_rpc_requests  int,
       swept_from          bigint,
       swept_to            bigint,
       duration_ms         int,
       message_text        text
     )`);
+
+  /*
+   * ADDED AFTER THE TABLE EXISTED, so create-if-not-exists would not add them.
+   * This is not hypothetical: the first deploy of the link fix shipped these
+   * inside the create statement, the table already existed, the columns were
+   * silently absent, and the next insert would have failed the whole run.
+   */
+  for (const col of ['linked_from_swap int', 'linked_from_fallback int',
+                     'multi_poolid_tokens int', 'ambiguous_receipts int',
+                     'extra_rpc_requests int']) {
+    await client.query(`alter table group2_cycle_stats add column if not exists ${col}`);
+  }
 }
