@@ -98,6 +98,8 @@ const num = (o: Record<string, unknown>, k: string, d: number): number => {
 const ABORT = {
   started: Date.now(),
   live: (): number => 0,          // replaced with () => rpc.requests once it exists
+  liveSplits: (): number => 0,
+  liveRetries: (): number => 0,
   overheadAt: null as number | null,
   sweepAt: null as number | null,
   transfersAt: null as number | null,
@@ -106,7 +108,8 @@ const ABORT = {
   tokensDetected: 0, tokensEligibleAge: 0, tokensWithBuyer: 0, tokensSuppressed: 0,
   chunks: [] as Record<string, number | boolean>[],
   reset(): void {
-    this.started = Date.now(); this.live = () => 0;
+    this.started = Date.now();
+    this.live = () => 0; this.liveSplits = () => 0; this.liveRetries = () => 0;
     this.overheadAt = null; this.sweepAt = null; this.transfersAt = null;
     this.receiptReq = 0; this.watchlistSize = 0; this.transfers = 0;
     this.venueTransfers = 0; this.tokensDetected = 0; this.tokensEligibleAge = 0;
@@ -151,6 +154,8 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
 
     const rpc = new PublicRpc(String(o.rpc_url), num(o, 'min_interval_ms', 4000), ctx.log, ctx.signal);
     ABORT.live = () => rpc.requests;
+    ABORT.liveSplits = () => rpc.splits;
+    ABORT.liveRetries = () => rpc.retries;
     const head = await rpc.blockNumber();
 
     // Block time is MEASURED each run. It sets the lookback range and every pool
@@ -207,13 +212,30 @@ async function runCycle(ctx: AdapterContext): Promise<RunResult[]> {
     // those were previously indistinguishable from the outside.
     const windowsPerChunk = Math.ceil((head - lo + 1) / transferWindow);
     for (let i = 0, n = 0; i < addrs.length; i += chunkSize, n++) {
+      // THE RECORD IS PUSHED BEFORE THE AWAIT, and finalised in `finally`. The
+      // previous version pushed it after the chunk returned, so the ONLY chunk
+      // that mattered -- the one the abort landed in -- was the one with no
+      // record. That is the same defect as assigning a phase counter after its
+      // loop, made twice in the same change.
+      const rec: Record<string, number | boolean> = {
+        chunk: n, wallets: Math.min(chunkSize, addrs.length - i),
+        expected: windowsPerChunk, requests: 0, splits: 0, retries: 0,
+        ms: 0, logs: 0, complete: false,
+      };
+      ABORT.chunks.push(rec);
       const r0 = rpc.requests, s0 = rpc.splits, y0 = rpc.retries, t0 = Date.now();
-      transfers.push(...(await rpc.logsRange(
-        { topics: [TRANSFER, null, addrs.slice(i, i + chunkSize)] }, lo, head, transferWindow)));
-      ABORT.chunks.push({ chunk: n, wallets: Math.min(chunkSize, addrs.length - i),
-        requests: rpc.requests - r0, expected: windowsPerChunk,
-        splits: rpc.splits - s0, retries: rpc.retries - y0,
-        ms: Date.now() - t0, logs: transfers.length });
+      try {
+        const got = await rpc.logsRange(
+          { topics: [TRANSFER, null, addrs.slice(i, i + chunkSize)] }, lo, head, transferWindow);
+        transfers.push(...got);
+        rec.complete = true;
+      } finally {
+        rec.requests = rpc.requests - r0;
+        rec.splits = rpc.splits - s0;
+        rec.retries = rpc.retries - y0;
+        rec.ms = Date.now() - t0;
+        rec.logs = transfers.length;
+      }
       ABORT.transfers = transfers.length;
     }
     // A TRANSFER IS NOT A BUY. Only tokens handed over by the venue contract
@@ -422,14 +444,15 @@ const adapter: SourceAdapter<RunResult> = {
              venue_transfers, tokens_detected, tokens_eligible_age, tokens_with_buyer,
              tokens_alerted, tokens_suppressed, omitted_no_pair, duration_ms,
              phase_sweep_req, phase_transfer_req, phase_receipt_req,
-             aborted, abort_reason, chunk_timeline)
-           values (now(),$1,$2,$3,$4,$5,$6,$7,0,$8,0,$9,$10,$11,$12,true,$13,$14)`,
+             aborted, abort_reason, chunk_timeline, rpc_splits, rpc_retries)
+           values (now(),$1,$2,$3,$4,$5,$6,$7,0,$8,0,$9,$10,$11,$12,true,$13,$14,$15,$16)`,
           [ABORT.phases().total, ABORT.watchlistSize, ABORT.transfers, ABORT.venueTransfers,
            ABORT.tokensDetected, ABORT.tokensEligibleAge, ABORT.tokensWithBuyer,
            ABORT.tokensSuppressed, ABORT.durationMs(), ABORT.phases().sweep,
            ABORT.phases().transfers, ABORT.receiptReq, msg.slice(0, 300),
-           JSON.stringify(ABORT.chunks)]);
-        ctx.log.warn('cycle aborted; partial stats written', { reason: msg, ...ABORT.snapshot() });
+           JSON.stringify(ABORT.chunks), ABORT.liveSplits(), ABORT.liveRetries()]);
+        ctx.log.warn('cycle aborted; partial stats written',
+        { reason: msg, ...ABORT.snapshot(), splits: ABORT.liveSplits(), retries: ABORT.liveRetries() });
       } catch (e2) {
         ctx.log.error('could not write aborted-cycle stats',
           { reason: msg, writeError: e2 instanceof Error ? e2.message : String(e2) });
