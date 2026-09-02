@@ -323,9 +323,14 @@ export function createWebServer(opts: WebServerOptions): Server {
       if (haveG.rows[0]?.s) {
         // distinct on wallet, newest scan first: the series is append-only, so
         // the latest row is the current reading and older rows stay untouched.
+        // block, read_at and sweep_no travel WITH the balance. Under the rolling
+        // cursor a sweep carries several head blocks spread over roughly an
+        // hour, so a reading is only interpretable next to the moment it was
+        // taken -- one wallet's read time can never stand in for another's.
+        // sweep_no is null for the 798 rows written before sweeps existed.
         const sr = await pool.query(
           `select distinct on (token, wallet) token, lower(wallet) wallet,
-                  balance_raw::text balance_raw, status, block, read_at
+                  balance_raw::text balance_raw, status, block, read_at, sweep_no
              from token_balance_scans
             where scan_kind = 'scan'
             order by token, wallet, scanned_at desc`);
@@ -336,6 +341,7 @@ export function createWebServer(opts: WebServerOptions): Server {
           status: String(x.status),
           block: Number(x.block),
           readAt: x.read_at ? new Date(String(x.read_at)).toISOString() : null,
+          sweepNo: x.sweep_no == null ? null : Number(x.sweep_no),
         }));
       }
       let tags: TagRow[] = [];

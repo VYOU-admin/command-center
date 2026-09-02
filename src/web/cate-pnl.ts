@@ -146,8 +146,11 @@ export interface ScanRow {
   wallet: string;
   balanceRaw: string | null;
   status: string;
+  /** Head block the read was taken at. One sweep spans several. */
   block: number;
   readAt: string | null;
+  /** Null for readings taken before the scanner became cursor-based. */
+  sweepNo: number | null;
 }
 
 /**
@@ -916,11 +919,48 @@ function scanOf(w){
   if(!_smemo){ _smemo={}; SCANS.forEach(function(x){ _smemo[x.token+'|'+x.wallet]=x; }); }
   return _smemo[tab+'|'+w]||null;
 }
-/** Newest scan read time across the series, for labelling the header cards. */
-function scanReadAt(){
-  var t=null;
-  SCANS.forEach(function(x){ if(x.token===tab && x.readAt && (!t || x.readAt>t)) t=x.readAt; });
-  return t;
+// "2026-09-02 02:06:21" from an ISO stamp.
+//
+// \\. not \. : this string lives inside a server-side template literal, where a
+// single backslash is consumed at build time and the regex would degrade to
+// /..*/ -- matching from the first character and erasing the whole timestamp.
+// This has to stay a LINE comment: that degraded literal ends in the two
+// characters that close a block comment, which is how it broke the build once.
+function fmtRead(iso){
+  return String(iso).replace('T',' ').replace(/\\..*$/,'');
+}
+function fmtSpread(ms){
+  var m=Math.round(ms/60000);
+  if(m<60) return m+'m';
+  return Math.floor(m/60)+'h'+(m%60<10?'0':'')+(m%60)+'m';
+}
+/**
+ * Oldest and newest read among the wallets that CONTRIBUTED to the sum.
+ *
+ * Replaces a max(read_at) across the token. Under the rolling cursor a sweep
+ * reads its cohort over several head blocks spread across roughly an hour, so
+ * the newest member's read time is not the cohort's -- labelling a sum with it
+ * would state a moment that is true for exactly one of its terms.
+ */
+function scanReadRange(rows){
+  var lo=null, hi=null, n=0;
+  rows.forEach(function(r){
+    var s=scanOf(r.wallet);
+    if(!s || s.balanceRaw===null || !s.readAt) return;
+    n++;
+    if(lo===null || s.readAt<lo) lo=s.readAt;
+    if(hi===null || s.readAt>hi) hi=s.readAt;
+  });
+  return {lo:lo, hi:hi, n:n};
+}
+/** The card's read label: one time when the sweep was instantaneous, else the range. */
+function scanReadLabel(rows){
+  var rr=scanReadRange(rows);
+  if(rr.n===0) return 'no scan yet';
+  if(rr.lo===rr.hi) return fmtRead(rr.hi)+' UTC';
+  var sp=new Date(rr.hi).getTime()-new Date(rr.lo).getTime();
+  return fmtRead(rr.lo)+' \u2192 '+fmtRead(rr.hi)+' UTC'+
+    (sp>3600000?' \u00b7 spread '+fmtSpread(sp):'');
 }
 var TOK18 = 1e18;
 function scanBalance(w){
@@ -938,16 +978,61 @@ function oStatus(r){
   if(b.value>0) return 'still holds';
   return r.sold_out ? 'sold out in window' : 'exited after window';
 }
+/**
+ * The claim, plus the moment it was asserted from.
+ *
+ * "still holds" and "exited after window" are statements about a balance at one
+ * block. Under a rolling sweep two rows' claims can be an hour apart, so each
+ * carries its own read time rather than resting on a cohort-wide one. The claim
+ * text itself is unchanged; the timestamp is additive. "unknown" carries no
+ * time because it is not asserted from a read.
+ */
+function oStatusCell(r){
+  var txt=oStatus(r), s=scanOf(r.wallet);
+  var head='<span class="ost">'+esc(txt)+'</span>';
+  if(txt==='unknown' || !s || !s.readAt) return head;
+  return head+' <span class="muted">as of '+esc(fmtRead(s.readAt))+'</span>';
+}
 function fmtTok(v){ return v===null||v===undefined?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:0}); }
 function balCell(r){
   var b=scanBalance(r.wallet);
   if(!b.known) return '<span class="zb" title="'+esc(b.note)+'">unknown</span>';
   return fmtTok(b.value);
 }
+/**
+ * When THIS wallet's balance was read.
+ *
+ * ITS OWN COLUMN, not inline in the balance cell. A rolling sweep puts adjacent
+ * rows an hour or more apart, and the only way to see that is to read a column
+ * of times down the page; inlining would also turn a numeric column into mixed
+ * text. A failed read still has a read time -- the balance is unknown, the
+ * moment it was attempted is not.
+ */
+function balReadCell(r){
+  var s=scanOf(r.wallet);
+  if(!s || !s.readAt) return '<span class="muted">\u2014</span>';
+  return '<span class="muted" title="block '+Number(s.block).toLocaleString('en-US')+
+    (s.sweepNo==null?' \u00b7 read before sweeps existed':' \u00b7 sweep '+s.sweepNo)+
+    '">'+esc(fmtRead(s.readAt))+'</span>';
+}
 function balUsd(r){
   var b=scanBalance(r.wallet); var m=TOKENMETA.filter(function(x){return x.token===tab;})[0];
-  if(!b.known || !m || m.price_usd==null) return '<span class="muted">—</span>';
-  return '$'+(b.value*m.price_usd).toLocaleString('en-US',{maximumFractionDigits:2});
+  if(!b.known || !m || m.price_usd==null) return '<span class="muted">\u2014</span>';
+  // TWO BLOCKS, DELIBERATELY, AND BOTH ARE STATED ON THE PAGE. The balance is
+  // this wallet's own read; the price is one token-wide spot read at
+  // meta.price_block. A rolling sweep can put them an hour apart.
+  //
+  // Left as a product rather than repriced per block because no per-block price
+  // series exists -- building one would mean a swap-implied price at every head
+  // block of every sweep, which costs far more than this column is worth. It
+  // sizes a position; it is not a settlement value. The mismatch is acceptable
+  // only because it is visible: the balance's block is in the "Balance read"
+  // column, the price's on the "Current price" card, and both here on hover.
+  var s=scanOf(r.wallet);
+  var t='balance block '+(s?Number(s.block).toLocaleString('en-US'):'unknown')+
+        ' \u00b7 price block '+(m.price_block!=null?Number(m.price_block).toLocaleString('en-US'):'unknown');
+  return '<span title="'+esc(t)+'">$'+
+    (b.value*m.price_usd).toLocaleString('en-US',{maximumFractionDigits:2})+'</span>';
 }
 var TAGCOL = ['tag','Tag','tag'];
 var OCOLS = {
@@ -955,19 +1040,19 @@ var OCOLS = {
      ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
      ['tokens_bought','Tokens bought','num0'],['sol_in','ETH spent','num6'],
      ['usd_spent','USD spent','usd'],['tokens_still_held','Held at window close','num0'],
-     ['cur_bal','Current balance','bal'],['cur_usd','Current USD','balusd'],['status','Status','text']],
+     ['cur_bal','Current balance','bal'],['cur_read','Balance read','balread'],['cur_usd','Current USD','balusd'],['status','Status','text']],
   2:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
      ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
      ['tokens_bought','Tokens bought','num0'],['sol_in','ETH in','num6'],['usd_in','USD in','usd'],
      ['n_sells','Sells','int'],['tokens_sold','Tokens sold','num0'],['sol_out','ETH out','num6'],
      ['usd_out','USD out','usd'],['realized_pnl_sol','PnL ETH','num6'],
      ['realized_pnl_usd','PnL USD','usd'],['tokens_still_held','Left at window close','num0'],
-     ['cur_bal','Current balance','bal'],['cur_usd','Current USD','balusd'],['status','Status','text']],
+     ['cur_bal','Current balance','bal'],['cur_read','Balance read','balread'],['cur_usd','Current USD','balusd'],['status','Status','text']],
   3:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
      ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
      ['tokens_bought','Tokens bought','num0'],['sol_in','ETH in','num6'],['usd_in','USD in','usd'],
      ['tokens_still_held','Left at window close','num0'],
-     ['cur_bal','Current balance','bal'],['cur_usd','Current USD','balusd'],['status','Status','text']]
+     ['cur_bal','Current balance','bal'],['cur_read','Balance read','balread'],['cur_usd','Current USD','balusd'],['status','Status','text']]
 };
 function oCell(r,c){
   var k=c[0], kind=c[2];
@@ -975,8 +1060,9 @@ function oCell(r,c){
     '" value="'+esc(tagOf(r.wallet))+'" placeholder="tag" style="width:110px">';
   if(kind==='wallet') return cell(r,{k:'wallet',kind:'wallet'});
   if(kind==='bal') return balCell(r);
+  if(kind==='balread') return balReadCell(r);
   if(kind==='balusd') return balUsd(r);
-  if(kind==='text') return esc(oStatus(r));
+  if(kind==='text') return oStatusCell(r);
   if(kind==='time') return '<span class="muted">'+String(r[k]||'').replace('T',' ').replace('Z','')+'</span>';
   if(kind==='int') return r[k]===null?'<span class="muted">—</span>':r[k];
   if(kind==='usd'){
@@ -995,11 +1081,8 @@ function renderOdysseus(){
   // excluded from the sum and counted separately rather than treated as zero.
   var sum=0, unknown=0;
   g1.forEach(function(r){ var b=scanBalance(r.wallet); if(b.known) sum+=b.value; else unknown++; });
-  var rt=scanReadAt();
-  // \\. not \. : this string lives inside a server-side template literal, where
-  // a single backslash is consumed at build time and the regex would degrade to
-  // /..*/ -- matching from the first character and erasing the whole timestamp.
-  var when=rt?rt.replace('T',' ').replace(/\\..*$/,'')+' UTC':'no scan yet';
+  // The range the sum was actually built from, not its newest member.
+  var when=scanReadLabel(g1);
   var px=meta.price_usd, cap=(px!=null&&meta.total_supply!=null)?px*Number(meta.total_supply):null;
   var pwhen=meta.price_block!=null?('block '+Number(meta.price_block).toLocaleString('en-US')):'unknown';
   document.getElementById('sub').textContent='· '+tab+' · '+rs.length+' wallets in group '+oSub;

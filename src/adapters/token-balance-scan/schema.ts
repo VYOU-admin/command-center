@@ -40,6 +40,48 @@ export async function migrate(client: PoolClient): Promise<void> {
       on token_balance_scans (token, scan_kind)`);
 
   /*
+   * Which sweep a reading belongs to.
+   *
+   * NULLABLE AND NOT BACKFILLED. The 798 rows written before the scanner became
+   * cursor-based were each produced by a pass that read a whole token at one
+   * block, so there is no sweep they can honestly be assigned to. Null means
+   * "read before sweeps existed", which is a different fact from "sweep 1" and
+   * is worth keeping distinguishable.
+   */
+  await client.query(
+    `alter table token_balance_scans add column if not exists sweep_no bigint`);
+
+  /*
+   * Where the rolling sweep stopped.
+   *
+   * The scanner no longer reads a whole token per pass. It consumes a fixed
+   * budget of wallets from one ordering -- (token, wallet) ascending across
+   * every seeded token -- and resumes from this row on the next pass. Position
+   * is a KEY, not an offset: `(token, wallet) > (last_token, last_wallet)`
+   * stays correct when wallets are added or removed between passes, which an
+   * integer offset would not.
+   *
+   * `last_token`/`last_wallet` null means "start of the ordering", the state a
+   * fresh cursor is in.
+   *
+   * sweep_no and sweep_started_at are not optional: without them nothing
+   * downstream can tell which readings belong to the same pass over the
+   * cohort, and every consumer would be left inferring a sweep boundary from
+   * timestamps.
+   */
+  await client.query(`
+    create table if not exists balance_scan_cursor (
+      monitor_id       text        not null,
+      chain            text        not null,
+      last_token       text,
+      last_wallet      text,
+      sweep_no         bigint      not null default 1,
+      sweep_started_at timestamptz not null default now(),
+      updated_at       timestamptz not null default now(),
+      primary key (monitor_id, chain)
+    )`);
+
+  /*
    * Per-token wallet tags.
    *
    * DELIBERATELY NOT wallet_pnl.tag. That column is bound to /api/wallet-tag,
