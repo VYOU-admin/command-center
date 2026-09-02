@@ -65,7 +65,12 @@ export async function migrate(client: PoolClient): Promise<void> {
    * is chain-agnostic. Added with alter-table because wallet_pnl_tokens already
    * exists and create-if-not-exists would not add them.
    */
-  for (const col of ['price_slot bigint', 'price_read_at timestamptz']) {
+  // token_decimals: the page divided every balance by 1e18, the EVM
+  // convention. MOS has 9, so a real 10,558,384 MOS balance rendered as "0"
+  // -- a wrong number that looked like a plausible one. Scale is a property of
+  // the token and now travels with it.
+  for (const col of ['price_slot bigint', 'price_read_at timestamptz',
+                     'token_decimals int']) {
     await client.query(`alter table wallet_pnl_tokens add column if not exists ${col}`);
   }
 }

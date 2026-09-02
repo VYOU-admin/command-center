@@ -124,6 +124,8 @@ export interface TokenMetaRow {
   /** Solana read point: price_block is an EVM block and is null there. */
   price_slot: number | null;
   price_read_at: string | null;
+  /** Token scale. Null for EVM tokens, which are all 18. */
+  token_decimals: number | null;
   balance_block: number | null;
   decode_check: string | null;
 }
@@ -1008,12 +1010,24 @@ function scanReadLabel(rows){
   return fmtRead(rr.lo)+' \u2192 '+fmtRead(rr.hi)+' UTC'+
     (sp>3600000?' \u00b7 spread '+fmtSpread(sp):'');
 }
-var TOK18 = 1e18;
+/**
+ * Token scale, per token, NOT the hardcoded 1e18 this used to be.
+ *
+ * MOS has 9 decimals. Dividing its raw balance by 1e18 turned a real
+ * 10,558,384 MOS holding into 0.0105, which fmtTok then printed as "0" -- a
+ * wrong number wearing the shape of a right one, on the exact column whose job
+ * is to distinguish zero from not-read.
+ */
+function tokScale(t){
+  var m=TOKENMETA.filter(function(x){return x.token===t;})[0];
+  var d=(m&&m.token_decimals!=null)?Number(m.token_decimals):18;
+  return Math.pow(10,d);
+}
 function scanBalance(w){
   var s=scanOf(w);
   if(!s) return {known:false, value:null, note:'no scan yet'};
   if(s.balanceRaw===null) return {known:false, value:null, note:s.status};
-  return {known:true, value:Number(s.balanceRaw)/TOK18, note:s.status};
+  return {known:true, value:Number(s.balanceRaw)/tokScale(tab), note:s.status};
 }
 function odysseusRows(g){
   return ROWS.filter(function(r){ return r.token===tab && groupsOf(r.wallet).indexOf(g)>=0; });

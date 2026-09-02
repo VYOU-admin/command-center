@@ -40,6 +40,7 @@ interface RunResult {
   token: string; chain: string; mint: string; slot: number; readAt: Date;
   readings: Reading[];
   price: { usd: number | null; supply: number | null; pair: string | null };
+  decimals: number | null;
   stats: Record<string, number | string | null>;
 }
 
@@ -84,13 +85,16 @@ const adapter: SourceAdapter<RunResult> = {
     // 854 confident no_account rows, so refuse rather than record it.
     if (!accounts.length) throw new Error(`getProgramAccounts returned 0 accounts for ${mint}`);
 
+    let decimals: number | null = null;
     const byOwner = new Map<string, { amount: bigint; n: number }>();
     for (const a of accounts) {
       const info = ((a.account as Record<string, unknown>)?.data as Record<string, unknown>)
         ?.parsed as Record<string, unknown> | undefined;
       const i = info?.info as Record<string, unknown> | undefined;
       if (!i?.owner) continue;
-      const amt = BigInt(String((i.tokenAmount as Record<string, unknown>)?.amount ?? '0'));
+      const ta = i.tokenAmount as Record<string, unknown> | undefined;
+      if (decimals === null && ta?.decimals !== undefined) decimals = Number(ta.decimals);
+      const amt = BigInt(String(ta?.amount ?? '0'));
       const e = byOwner.get(String(i.owner));
       if (e) { e.amount += amt; e.n++; } else byOwner.set(String(i.owner), { amount: amt, n: 1 });
     }
@@ -139,7 +143,7 @@ const adapter: SourceAdapter<RunResult> = {
       owners: byOwner.size, wallets: wallets.length, okNonZero, okZero, noAccount,
       priceUsd: price.usd, supply: price.supply, requests, durationMs: Date.now() - started });
 
-    return [{ token, chain: 'solana', mint, slot, readAt, readings, price,
+    return [{ token, chain: 'solana', mint, slot, readAt, readings, price, decimals,
       stats: { accountsSeen: accounts.length, wallets: wallets.length, okNonZero, okZero,
         noAccount, failed: 0, requests, durationMs: Date.now() - started } }];
   },
@@ -170,13 +174,14 @@ const adapter: SourceAdapter<RunResult> = {
     if (r.price.usd !== null) {
       await client.query(
         `insert into wallet_pnl_tokens (token, chain, token_address, quote_asset,
-           price_usd, total_supply, price_slot, price_read_at, updated_at)
-         values ($1,'solana',$2,'USDC',$3,$4,$5,$6, now())
+           price_usd, total_supply, price_slot, price_read_at, token_decimals, updated_at)
+         values ($1,'solana',$2,'USDC',$3,$4,$5,$6,$7, now())
          on conflict (token, chain) do update set
            price_usd = excluded.price_usd, total_supply = excluded.total_supply,
            price_slot = excluded.price_slot, price_read_at = excluded.price_read_at,
+           token_decimals = coalesce(excluded.token_decimals, wallet_pnl_tokens.token_decimals),
            updated_at = now()`,
-        [r.token, r.mint, r.price.usd, r.price.supply, r.slot, r.readAt]);
+        [r.token, r.mint, r.price.usd, r.price.supply, r.slot, r.readAt, r.decimals]);
     }
 
     await client.query(

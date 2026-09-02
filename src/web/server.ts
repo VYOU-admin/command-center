@@ -277,7 +277,7 @@ export function createWebServer(opts: WebServerOptions): Server {
                   fully_covered, mcap_threshold_usd, threshold_binding,
                   threshold_note, fee_rate_buy, fee_rate_sell, cohort_size,
                   price_usd, price_block, balance_block, decode_check,
-                  price_slot, price_read_at
+                  price_slot, price_read_at, token_decimals
              from wallet_pnl_tokens`,
         );
         tokenMeta = tm.rows.map((x: Record<string, unknown>) => ({
@@ -304,7 +304,12 @@ export function createWebServer(opts: WebServerOptions): Server {
           price_usd: x.price_usd == null ? null : Number(x.price_usd),
           price_block: x.price_block == null ? null : Number(x.price_block),
           price_slot: x.price_slot == null ? null : Number(x.price_slot),
-          price_read_at: x.price_read_at == null ? null : String(x.price_read_at),
+          // ISO, not String(Date): the default stringification is a JS date
+          // string that no formatter here understands, and it rendered as
+          // "Wed Sep 02 2026 21:01:46 GM +0000 (Coordinated Universal Time)".
+          price_read_at: x.price_read_at == null ? null
+            : new Date(String(x.price_read_at)).toISOString(),
+          token_decimals: x.token_decimals == null ? null : Number(x.token_decimals),
           balance_block: x.balance_block == null ? null : Number(x.balance_block),
           decode_check: x.decode_check == null ? null : String(x.decode_check),
         }));
