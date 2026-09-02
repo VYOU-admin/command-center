@@ -320,6 +320,18 @@ export function createWebServer(opts: WebServerOptions): Server {
           token: String(x.token), wallet: String(x.wallet), groupNo: Number(x.group_no),
         }));
       }
+      // MOS keeps its groups in its OWN table. wallet_groups is owned by
+      // run_token.py and rewritten wholesale per token, so a Solana backfill
+      // must not write there. Unioned at read time instead, guarded so an
+      // environment without the table still serves the page.
+      const haveM = await pool.query(`select to_regclass('public.mos_wallet_groups') m`);
+      if (haveM.rows[0]?.m) {
+        const mr = await pool.query(
+          `select token, lower(wallet) wallet, group_no from mos_wallet_groups`);
+        for (const x of mr.rows as Record<string, unknown>[])
+          groups.push({ token: String(x.token), wallet: String(x.wallet),
+            groupNo: Number(x.group_no) });
+      }
       if (haveG.rows[0]?.s) {
         // distinct on wallet, newest scan first: the series is append-only, so
         // the latest row is the current reading and older rows stay untouched.

@@ -1078,6 +1078,45 @@ function balUsd(r){
     (b.value*m.price_usd).toLocaleString('en-US',{maximumFractionDigits:2})+'</span>';
 }
 var TAGCOL = ['tag','Tag','tag'];
+/*
+ * SOLANA COLUMN SET. Same shape as the EVM one, with three differences that are
+ * facts about the data rather than styling choices:
+ *
+ *  - the quote leg is USDC, so "ETH spent" is renamed and the value is ALREADY
+ *    in dollars. The EVM path multiplies sol_in by a hardcoded 2474.77 ETH/USD
+ *    rate; applying that here would overstate every figure by ~2,474x.
+ *  - "Buy mcap $" is dropped: first_buy_mcap_usd is null for every MOS row,
+ *    and a column of dashes claims a measurement that was never made.
+ *  - realized and unrealized PnL are shown, because they exist here and the
+ *    EVM tokens carry them in different columns.
+ *
+ * Current balance / Balance read / Current USD are KEPT even though nothing can
+ * fill them, so the absence is visible in the place a reader looks for it.
+ */
+var SOLCOLS = {
+  1:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+     ['n_buys','Buys','int'],['tokens_bought','Tokens bought','num0'],
+     ['sol_in','USDC spent','usdc'],['tokens_still_held','Held at window end','num0'],
+     ['cur_bal','Current balance','bal'],['cur_read','Balance read','balread'],
+     ['cur_usd','Current USD','balusd'],['status','Status','text']],
+  2:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+     ['n_buys','Buys','int'],['tokens_bought','Tokens bought','num0'],
+     ['sol_in','USDC in','usdc'],['n_sells','Sells','int'],
+     ['tokens_sold','Tokens sold','num0'],['sol_out','USDC out','usdc'],
+     ['realized_pnl_usd','Realized PnL','usdc'],['unrealized_pnl_usd','Unrealized PnL','usdc'],
+     ['tokens_still_held','Held at window end','num0'],
+     ['cur_bal','Current balance','bal'],['cur_read','Balance read','balread'],
+     ['cur_usd','Current USD','balusd'],['status','Status','text']],
+  3:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+     ['n_buys','Buys','int'],['tokens_bought','Tokens bought','num0'],
+     ['sol_in','USDC in','usdc'],['realized_pnl_usd','Realized PnL','usdc'],
+     ['unrealized_pnl_usd','Unrealized PnL','usdc'],
+     ['tokens_still_held','Held at window end','num0'],
+     ['cur_bal','Current balance','bal'],['cur_read','Balance read','balread'],
+     ['cur_usd','Current USD','balusd'],['status','Status','text']]
+};
+/** Column set for the current tab's chain. EVM tabs keep OCOLS untouched. */
+function ocols(sub){ return chainOf(tab)==='solana' ? SOLCOLS[sub] : OCOLS[sub]; }
 var OCOLS = {
   1:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
      ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
@@ -1106,6 +1145,10 @@ function oCell(r,c){
   if(kind==='balread') return balReadCell(r);
   if(kind==='balusd') return balUsd(r);
   if(kind==='text') return oStatusCell(r);
+  // ALREADY IN DOLLARS. No ETH rate is applied -- see the SOLCOLS note.
+  if(kind==='usdc') return r[k]===null||r[k]===undefined
+    ? '<span class="muted">\u2014</span>'
+    : cell({x:Number(r[k])},{k:'x',kind:'usd'});
   if(kind==='time') return '<span class="muted">'+String(r[k]||'').replace('T',' ').replace('Z','')+'</span>';
   if(kind==='int') return r[k]===null?'<span class="muted">—</span>':r[k];
   if(kind==='usd'){
@@ -1134,7 +1177,12 @@ function renderOdysseus(){
   document.getElementById('view').innerHTML=
     '<div class="cards">'+
       card('Showing',rs.length.toLocaleString('en-US'),'group '+oSub+' of 3')+
-      card('Remaining balance',fmtTok(sum),'group 1, read '+esc(when)+(unknown?' · '+unknown+' unknown':''))+
+      // NOT READ IS NOT ZERO. When no group-1 wallet has a balance reading at
+      // all -- every Solana token, since the scanner is EVM balanceOf only --
+      // the sum is 0 because nothing was measured, and printing "0" would state
+      // a holding of nothing. An em dash says the opposite: not established.
+      card('Remaining balance', (g1.length && unknown===g1.length) ? '\u2014' : fmtTok(sum),
+        'group 1, read '+esc(when)+(unknown?' \u00b7 '+unknown+' unknown':''))+
       card('Current price',px!=null?('$'+Number(px).toPrecision(4)):'—','read at '+esc(pwhen))+
       card('Current market cap',cap!=null?('$'+cap.toLocaleString('en-US',{maximumFractionDigits:0})):'—','read at '+esc(pwhen))+
     '</div>'+
@@ -1152,9 +1200,9 @@ function renderOdysseus(){
         return '<button class="'+(oSub===g?'on':'')+'" data-osub="'+g+'">'+lbl+' ('+odysseusRows(g).length+')</button>';
       }).join('')+'</div>'+
     '<div class="tablebox"><table><thead><tr>'+
-      OCOLS[oSub].map(function(c){ return '<th'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'||c[2]==='tag'?' class="l"':'')+'>'+c[1]+'</th>'; }).join('')+
+      ocols(oSub).map(function(c){ return '<th'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'||c[2]==='tag'?' class="l"':'')+'>'+c[1]+'</th>'; }).join('')+
       '</tr></thead><tbody>'+
-      oFiltered().map(function(r){ return '<tr>'+OCOLS[oSub].map(function(c){
+      oFiltered().map(function(r){ return '<tr>'+ocols(oSub).map(function(c){
         return '<td'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'||c[2]==='tag'?' class="l"':'')+'>'+oCell(r,c)+'</td>'; }).join('')+'</tr>'; }).join('')+
       '</tbody></table></div>';
 }
