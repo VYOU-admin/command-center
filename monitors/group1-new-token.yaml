@@ -1,0 +1,78 @@
+# Group 1 wallets buying tokens that just launched.
+#
+# THE MIRROR OF group2-new-token, watching the other population. Group 1 is
+# "bought and never sold", so there is no PnL threshold here -- filtering on
+# realized PnL would empty the list. The watchlist is every Group 1 wallet
+# across the six Robinhood tokens, deduplicated at read time: 2,956, not the
+# 2,991 the per-token counts sum to, because 35 wallets sit in two cohorts.
+#
+# MEASURED BEFORE BUILDING (2026-09-02, live endpoint):
+#   2,956 wallets / 200 per chunk = 15 chunks x 2 windows -> 34 requests and
+#   136 s for the transfer scan alone (2 windows split on the log cap, 0 rate
+#   limits). group2's 331 wallets cost 4 requests. So this is 8.5x the
+#   transfer-scan cost, and roughly 152 s of the spine's 300 s guard is gone
+#   before a single receipt is fetched. That is why the schedule is 20m.
+#   The same scan returned 32,612 transfers, 1,405 of them from the
+#   PoolManager, across 214 distinct tokens -- a larger candidate set than
+#   group2 sees, so receipt_cap_per_token matters more here.
+#
+# STAYS ON PublicRpc AT 4,000 ms, DELIBERATELY. Halving the spacing would save
+# ~68 s, but the 4,000 ms figure was measured on exactly this call -- eth_getLogs
+# over 200 addresses and 20,000 blocks -- and it is the most expensive request
+# the project makes. The receipt phase has its own faster limiter because
+# receipts are cheap point lookups. The two are not the same bet.
+#
+# KNOWN LIMITATION -- V3 LAUNCHES ARE INVISIBLE, as in group2: detection keys
+# entirely off the v4 PoolManager's Initialize event. The size of that gap has
+# NOT been measured.
+
+id: group1-new-token
+name: Group 1 New Token
+source: group1-new-token
+enabled: true
+
+# 20m, not group2's 5m: the base phase alone is ~152 s, so a tighter schedule
+# would spend most of the day re-scanning the same hour of transfers.
+schedule: 20m
+
+alerts:
+  # Same channel as group2. The message carries a bold GROUP 1 header as its
+  # first line and group2's does not, so the two are distinguishable at a glance.
+  channel: newtoken
+
+options:
+  chain: robinhood
+  rpc_url: https://rpc.mainnet.chain.robinhood.com
+  pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+  # Topic hashes are COPIED FROM WORKING CODE, never recalled.
+  initialize_topic: "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
+  transfer_topic: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+  swap_topic: "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
+
+  # The cohorts whose Group 1 members are watched.
+  tokens: [PONS, AI, QUANT, BONER, ROBINCAT, ODYSSEUS]
+
+  dashboard_url: "https://command-center-production-eab2.up.railway.app/cate"
+  dexscreener_chain: robinhood
+
+  # A pool first swept in this cycle is admitted whatever its age, so a launch
+  # missed during downtime is still picked up on the catch-up cycle.
+  max_pool_age_minutes: 60
+  lookback_hours: 1
+  bootstrap_hours: 3
+
+  watchlist_chunk: 200
+  transfer_block_window: 20000
+  sweep_block_window: 20000
+  # Measured: 0 of 20 eth_getLogs refused at 4,000 ms, 6 of 20 at 2,500 ms.
+  min_interval_ms: 4000
+
+  # Same values as group2. Receipts are cheap point lookups, so they run on
+  # their own limiter rather than sharing the 4,000 ms log pacing.
+  receipt_batch: 25
+  receipt_concurrency: 2
+  receipt_interval_ms: 2000
+  receipt_cap_per_token: 50
+
+  send_alerts: true
