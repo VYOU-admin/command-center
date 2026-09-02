@@ -164,12 +164,15 @@ const adapter: SourceAdapter<RunResult> = {
 
     // Price row. Written only when a price actually came back; a failed lookup
     // leaves the previous reading in place rather than nulling a good one.
+    // Conflict target is (token, chain) -- the actual primary key. Naming just
+    // (token) failed the whole persist transaction and took the 854 balance
+    // rows down with it, because persist is one transaction by design.
     if (r.price.usd !== null) {
       await client.query(
         `insert into wallet_pnl_tokens (token, chain, token_address, quote_asset,
            price_usd, total_supply, price_slot, price_read_at, updated_at)
          values ($1,'solana',$2,'USDC',$3,$4,$5,$6, now())
-         on conflict (token) do update set
+         on conflict (token, chain) do update set
            price_usd = excluded.price_usd, total_supply = excluded.total_supply,
            price_slot = excluded.price_slot, price_read_at = excluded.price_read_at,
            updated_at = now()`,
