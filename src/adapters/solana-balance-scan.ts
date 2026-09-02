@@ -32,6 +32,7 @@ import type { AdapterContext, SourceAdapter } from './types.js';
 import { requireString } from './types.js';
 import type { PoolClient } from '../store/db.js';
 import { migrate } from './solana-balance-scan/schema.js';
+import { compare, renderChangeAlert, type Comparison } from './solana-balance-scan/changes.js';
 
 interface Reading {
   wallet: string; balanceRaw: string | null; status: string; accounts: number;
@@ -41,6 +42,8 @@ interface RunResult {
   readings: Reading[];
   price: { usd: number | null; supply: number | null; pair: string | null };
   decimals: number | null;
+  comparison: Comparison | null;
+  parts: string[];
   stats: Record<string, number | string | null>;
 }
 
@@ -138,12 +141,46 @@ const adapter: SourceAdapter<RunResult> = {
       }
     } catch { /* a price miss must not lose the balances; left null, never 0 */ }
 
+    // ---- Group 1 balance changes against the previous scan ---------------
+    // Groups live in mos_wallet_groups, this monitor's own table. Wallets are
+    // read as-is: base58 is case-sensitive.
+    let comparison: Comparison | null = null;
+    let parts: string[] = [];
+    const g1rows = await ctx.db.query(
+      `select wallet from mos_wallet_groups where token = $1 and group_no = 1 order by wallet`, [token]);
+    const group1 = (g1rows.rows as Record<string, unknown>[]).map((r) => String(r.wallet));
+    if (group1.length) {
+      // The latest row per wallet from BEFORE this pass. distinct on + order by
+      // scanned_at desc gives the previous reading; this pass has not been
+      // written yet, so nothing here can compare a reading against itself.
+      const pr = await ctx.db.query(
+        `select distinct on (wallet) wallet, balance_raw::text balance_raw, status
+           from solana_balance_scans where token = $1
+          order by wallet, scanned_at desc`, [token]);
+      const previous = new Map((pr.rows as Record<string, unknown>[]).map((r) => [String(r.wallet),
+        { wallet: String(r.wallet),
+          balanceRaw: r.balance_raw == null ? null : String(r.balance_raw),
+          status: String(r.status) }]));
+      const bq = await ctx.db.query(
+        `select wallet, tokens_bought from wallet_pnl where token = $1 and chain = 'solana'`, [token]);
+      const bought = new Map((bq.rows as Record<string, unknown>[]).map((r) =>
+        [String(r.wallet), Number(r.tokens_bought ?? 0)]));
+      const curMap = new Map(readings.map((r) => [r.wallet, r]));
+      comparison = compare(group1, curMap, previous, bought, Math.pow(10, decimals ?? 9));
+      parts = renderChangeAlert(comparison);
+      ctx.log.info('group1 balance changes', { group1: comparison.group1,
+        compared: comparison.compared, changed: comparison.changed,
+        unchanged: comparison.unchanged, noPrior: comparison.noPrior,
+        accountClosed: comparison.accountClosed, parts: parts.length });
+    }
+
     const readAt = new Date();
     ctx.log.info('solana balance scan', { token, mint, slot, accountsSeen: accounts.length,
       owners: byOwner.size, wallets: wallets.length, okNonZero, okZero, noAccount,
       priceUsd: price.usd, supply: price.supply, requests, durationMs: Date.now() - started });
 
     return [{ token, chain: 'solana', mint, slot, readAt, readings, price, decimals,
+      comparison, parts,
       stats: { accountsSeen: accounts.length, wallets: wallets.length, okNonZero, okZero,
         noAccount, failed: 0, requests, durationMs: Date.now() - started } }];
   },
@@ -192,7 +229,16 @@ const adapter: SourceAdapter<RunResult> = {
        r.stats.okZero, r.stats.noAccount, r.stats.failed, r.price.usd, r.price.supply,
        r.stats.durationMs, r.stats.requests]);
 
-    ctx.log.info('solana balance scan written', { rows: n, priceWritten: r.price.usd !== null });
+    // Queued, not sent: the spine flushes alerts after the transaction commits.
+    // Nothing changed sends nothing at all -- no empty alert.
+    const sendAlerts = ctx.options.send_alerts !== false;
+    if (r.parts.length && sendAlerts) {
+      for (const p of r.parts)
+        ctx.queueAlert({ level: 'warning', title: 'MOS Group 1 balance changes', description: p });
+    }
+    ctx.log.info('solana balance scan written', { rows: n, priceWritten: r.price.usd !== null,
+      changed: r.comparison?.changed ?? 0, alertParts: r.parts.length,
+      queued: r.parts.length > 0 && sendAlerts });
     return n;
   },
 };

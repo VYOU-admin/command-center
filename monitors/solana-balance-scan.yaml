@@ -30,7 +30,10 @@ enabled: true
 schedule: 1h
 
 alerts:
-  channel: system
+  # Same channel as the two new-token alerts. Those announce BUYS of newly
+  # launched tokens; this announces BALANCE MOVES of a known cohort, so the
+  # message header names both to keep them apart at a glance.
+  channel: newtoken
 
 options:
   token: MOS
@@ -41,3 +44,6 @@ options:
   rpc_url: "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
   # The DYN2 MOS/USDC pool: 99.7% of all MOS liquidity.
   dexscreener_pair: "gjL62zuUAdJm7cZhrWtnBoCGN31kSFyWHScEYfTWiWh"
+
+  # Set false to run a scan without sending. Balances and price still land.
+  send_alerts: true
