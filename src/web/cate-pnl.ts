@@ -112,6 +112,7 @@ export interface TokenMetaRow {
   swaps_in_window: number | null;
   unique_txs: number | null;
   fully_covered: boolean | null;
+  total_supply: number | null;
   mcap_threshold_usd: number | null;
   threshold_binding: boolean | null;
   threshold_note: string | null;
@@ -930,7 +931,10 @@ function renderOdysseus(){
   var sum=0, unknown=0;
   g1.forEach(function(r){ var b=scanBalance(r.wallet); if(b.known) sum+=b.value; else unknown++; });
   var rt=scanReadAt();
-  var when=rt?rt.replace('T',' ').replace(/\..*/,'')+' UTC':'no scan yet';
+  // \\. not \. : this string lives inside a server-side template literal, where
+  // a single backslash is consumed at build time and the regex would degrade to
+  // /..*/ -- matching from the first character and erasing the whole timestamp.
+  var when=rt?rt.replace('T',' ').replace(/\\..*$/,'')+' UTC':'no scan yet';
   var px=meta.price_usd, cap=(px!=null&&meta.total_supply!=null)?px*Number(meta.total_supply):null;
   var pwhen=meta.price_block!=null?('block '+Number(meta.price_block).toLocaleString('en-US')):'unknown';
   document.getElementById('sub').textContent='· ODYSSEUS · '+rs.length+' wallets in group '+oSub;

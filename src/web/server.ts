@@ -231,7 +231,7 @@ export function createWebServer(opts: WebServerOptions): Server {
       if (tmq.rows[0]?.present === 1) {
         const tm = await pool.query(
           `select token, chain, quote_asset, dex, dex_version, pool_address,
-                  window_hours, window_start_utc, window_end_utc,
+                  total_supply, window_hours, window_start_utc, window_end_utc,
                   first_swap_block, boundary_block, swaps_in_window, unique_txs,
                   fully_covered, mcap_threshold_usd, threshold_binding,
                   threshold_note, fee_rate_buy, fee_rate_sell, cohort_size,
@@ -252,6 +252,7 @@ export function createWebServer(opts: WebServerOptions): Server {
           swaps_in_window: x.swaps_in_window == null ? null : Number(x.swaps_in_window),
           unique_txs: x.unique_txs == null ? null : Number(x.unique_txs),
           fully_covered: x.fully_covered == null ? null : x.fully_covered === true,
+          total_supply: x.total_supply == null ? null : Number(x.total_supply),
           mcap_threshold_usd: x.mcap_threshold_usd == null ? null : Number(x.mcap_threshold_usd),
           threshold_binding: x.threshold_binding == null ? null : x.threshold_binding === true,
           threshold_note: x.threshold_note == null ? null : String(x.threshold_note),
