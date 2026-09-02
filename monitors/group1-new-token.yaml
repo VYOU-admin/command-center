@@ -60,7 +60,20 @@ options:
   # missed during downtime is still picked up on the catch-up cycle.
   max_pool_age_minutes: 60
   lookback_hours: 1
-  bootstrap_hours: 3
+  # 1, not group2's 3. group2's sweep is incremental and cheap, so a wide
+  # catch-up costs it nothing. group1's FIRST cycle starts with an empty cursor
+  # and sweeps the whole bootstrap range in one go: at 3h that was ~107,000
+  # blocks, three of its six windows split on the log cap, and the cycle was
+  # aborted at 309.1s having spent the entire 300s guard in the sweep without
+  # ever reaching the transfer scan. Cold-started every cycle, that is a loop
+  # rather than a one-off, because the cursor never advances to break it.
+  #
+  # 1h is what the age rule can actually use: max_pool_age_minutes is 60, so
+  # anything older would be dropped anyway unless the grace rule admits it.
+  # THE TRADE-OFF, stated: after an outage longer than an hour, pools created
+  # before the catch-up horizon are not swept and their launches are missed.
+  # group2 keeps 3h and is unchanged.
+  bootstrap_hours: 1
 
   watchlist_chunk: 200
   transfer_block_window: 20000
