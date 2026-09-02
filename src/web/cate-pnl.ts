@@ -142,6 +142,7 @@ export interface GroupRow { token: string; wallet: string; groupNo: number }
  * rather than zero, which is the whole reason the scanner records a status.
  */
 export interface ScanRow {
+  token: string;
   wallet: string;
   balanceRaw: string | null;
   status: string;
@@ -203,6 +204,10 @@ export function renderCatePnlPage(
   .tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:16px; flex-wrap:wrap; }
   .tabs button { background:none; border:none; border-bottom:2px solid transparent; color:var(--muted); padding:9px 16px; font-size:14px; cursor:pointer; font-weight:600; }
   .tabs button.on { color:var(--link); border-bottom-color:var(--link); }
+  /* Robinhood-chain views. Chain comes from the rows, not a hardcoded list, so a
+     new Solana token never turns green by accident. */
+  .tabs button.rh { color:var(--ok); }
+  .tabs button.rh.on { color:var(--ok); border-bottom-color:var(--ok); }
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-bottom:14px; }
   .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
   .card h3 { margin:0 0 5px; font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600; }
@@ -336,6 +341,12 @@ function toast(msg,err){const t=document.getElementById('toast');t.textContent=m
   t.className='show'+(err?' err':'');setTimeout(()=>t.className='',err?2600:1200);}
 
 function tokenRows(){ return ROWS.filter(r=>r.token===tab); }
+/** A token's chain, read off its rows rather than assumed. */
+var _cmemo = null;
+function chainOf(t){
+  if(!_cmemo){ _cmemo={}; ROWS.forEach(function(r){ _cmemo[r.token]=r.chain; }); }
+  return _cmemo[t]||'';
+}
 
 /**
  * The quote asset is a property of the TOKEN, not of the page.
@@ -840,9 +851,10 @@ function renderCross(){
     '<div class="tablebox"><table><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>';
 }
 
-/* ---------------------------------------------------------------- ODYSSEUS */
+/* ------------------------------------------------- behaviour-grouped tokens */
 /**
- * ODYSSEUS gets its own view: three behaviour sub-tabs rather than one table.
+ * Any token with rows in wallet_groups gets three behaviour sub-tabs rather
+ * than one flat table.
  *
  * Group membership is READ FROM wallet_groups, not recomputed here. It depends
  * on transfer logs that never reach Postgres, and both SQL-only proxies were
@@ -858,9 +870,16 @@ var oFilters = false;      // filter block starts collapsed
 
 var _gmemo = null;
 function groupsOf(w){
+  // keyed by token+wallet: the same wallet can sit in different groups per token
   if(!_gmemo){ _gmemo={}; GROUPS.forEach(function(g){
-    (_gmemo[g.wallet]=_gmemo[g.wallet]||[]).push(g.groupNo); }); }
-  return _gmemo[w]||[];
+    var k=g.token+'|'+g.wallet; (_gmemo[k]=_gmemo[k]||[]).push(g.groupNo); }); }
+  return _gmemo[tab+'|'+w]||[];
+}
+/** Tokens that have behaviour groups loaded, so the tab bar can pick a view. */
+var _gtok = null;
+function hasGroups(t){
+  if(!_gtok){ _gtok={}; GROUPS.forEach(function(g){ _gtok[g.token]=true; }); }
+  return !!_gtok[t];
 }
 /**
  * One tag per (token, wallet), so both sub-tabs of a wallet in groups 2 and 3
@@ -868,15 +887,16 @@ function groupsOf(w){
  */
 var _tmemo = null;
 function tagOf(w){
-  if(!_tmemo){ _tmemo={}; TAGS.forEach(function(t){ _tmemo[t.wallet]=t.tag; }); }
-  return _tmemo[w]||'';
+  if(!_tmemo){ _tmemo={}; TAGS.forEach(function(t){ _tmemo[t.token+'|'+t.wallet]=t.tag; }); }
+  return _tmemo[tab+'|'+w]||'';
 }
-function setTagLocal(w,v){ if(!_tmemo) tagOf(w); if(v) _tmemo[w]=v; else delete _tmemo[w]; }
+function setTagLocal(w,v){ if(!_tmemo) tagOf(w); var k=tab+'|'+w;
+  if(v) _tmemo[k]=v; else delete _tmemo[k]; }
 async function saveOdysseusTag(w, v, el){
   try{
     const r=await fetch('/api/token-tag',{method:'POST',
       headers:{'content-type':'application/json'},
-      body:JSON.stringify({token:'ODYSSEUS',chain:'robinhood',wallet:w,tag:v})});
+      body:JSON.stringify({token:tab,chain:'robinhood',wallet:w,tag:v})});
     const j=await r.json();
     if(!r.ok||!j.ok) throw new Error(j.error||('HTTP '+r.status));
     setTagLocal(w, j.tag);
@@ -893,13 +913,13 @@ async function saveOdysseusTag(w, v, el){
 
 var _smemo = null;
 function scanOf(w){
-  if(!_smemo){ _smemo={}; SCANS.forEach(function(x){ _smemo[x.wallet]=x; }); }
-  return _smemo[w]||null;
+  if(!_smemo){ _smemo={}; SCANS.forEach(function(x){ _smemo[x.token+'|'+x.wallet]=x; }); }
+  return _smemo[tab+'|'+w]||null;
 }
 /** Newest scan read time across the series, for labelling the header cards. */
 function scanReadAt(){
   var t=null;
-  SCANS.forEach(function(x){ if(x.readAt && (!t || x.readAt>t)) t=x.readAt; });
+  SCANS.forEach(function(x){ if(x.token===tab && x.readAt && (!t || x.readAt>t)) t=x.readAt; });
   return t;
 }
 var TOK18 = 1e18;
@@ -910,7 +930,7 @@ function scanBalance(w){
   return {known:true, value:Number(s.balanceRaw)/TOK18, note:s.status};
 }
 function odysseusRows(g){
-  return ROWS.filter(function(r){ return r.token==='ODYSSEUS' && groupsOf(r.wallet).indexOf(g)>=0; });
+  return ROWS.filter(function(r){ return r.token===tab && groupsOf(r.wallet).indexOf(g)>=0; });
 }
 function oStatus(r){
   var b=scanBalance(r.wallet);
@@ -925,7 +945,7 @@ function balCell(r){
   return fmtTok(b.value);
 }
 function balUsd(r){
-  var b=scanBalance(r.wallet); var m=TOKENMETA.filter(function(x){return x.token==='ODYSSEUS';})[0];
+  var b=scanBalance(r.wallet); var m=TOKENMETA.filter(function(x){return x.token===tab;})[0];
   if(!b.known || !m || m.price_usd==null) return '<span class="muted">—</span>';
   return '$'+(b.value*m.price_usd).toLocaleString('en-US',{maximumFractionDigits:2});
 }
@@ -968,7 +988,7 @@ function oCell(r,c){
   return fmtTok(r[k]);
 }
 function renderOdysseus(){
-  var meta=TOKENMETA.filter(function(x){return x.token==='ODYSSEUS';})[0]||{};
+  var meta=TOKENMETA.filter(function(x){return x.token===tab;})[0]||{};
   var g1=odysseusRows(1);
   var rs=odysseusRows(oSub);
   // Remaining balance: latest scan, group 1 only, in tokens. Unknown reads are
@@ -982,7 +1002,7 @@ function renderOdysseus(){
   var when=rt?rt.replace('T',' ').replace(/\\..*$/,'')+' UTC':'no scan yet';
   var px=meta.price_usd, cap=(px!=null&&meta.total_supply!=null)?px*Number(meta.total_supply):null;
   var pwhen=meta.price_block!=null?('block '+Number(meta.price_block).toLocaleString('en-US')):'unknown';
-  document.getElementById('sub').textContent='· ODYSSEUS · '+rs.length+' wallets in group '+oSub;
+  document.getElementById('sub').textContent='· '+tab+' · '+rs.length+' wallets in group '+oSub;
   var card=function(l,v,s){ return '<div class="card"><div class="k">'+l+'</div><div class="v">'+v+
     '</div>'+(s?'<div class="k">'+s+'</div>':'')+'</div>'; };
   document.getElementById('view').innerHTML=
@@ -1092,12 +1112,12 @@ function renderGroups(){
 function render(){
   document.getElementById('tabs').innerHTML =
     '<button class="'+(tab==='__all'?'on':'')+'" data-tab="__all">All wallets</button>'+
-    TOKENS.map(t=>'<button class="'+(tab===t?'on':'')+'" data-tab="'+t+'">'+esc(t)+'</button>').join('')+
-    '<button class="'+(tab==='__cross'?'on':'')+'" data-tab="__cross">Cross-token</button>'+
+    TOKENS.map(t=>'<button class="'+(tab===t?'on ':'')+(chainOf(t)==='robinhood'?'rh':'')+'" data-tab="'+t+'">'+esc(t)+'</button>').join('')+
+    '<button class="'+(tab==='__cross'?'on ':'')+'rh" data-tab="__cross">Cross-token</button>'+
     '<button class="'+(tab==='__groups'?'on':'')+'" data-tab="__groups">Groups</button>';
   if(tab==='__cross') renderCross();
   else if(tab==='__groups') renderGroups();
-  else if(tab==='ODYSSEUS' && GROUPS.length) renderOdysseus();
+  else if(hasGroups(tab)) renderOdysseus();
   else renderTable();
 }
 

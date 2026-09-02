@@ -44,7 +44,8 @@ options:
 
   # Set false to run a populating cycle without sending, e.g. while dry-running
   # a message-format change.
-  send_alerts: true
+  # MUTED 2026-09-02 on request. Set back to true to resume Discord sends.
+  send_alerts: false
 
   max_pool_age_minutes: 120
   lookback_hours: 1

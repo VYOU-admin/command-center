@@ -315,7 +315,7 @@ export function createWebServer(opts: WebServerOptions): Server {
         `select to_regclass('public.wallet_groups') g, to_regclass('public.token_balance_scans') s`);
       if (haveG.rows[0]?.g) {
         const gr = await pool.query(
-          `select token, lower(wallet) wallet, group_no from wallet_groups where token = 'ODYSSEUS'`);
+          `select token, lower(wallet) wallet, group_no from wallet_groups`);
         groups = gr.rows.map((x: Record<string, unknown>) => ({
           token: String(x.token), wallet: String(x.wallet), groupNo: Number(x.group_no),
         }));
@@ -324,12 +324,13 @@ export function createWebServer(opts: WebServerOptions): Server {
         // distinct on wallet, newest scan first: the series is append-only, so
         // the latest row is the current reading and older rows stay untouched.
         const sr = await pool.query(
-          `select distinct on (wallet) lower(wallet) wallet, balance_raw::text balance_raw,
-                  status, block, read_at
+          `select distinct on (token, wallet) token, lower(wallet) wallet,
+                  balance_raw::text balance_raw, status, block, read_at
              from token_balance_scans
-            where token = 'ODYSSEUS' and scan_kind = 'scan'
-            order by wallet, scanned_at desc`);
+            where scan_kind = 'scan'
+            order by token, wallet, scanned_at desc`);
         scans = sr.rows.map((x: Record<string, unknown>) => ({
+          token: String(x.token),
           wallet: String(x.wallet),
           balanceRaw: x.balance_raw == null ? null : String(x.balance_raw),
           status: String(x.status),
@@ -341,7 +342,7 @@ export function createWebServer(opts: WebServerOptions): Server {
       const haveT = await pool.query(`select to_regclass('public.wallet_tags') t`);
       if (haveT.rows[0]?.t) {
         const tr = await pool.query(
-          `select token, chain, lower(wallet) wallet, tag from wallet_tags where token = 'ODYSSEUS'`);
+          `select token, chain, lower(wallet) wallet, tag from wallet_tags`);
         tags = tr.rows.map((x: Record<string, unknown>) => ({
           token: String(x.token), chain: String(x.chain),
           wallet: String(x.wallet), tag: String(x.tag),

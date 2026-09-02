@@ -31,7 +31,8 @@ options:
   # THE MUTE SWITCH. false stops Discord messages while the monitor keeps
   # evaluating and keeps writing early_alerts rows, so a muted period is still
   # measurable later instead of being a hole in the data.
-  enabled: true
+  # MUTED 2026-09-02 on request. Set back to true to resume Discord sends.
+  enabled: false
 
   # Which monitor's snapshots to read. Nothing about that monitor is modified.
   source_monitor_id: pumpfun-early-window
