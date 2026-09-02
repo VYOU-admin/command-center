@@ -250,3 +250,74 @@ column stays off the MOS page.
    `token_decimals` now travels with the token.
 
 All three passed `tsc`, passed the build, and deployed green.
+
+---
+
+# Group 1 balance-change alert (added 2026-09-02)
+
+Fires from `solana-balance-scan` after each hourly pass, comparing every Group 1
+wallet against its previous reading in `solana_balance_scans`. Channel
+`newtoken`, shared with the two new-token alerts.
+
+## What counts as a delta, and what does not
+
+**A delta needs two good readings.** Only a pair where BOTH sides are
+`status = 'ok'` produces one.
+
+| prior state | treatment |
+|---|---|
+| `ok` → `ok` | compared; a difference is a change |
+| missing / failed / `no_account` prior | **noPrior** — excluded |
+| `ok` → `no_account` | **accountClosed** — excluded, see below |
+
+A missing, failed or `no_account` prior **is not a balance of zero**. Subtracting
+from it would manufacture a change the size of the entire holding out of an
+absence of data — on the exact table built to keep those apart.
+
+## An account that closed is not a sale
+
+A wallet going from a real balance to `no_account` means its token account no
+longer exists. The tokens may have been sold, transferred out, or the account
+emptied and closed in one instruction, and **nothing in a balance reading
+distinguishes those**. Reporting it as `-full balance` would assert a movement
+that has not been observed.
+
+**Chosen: counted separately as `accountClosed` and left out of the alert.**
+Confirming what actually happened needs the transfer history, which this scanner
+does not read. It is reported in the run counts so it is visible rather than
+silently dropped.
+
+## Message
+
+Header names both the token and the fact that this is a balance move, because
+the two new-token alerts share this channel and announce *buys of newly launched
+tokens* — a different thing entirely:
+
+```
+**MOS · GROUP 1 BALANCE CHANGES · 18 wallets**
+[Ffzt…S7qu](https://solscan.io/account/Ffzt…) · bought 5,299,979 · now 8,073,051 · -2,691,017
+[3xEd…WTvc](https://solscan.io/account/3xEd…) · bought 3,315,974 · now 0 · -2,000,000
+```
+
+Sorted by absolute delta, largest first. Zero changes sends **nothing** — no
+empty alert. Parts split at 1,900 characters rather than truncating, the same
+way the group1 new-token alert does.
+
+## Verification
+
+Against the 21:05 and 21:56 scans, with nothing sent:
+
+```
+group 1 total     : 267
+compared          : 253   (both readings status ok)
+  changed         : 18
+  unchanged       : 235
+no prior reading  : 12
+account closed    : 2
+SUM = 267 -> EXACT     compared = changed + unchanged = 253 -> consistent
+message: 2 parts, 1,887 and 355 chars, both inside the 2,000 cap
+```
+
+A second run through the adapter itself (send_alerts=false) confirmed the wiring:
+267 = 4 changed + 249 unchanged + 13 no prior + 1 account closed, one alert part
+rendered, `queueAlert` called 0 times.
