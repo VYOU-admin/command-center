@@ -276,7 +276,8 @@ export function createWebServer(opts: WebServerOptions): Server {
                   first_swap_block, boundary_block, swaps_in_window, unique_txs,
                   fully_covered, mcap_threshold_usd, threshold_binding,
                   threshold_note, fee_rate_buy, fee_rate_sell, cohort_size,
-                  price_usd, price_block, balance_block, decode_check
+                  price_usd, price_block, balance_block, decode_check,
+                  price_slot, price_read_at
              from wallet_pnl_tokens`,
         );
         tokenMeta = tm.rows.map((x: Record<string, unknown>) => ({
