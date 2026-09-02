@@ -151,3 +151,102 @@ the Helius dashboard.
   window was reachable rather than hoped for.
 - **The vault owner match** turned an empirical ranking into a verified
   identification, and cost nothing.
+
+---
+
+# Balance scanner, price and market cap (added 2026-09-02)
+
+Monitor `solana-balance-scan`, hourly, MOS only. It does **not** touch
+`token-balance-scan`, which stays EVM-only.
+
+## The read: one call, not derived ATAs
+
+The brief said derive ATAs and batch `getMultipleAccounts`. Measurement changed
+that, and the alternative is both cheaper and more correct:
+
+- **MOS is TOKEN-2022**, not the legacy SPL Token program — verified by reading
+  the mint account's owning program rather than assuming from the ticker.
+  Filtering the legacy program returns **0 accounts**. ATA math aimed at the
+  legacy program id would have produced addresses that do not exist and reported
+  all 854 wallets as `no_account` — a confident, uniform, wrong answer.
+- **Token-2022 accounts carry extensions and are not all 165 bytes.** A
+  `dataSize:165` filter returns **21** accounts; dropping it returns **6,154**.
+  A size filter would have hidden 99.7% of holders.
+- **A wallet may hold the mint in more than one account.** ATA-only reads one and
+  understates the rest as a *smaller balance* rather than an unknown.
+
+`getProgramAccounts` on Token-2022, filtered only on the mint at offset 0:
+**6,154–6,183 accounts in one call, 0.2–0.3 s.** `withContext: true` so the slot
+arrives with the data rather than from a second call describing a different
+moment.
+
+**No cursor.** One call covers all 854 wallets; there is nothing to resume.
+
+## Four states, stored distinctly
+
+| state | `balance_raw` | `status` |
+|---|---|---|
+| read, non-zero | the amount | `ok` |
+| read, genuinely zero | `0` | `ok` |
+| no token account exists | `null` | `no_account` |
+| read failed | `null` | the error text |
+| never attempted | *no row* | — |
+
+`no_account` has no EVM equivalent: on Solana an absent token account is a real
+answer, and folding it into `0` would claim a measurement where there was none.
+An empty `getProgramAccounts` result **throws** rather than writing 854 confident
+`no_account` rows.
+
+Own table `solana_balance_scans`, not a chain column on `token_balance_scans`:
+that table's `block` is an EVM block number, its scope comes from `window_close`
+rows MOS has none of, and every consumer of it assumes EVM semantics.
+
+## First scan
+
+```
+slot 443,795,257   accounts seen 6,183   owners 6,171
+wallets 854 = 403 ok non-zero + 340 ok zero + 111 no account + 0 failed
+2 requests, 300 ms
+```
+
+Counts sum to 854. Rows carrying a balance while `status <> 'ok'`: **0**.
+
+## Price and market cap
+
+There is **no Robinhood cadence to mirror**: nothing in `src/adapters/` writes
+`wallet_pnl_tokens.price_usd`. It is a snapshot written once by the pipeline
+loader, which is why PONS still shows a price from its run. This is a genuine
+hourly reading, recorded as a deliberate difference rather than a match.
+
+`price_block` is an EVM block number and stays null for Solana. **In its place:
+`price_slot` (the chain-native read point) and `price_read_at` (a timestamp, what
+the card actually renders and chain-agnostic).** Both added with
+`alter table ... add column if not exists`.
+
+## Buy mcap: dropped, and why
+
+Supply is reachable — one `getAccountInfo`, `945,568,521.071`, mint authority
+revoked, and DexScreener's fdv/price implies the same within 1%. But supply at
+*first-buy time* is not: burns can still reduce it, and standard RPC gives
+current mint state only. Applying today's supply to a trade two days ago yields a
+number that looks measured and is not. `first_buy_mcap_usd` stays null and the
+column stays off the MOS page.
+
+## Three defects this shipped through, all caught by the DOM check
+
+1. **`ON CONFLICT (token)`** — `wallet_pnl_tokens` is keyed `(token, chain)`. The
+   first run failed and, because `persist` is one transaction, took all 854
+   balance rows with it. The scan itself had worked.
+2. **`price_slot` / `price_read_at` mapped but not selected** — the query lists
+   columns explicitly, so both were undefined and the card would have read
+   `unknown` regardless of what the scanner wrote.
+3. **Hardcoded `1e18`** — the page divided every raw balance by the EVM scale.
+   MOS has 9 decimals, so a real 10,558,384 MOS holding became 0.0105 and printed
+   as **"0"**: a wrong number wearing the shape of a right one, on the very
+   column whose job is to distinguish zero from not-read. 255 of 267 group-1
+   wallets rendered as zero. The scanner was correct throughout — live
+   `getTokenAccountsByOwner` reads matched its stored values exactly, and the
+   non-zero accounts sum to 945,705,616 against a supply of 945,568,521.
+   `token_decimals` now travels with the token.
+
+All three passed `tsc`, passed the build, and deployed green.

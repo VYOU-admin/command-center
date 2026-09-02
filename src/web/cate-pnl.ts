@@ -1079,7 +1079,11 @@ function balReadCell(r){
   if(!s || !s.readAt) return '<span class="muted">\u2014</span>';
   var unit = chainOf(tab)==='solana' ? 'slot ' : 'block ';
   return '<span class="muted" title="'+unit+Number(s.block).toLocaleString('en-US')+
-    (s.sweepNo==null?' \u00b7 read before sweeps existed':' \u00b7 sweep '+s.sweepNo)+
+    // "before sweeps existed" is an EVM-scanner fact and means nothing on
+    // Solana, where one call reads every wallet and there is no sweep at all.
+    (chainOf(tab)==='solana' ? ''
+      : s.sweepNo==null ? ' \u00b7 read before sweeps existed'
+      : ' \u00b7 sweep '+s.sweepNo)+
     '">'+esc(fmtRead(s.readAt))+'</span>';
 }
 function balUsd(r){
