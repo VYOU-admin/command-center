@@ -104,7 +104,78 @@ for 16, so chunk 8 issued ~10 requests against an expected 2. Elapsed is
 chunks, leaving **~207 s in one chunk**. Ten requests at 4,000 ms pacing is 40 s,
 so **~167 s was not pacing.**
 
-## What that points at, and what is still not measured
+## RESOLVED — it was the retry classifier (2026-09-02)
+
+Confirmed by the counters, then fixed.
+
+`call()` threw a plain `Error` for a non-retryable JSON-RPC error so that
+`logs()` could split the window immediately — and its own `catch`, which retries
+anything that is not an abort, swallowed it. Seven attempts and
+3+12+27+45+45+45 = **177 s** of backoff before the split ever happened. The
+comment above the throw described the intended behaviour; the code did the
+opposite.
+
+Fixed with a tagged class so the catch can tell its own throw apart:
+
+```ts
+export class NonRetryableRpcError extends Error {}
+…
+  if (this.signal.aborted) throw err;
+  if (err instanceof NonRetryableRpcError) throw err;   // propagate, do not retry
+  if (attempt === 6) throw err;
+```
+
+Backoff timing, attempt count and abort handling unchanged. Rate limiting keeps
+every one of its attempts.
+
+### Chunk 8, before and after
+
+| | before | after |
+|---|---|---|
+| requests | ~10 | **6** |
+| splits | not captured | **2** |
+| **retries** | **8** | **0** |
+| **elapsed** | **210.2 s** | **24.3 s** |
+
+The other 14 chunks are the control and are unchanged at 2 requests, 0 splits,
+0 retries, ~8.0 s each. `cum logs` shows why chunk 8 was oversized: it jumped
+from 4,291 to 28,343 — one 200-wallet chunk holding ~24,000 transfer logs. The
+window genuinely needed splitting; the classifier was never letting it.
+
+### The cycle that followed
+
+**Completed — `aborted = false`, 231.1 s = 77.0% of the 300 s guard.**
+
+```
+PHASES  sweep 10 | transfers 34 | receipts 29 = 73 requests
+rpc_splits 2 | rpc_retries 0 | receipt_rate_limited 0 | truncated 5
+detected 292 | eligible 72 | with buyer 72 | suppressed 0 | ALERTED 72
+cursor 52,758,344 -> 52,893,183
+```
+
+Totals: 34 transfer requests, 2 splits, 0 retries, 136.0 s — and pacing accounts
+for 136.0 s of that 136.0 s. Nothing unexplained.
+
+### No regression elsewhere
+
+group2, three cycles after the fix — 39.0 s / 14 req, 32.8 s / 11 req,
+36.8 s / 13 req — against a pre-fix band of 28.6–52.1 s and 9–17 requests.
+`receipt_rate_limited` 0 throughout.
+
+new-token-watch, the third `logsRange` caller, was paying the same tax silently:
+3 of its 8 runs in the prior 3 hours failed at the guard, avg 244.5 s, max
+311.5 s. One post-fix run: 216.3 s, success. One run is suggestive, not proof.
+
+### The false claim this removed
+
+`sweep_block_window` in `monitors/group1-new-token.yaml` carried a comment
+asserting that a 20,000-block PoolManager query "does not return in reasonable
+time on this endpoint". **That was measured false**: 15 attempts across 1k/5k/20k
+spans, median 0.3 s at every span, 0 errors, latency flat in range. The comment
+has been replaced with what was actually established. 5,000 stays as a
+preference, not a remedy.
+
+## What the counters pointed at before the fix, kept for the record
 
 `PublicRpc.call()` retries on any non-abort error with `3000 * (attempt + 1) ** 2`
 backoff. Seven attempts is 3 + 12 + 27 + 45 + 45 + 45 = **177 s**, plus seven

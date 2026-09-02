@@ -77,14 +77,18 @@ options:
 
   watchlist_chunk: 200
   transfer_block_window: 20000
-  # 5,000 for the Initialize sweep, NOT group2's 20,000. Measured on the two
-  # aborted cold starts: 5 sweep requests consumed 300 s, so ~284 s was spent
-  # INSIDE individual eth_getLogs calls, not in pacing -- a 20,000-block query
-  # against the PoolManager does not return in reasonable time on this endpoint,
-  # and PublicRpc treats a timeout as retryable with 3000*(n+1)^2 backoff.
-  # Smaller windows trade more requests (paced, predictable) for fewer timeouts
-  # (unbounded). A full 1h catch-up is 8 windows here = ~32 s of pacing.
-  # group2 keeps 20,000: its cursor is warm and it sweeps a few hundred blocks.
+  # 5,000 for the Initialize sweep, kept AFTER the claim that justified it was
+  # measured false. The original comment here said a 20,000-block PoolManager
+  # query "does not return in reasonable time on this endpoint". It does:
+  # measured 15 attempts across 1k/5k/20k spans, median 0.3 s at every span,
+  # 0 errors, latency flat in range (1.26x for a 20x range increase).
+  #
+  # The real cause of the aborts was rpc.ts's retry classifier swallowing its
+  # own non-retryable throw, so an oversized window burned 177 s of backoff
+  # before logs() could split it. Fixed there, not here.
+  #
+  # 5,000 stays because smaller windows split less often and a split is cheap
+  # now, but it is a preference, not a remedy -- 20,000 would also work.
   sweep_block_window: 5000
   # Measured: 0 of 20 eth_getLogs refused at 4,000 ms, 6 of 20 at 2,500 ms.
   min_interval_ms: 4000
