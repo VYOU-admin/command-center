@@ -1,0 +1,35 @@
+# Repeated balance readings for wallets that bought and held.
+#
+# Scope is defined by the seeded 'window_close' rows in token_balance_scans, not
+# by a query: Group 1 membership depends on transfer logs that are not in the
+# database, and the closest SQL proxy returns 119 of 266 ODYSSEUS wallets.
+#
+# Per-pass cost, measured basis: 266 wallets / 20 per batch = 14 requests plus 2
+# for head and its timestamp = 16 requests at 4,000 ms = 64 s, 21% of the
+# spine's 300 s ceiling. One balanceOf per request would be 268 requests =
+# 1,072 s = 357% and would not fit.
+
+id: token-balance-scan
+name: Token Balance Scan
+source: token-balance-scan
+enabled: true
+
+# Hourly tick; each token decides independently whether it is due.
+schedule: 1h
+
+alerts:
+  channel: system
+
+options:
+  chain: robinhood
+  rpc_url: https://rpc.mainnet.chain.robinhood.com
+
+  # Per-token schedule, dated from that token's own window close.
+  fast_interval_hours: 6
+  fast_phase_weeks: 4
+  slow_interval_hours: 24
+
+  # 4,000 ms is the measured point where this endpoint stops returning 429s.
+  # A batch is one request, so the pacing applies per batch.
+  min_interval_ms: 4000
+  batch_size: 20
