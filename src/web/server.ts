@@ -16,6 +16,7 @@ import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard, renderRecordListPanel } from './views.js';
 import {
   renderCatePnlPage, type CatePnlRow, type ClusterRow, type TokenMetaRow,
+  type GroupRow, type ScanRow,
 } from './cate-pnl.js';
 
 export interface WebServerOptions {
@@ -263,7 +264,38 @@ export function createWebServer(opts: WebServerOptions): Server {
           decode_check: x.decode_check == null ? null : String(x.decode_check),
         }));
       }
-      sendHtml(res, 200, renderCatePnlPage(rows, clusters, new Date(), tokenMeta));
+      // ODYSSEUS group membership and the latest balance scan per wallet. Both
+      // tables are guarded on to_regclass so an environment without them serves
+      // the page instead of 500-ing.
+      let groups: GroupRow[] = [];
+      let scans: ScanRow[] = [];
+      const haveG = await pool.query(
+        `select to_regclass('public.wallet_groups') g, to_regclass('public.token_balance_scans') s`);
+      if (haveG.rows[0]?.g) {
+        const gr = await pool.query(
+          `select token, lower(wallet) wallet, group_no from wallet_groups where token = 'ODYSSEUS'`);
+        groups = gr.rows.map((x: Record<string, unknown>) => ({
+          token: String(x.token), wallet: String(x.wallet), groupNo: Number(x.group_no),
+        }));
+      }
+      if (haveG.rows[0]?.s) {
+        // distinct on wallet, newest scan first: the series is append-only, so
+        // the latest row is the current reading and older rows stay untouched.
+        const sr = await pool.query(
+          `select distinct on (wallet) lower(wallet) wallet, balance_raw::text balance_raw,
+                  status, block, read_at
+             from token_balance_scans
+            where token = 'ODYSSEUS' and scan_kind = 'scan'
+            order by wallet, scanned_at desc`);
+        scans = sr.rows.map((x: Record<string, unknown>) => ({
+          wallet: String(x.wallet),
+          balanceRaw: x.balance_raw == null ? null : String(x.balance_raw),
+          status: String(x.status),
+          block: Number(x.block),
+          readAt: x.read_at ? new Date(String(x.read_at)).toISOString() : null,
+        }));
+      }
+      sendHtml(res, 200, renderCatePnlPage(rows, clusters, new Date(), tokenMeta, groups, scans));
       return;
     }
 

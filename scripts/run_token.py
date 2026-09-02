@@ -735,13 +735,21 @@ def decode_and_report(C):
     tf = rpc.logs_range(token, [TOPICS["transfer"]], W["first_block"], W["boundary_block"], S, "transfers")
     cs = set(cohort); VA = ven.venue_address
     offcnt = defaultdict(int); rawnet = defaultdict(float)
+    # Outbound movement, split by counterparty, for group membership. This is
+    # derivable ONLY here: the transfer logs never reach Postgres, and the
+    # SQL-only proxies fail badly (group 1 -> 119 of 266, group 3 -> 32 selected
+    # for 8 real members), so membership must be computed while `tf` is in hand.
+    out_any = defaultdict(float); out_plain = defaultdict(float)
     for l in tf:
         if len(l["topics"]) < 3: continue
         a = "0x" + l["topics"][1][-40:].lower(); b = "0x" + l["topics"][2][-40:].lower()
         x = int(l["data"], 16) / BD
         if a in cs:
             rawnet[a] -= x
-            if b != VA: offcnt[a] += 1
+            if b != VA:
+                offcnt[a] += 1
+                out_any[a] += x
+                if b not in EXCL: out_plain[a] += x
         if b in cs:
             rawnet[b] += x
             if a != VA: offcnt[b] += 1
@@ -798,10 +806,28 @@ def decode_and_report(C):
     L.record("fifo_not_netflow",
              f"FIFO with unsold inventory at zero; differs from net flow for "
              f"{netflow_diff:,} of {len(rows):,} wallets")
+    # Group membership, by behaviour inside the window only.
+    #   1 bought and held        : >=1 buy, 0 sells to the pool, 0 transfers out
+    #   2 bought and sold        : >=1 buy and >=1 sell to the pool
+    #   3 bought and moved out   : >=1 buy and >=1 transfer to a plain address
+    # A wallet in both 2 and 3 gets a row in each; the groups are behaviours,
+    # not a partition, so a wallet can also be in none.
+    groups = []
+    for r in rows:
+        w = r["wallet"]
+        if (r["n_buys"] or 0) < 1: continue
+        if (r["n_sells"] or 0) == 0 and out_any.get(w, 0.0) == 0: groups.append((w, 1))
+        if (r["n_sells"] or 0) >= 1: groups.append((w, 2))
+        if out_plain.get(w, 0.0) > 0: groups.append((w, 3))
+    gc = defaultdict(int)
+    for _w, g in groups: gc[g] += 1
+    print(f"\nGROUP MEMBERSHIP  1:{gc[1]:,}  2:{gc[2]:,}  3:{gc[3]:,}  "
+          f"rows {len(groups):,}  wallets covered {len({w for w, _ in groups}):,} of {len(rows):,}")
     L.enforce()
     return dict(trades=trades, rows=rows, mc=mc, cohort=cohort, under=under,
                 binding=binding, excess=excess, byw=byw, blocked=blocked,
-                unattr=unattr, rawnet=rawnet, bnd_b=bnd_b, offcnt=offcnt, THR=THR)
+                unattr=unattr, rawnet=rawnet, bnd_b=bnd_b, offcnt=offcnt, THR=THR,
+                groups=groups)
 
 
 def report(C, D):
@@ -1010,7 +1036,14 @@ def build_payload(C, D):
                             f"/{sum(1 for r in rows if not r['has_off_pool_activity']):,} wallets. "
                             f"Boundary is the LAST block with timestamp <= window end. "
                             f"Infrastructure excluded at the candidate stage.")}
-    return {"rows": rows, "clusters": clusters, "token": tok}
+    # Emitted with the payload because run_token has no route to Postgres: the
+    # database is reachable only from inside Railway, so the loader writes it.
+    utcnow = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    groups = [{"wallet": w, "group_no": g} for w, g in D.get("groups", [])]
+    return {"rows": rows, "clusters": clusters, "token": tok,
+            "groups": {"token": label, "chain": args.chain, "derived_at": utcnow,
+                       "source": f"run_token {label} transfer logs + decoded swaps",
+                       "rows": groups}}
 
 
 def main():

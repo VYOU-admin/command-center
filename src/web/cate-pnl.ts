@@ -124,6 +124,30 @@ export interface TokenMetaRow {
   decode_check: string | null;
 }
 
+/**
+ * Group membership, by behaviour inside the analysis window.
+ *
+ * Stored rather than derived, because the derivation needs transfer logs that
+ * never reach Postgres. The SQL-only proxies were measured and both fail: group
+ * 1 by `not has_off_pool_activity` returns 119 of 266, and group 3 by a balance
+ * shortfall selects 32 wallets for 8 real members.
+ */
+export interface GroupRow { token: string; wallet: string; groupNo: number }
+
+/**
+ * The newest balance reading per wallet from the append-only scan series.
+ *
+ * `balanceRaw` is null when the read failed; the page must show that as unknown
+ * rather than zero, which is the whole reason the scanner records a status.
+ */
+export interface ScanRow {
+  wallet: string;
+  balanceRaw: string | null;
+  status: string;
+  block: number;
+  readAt: string | null;
+}
+
 /** A wallet_clusters row. Independent of wallet_pnl and its cohort filter. */
 export interface ClusterRow {
   chain: string;
@@ -142,6 +166,8 @@ export function renderCatePnlPage(
   clusters: ClusterRow[],
   generatedAt: Date,
   tokenMeta: TokenMetaRow[] = [],
+  groups: GroupRow[] = [],
+  scans: ScanRow[] = [],
 ): string {
   const tokens = [...new Set(rows.map((r) => r.token))].sort();
   return `<!doctype html>
@@ -245,6 +271,8 @@ const ROWS = ${JSON.stringify(rows)};
 const CLUSTERS = ${JSON.stringify(clusters)};
 const TOKENS = ${JSON.stringify(tokens)};
 const TOKENMETA = ${JSON.stringify(tokenMeta)};
+const GROUPS = ${JSON.stringify(groups)};
+const SCANS = ${JSON.stringify(scans)};
 const PER = 50;
 let tab = '__all';
 let sortKey='realized_pnl_sol', sortDir=-1, page=1, mode='flat';
@@ -798,6 +826,155 @@ function renderCross(){
     '<div class="tablebox"><table><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>';
 }
 
+/* ---------------------------------------------------------------- ODYSSEUS */
+/**
+ * ODYSSEUS gets its own view: three behaviour sub-tabs rather than one table.
+ *
+ * Group membership is READ FROM wallet_groups, not recomputed here. It depends
+ * on transfer logs that never reach Postgres, and both SQL-only proxies were
+ * measured and rejected (group 1 -> 119 of 266, group 3 -> 32 selected for 8).
+ *
+ * The current balance column reads the newest row of the append-only scan
+ * series, NOT wallet_pnl.onchain_balance, which was a one-off read at the run's
+ * head block and goes stale within hours. A scan row whose read failed carries a
+ * null balance and an error status, and is shown as "unknown" -- never as zero.
+ */
+var oSub = 1;              // which behaviour sub-tab is open
+var oFilters = false;      // filter block starts collapsed
+
+var _gmemo = null;
+function groupsOf(w){
+  if(!_gmemo){ _gmemo={}; GROUPS.forEach(function(g){
+    (_gmemo[g.wallet]=_gmemo[g.wallet]||[]).push(g.groupNo); }); }
+  return _gmemo[w]||[];
+}
+var _smemo = null;
+function scanOf(w){
+  if(!_smemo){ _smemo={}; SCANS.forEach(function(x){ _smemo[x.wallet]=x; }); }
+  return _smemo[w]||null;
+}
+/** Newest scan read time across the series, for labelling the header cards. */
+function scanReadAt(){
+  var t=null;
+  SCANS.forEach(function(x){ if(x.readAt && (!t || x.readAt>t)) t=x.readAt; });
+  return t;
+}
+var TOK18 = 1e18;
+function scanBalance(w){
+  var s=scanOf(w);
+  if(!s) return {known:false, value:null, note:'no scan yet'};
+  if(s.balanceRaw===null) return {known:false, value:null, note:s.status};
+  return {known:true, value:Number(s.balanceRaw)/TOK18, note:s.status};
+}
+function odysseusRows(g){
+  return ROWS.filter(function(r){ return r.token==='ODYSSEUS' && groupsOf(r.wallet).indexOf(g)>=0; });
+}
+function oStatus(r){
+  var b=scanBalance(r.wallet);
+  if(!b.known) return 'unknown';
+  if(b.value>0) return 'still holds';
+  return r.sold_out ? 'sold out in window' : 'exited after window';
+}
+function fmtTok(v){ return v===null||v===undefined?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:0}); }
+function balCell(r){
+  var b=scanBalance(r.wallet);
+  if(!b.known) return '<span class="zb" title="'+esc(b.note)+'">unknown</span>';
+  return fmtTok(b.value);
+}
+function balUsd(r){
+  var b=scanBalance(r.wallet); var m=TOKENMETA.filter(function(x){return x.token==='ODYSSEUS';})[0];
+  if(!b.known || !m || m.price_usd==null) return '<span class="muted">—</span>';
+  return '$'+(b.value*m.price_usd).toLocaleString('en-US',{maximumFractionDigits:2});
+}
+var OCOLS = {
+  1:[['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+     ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
+     ['tokens_bought','Tokens bought','num0'],['sol_in','ETH spent','num6'],
+     ['usd_spent','USD spent','usd'],['tokens_still_held','Held at window close','num0'],
+     ['cur_bal','Current balance','bal'],['cur_usd','Current USD','balusd'],['status','Status','text']],
+  2:[['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+     ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
+     ['tokens_bought','Tokens bought','num0'],['sol_in','ETH in','num6'],['usd_in','USD in','usd'],
+     ['n_sells','Sells','int'],['tokens_sold','Tokens sold','num0'],['sol_out','ETH out','num6'],
+     ['usd_out','USD out','usd'],['realized_pnl_sol','PnL ETH','num6'],
+     ['realized_pnl_usd','PnL USD','usd'],['tokens_still_held','Left at window close','num0'],
+     ['cur_bal','Current balance','bal'],['cur_usd','Current USD','balusd'],['status','Status','text']],
+  3:[['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+     ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
+     ['tokens_bought','Tokens bought','num0'],['sol_in','ETH in','num6'],['usd_in','USD in','usd'],
+     ['tokens_still_held','Left at window close','num0'],
+     ['cur_bal','Current balance','bal'],['cur_usd','Current USD','balusd'],['status','Status','text']]
+};
+function oCell(r,c){
+  var k=c[0], kind=c[2];
+  if(kind==='wallet') return cell(r,{k:'wallet',kind:'wallet'});
+  if(kind==='bal') return balCell(r);
+  if(kind==='balusd') return balUsd(r);
+  if(kind==='text') return esc(oStatus(r));
+  if(kind==='time') return '<span class="muted">'+String(r[k]||'').replace('T',' ').replace('Z','')+'</span>';
+  if(kind==='int') return r[k]===null?'<span class="muted">—</span>':r[k];
+  if(kind==='usd'){
+    var v = k==='usd_spent'||k==='usd_in' ? (r.sol_in||0)*2474.77
+          : k==='usd_out' ? (r.sol_out||0)*2474.77 : r[k];
+    return cell({x:v},{k:'x',kind:'usd'});
+  }
+  if(kind==='num6') return fmt(r[k],6);
+  return fmtTok(r[k]);
+}
+function renderOdysseus(){
+  var meta=TOKENMETA.filter(function(x){return x.token==='ODYSSEUS';})[0]||{};
+  var g1=odysseusRows(1);
+  var rs=odysseusRows(oSub);
+  // Remaining balance: latest scan, group 1 only, in tokens. Unknown reads are
+  // excluded from the sum and counted separately rather than treated as zero.
+  var sum=0, unknown=0;
+  g1.forEach(function(r){ var b=scanBalance(r.wallet); if(b.known) sum+=b.value; else unknown++; });
+  var rt=scanReadAt();
+  var when=rt?rt.replace('T',' ').replace(/\..*/,'')+' UTC':'no scan yet';
+  var px=meta.price_usd, cap=(px!=null&&meta.total_supply!=null)?px*Number(meta.total_supply):null;
+  var pwhen=meta.price_block!=null?('block '+Number(meta.price_block).toLocaleString('en-US')):'unknown';
+  document.getElementById('sub').textContent='· ODYSSEUS · '+rs.length+' wallets in group '+oSub;
+  var card=function(l,v,s){ return '<div class="card"><div class="k">'+l+'</div><div class="v">'+v+
+    '</div>'+(s?'<div class="k">'+s+'</div>':'')+'</div>'; };
+  document.getElementById('view').innerHTML=
+    '<div class="cards">'+
+      card('Showing',rs.length.toLocaleString('en-US'),'group '+oSub+' of 3')+
+      card('Remaining balance',fmtTok(sum),'group 1, read '+esc(when)+(unknown?' · '+unknown+' unknown':''))+
+      card('Current price',px!=null?('$'+Number(px).toPrecision(4)):'—','read at '+esc(pwhen))+
+      card('Current market cap',cap!=null?('$'+cap.toLocaleString('en-US',{maximumFractionDigits:0})):'—','read at '+esc(pwhen))+
+    '</div>'+
+    '<div class="toolbar"><button class="btn" id="ofilt">'+(oFilters?'Hide':'Show')+' filters</button>'+
+      '<span style="flex:1"></span><button class="btn" id="export">Export CSV</button></div>'+
+    (oFilters?('<div class="filters"><div class="frow">'+
+      '<div class="f"><label>Wallet search</label><input class="txt" type="text" placeholder="partial address" data-f="oq" value="'+(F.oq??'')+'"></div>'+
+      '<div class="f"><label>Tokens bought</label><div class="pair">'+
+        '<input class="num" type="number" step="any" placeholder="min" data-f="omin" value="'+(F.omin??'')+'">'+
+        '<span>–</span><input class="num" type="number" step="any" placeholder="max" data-f="omax" value="'+(F.omax??'')+'"></div></div>'+
+      '<button class="btn" id="clearf">Clear filters</button></div></div>'):'')+
+    '<div class="tabs">'+[1,2,3].map(function(g){
+        var lbl={1:'1 · bought and held',2:'2 · bought and sold',3:'3 · bought and transferred out'}[g];
+        return '<button class="'+(oSub===g?'on':'')+'" data-osub="'+g+'">'+lbl+' ('+odysseusRows(g).length+')</button>';
+      }).join('')+'</div>'+
+    '<div class="tablebox"><table><thead><tr>'+
+      OCOLS[oSub].map(function(c){ return '<th'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'?' class="l"':'')+'>'+c[1]+'</th>'; }).join('')+
+      '</tr></thead><tbody>'+
+      oFiltered().map(function(r){ return '<tr>'+OCOLS[oSub].map(function(c){
+        return '<td'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'?' class="l"':'')+'>'+oCell(r,c)+'</td>'; }).join('')+'</tr>'; }).join('')+
+      '</tbody></table></div>';
+}
+function oFiltered(){
+  var rs=odysseusRows(oSub);
+  var q=(F.oq||'').toLowerCase();
+  var lo=F.omin!==undefined&&F.omin!==''?Number(F.omin):null;
+  var hi=F.omax!==undefined&&F.omax!==''?Number(F.omax):null;
+  return rs.filter(function(r){
+    if(q && r.wallet.toLowerCase().indexOf(q)<0) return false;
+    if(lo!==null && (r.tokens_bought||0)<lo) return false;
+    if(hi!==null && (r.tokens_bought||0)>hi) return false;
+    return true;
+  }).sort(function(a,b){ return (b.tokens_bought||0)-(a.tokens_bought||0); });
+}
+
 function renderGroups(){
   // READS wallet_clusters, NOT wallet_pnl.tag. The whole reason the table is
   // separate is that 259 of 274 clustered wallets have no PnL row at all — the
@@ -871,6 +1048,7 @@ function render(){
     '<button class="'+(tab==='__groups'?'on':'')+'" data-tab="__groups">Groups</button>';
   if(tab==='__cross') renderCross();
   else if(tab==='__groups') renderGroups();
+  else if(tab==='ODYSSEUS' && GROUPS.length) renderOdysseus();
   else renderTable();
 }
 
@@ -962,6 +1140,9 @@ document.addEventListener('click',(e)=>{
   const tb=e.target.closest('[data-tab]');
   if(tb){ tab=tb.dataset.tab; page=1; sel.clear(); render(); return; }
   if(e.target.id==='clearf'){ for(const k of Object.keys(F)) delete F[k]; page=1; render(); return; }
+  if(e.target.id==='ofilt'){ oFilters=!oFilters; render(); return; }
+  const os=e.target.closest('[data-osub]');
+  if(os){ oSub=Number(os.dataset.osub); render(); return; }
   if(e.target.id==='export'){ exportCsv(); return; }
   if(e.target.id==='m-flat'){ mode='flat'; page=1; render(); return; }
   if(e.target.id==='m-group'){ mode='group'; page=1; render(); return; }
