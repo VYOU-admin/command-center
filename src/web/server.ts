@@ -16,7 +16,7 @@ import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard, renderRecordListPanel } from './views.js';
 import {
   renderCatePnlPage, type CatePnlRow, type ClusterRow, type TokenMetaRow,
-  type GroupRow, type ScanRow,
+  type GroupRow, type ScanRow, type TagRow,
 } from './cate-pnl.js';
 
 export interface WebServerOptions {
@@ -121,6 +121,47 @@ export function createWebServer(opts: WebServerOptions): Server {
         sendJson(res, 500, { error: 'write failed' });
         return;
       }
+    }
+
+    // Per-token wallet tag. Separate from /api/wallet-tag, which is token-blind
+    // by design and is left alone so the other tabs keep working.
+    if (req.method === 'POST' && path === '/api/token-tag') {
+      let raw = '';
+      for await (const chunk of req) {
+        raw += chunk;
+        if (raw.length > 100_000) { sendJson(res, 413, { error: 'body too large' }); return; }
+      }
+      let body: Record<string, unknown>;
+      try { body = JSON.parse(raw || '{}') as Record<string, unknown>; }
+      catch { sendJson(res, 400, { error: 'invalid json' }); return; }
+      const token = String(body.token ?? '').trim();
+      const chain = String(body.chain ?? '').trim();
+      const wallet = String(body.wallet ?? '').trim().toLowerCase();
+      const tag = String(body.tag ?? '').trim().slice(0, 128);
+      if (!token || !chain || !wallet) {
+        sendJson(res, 400, { error: 'token, chain and wallet are required' }); return;
+      }
+      try {
+        if (tag === '') {
+          // Empty means no tag, represented by the absence of a row.
+          const d = await pool.query(
+            `delete from wallet_tags where token=$1 and chain=$2 and wallet=$3`,
+            [token, chain, wallet]);
+          sendJson(res, 200, { ok: true, tag: '', deleted: d.rowCount ?? 0 });
+          return;
+        }
+        await pool.query(
+          `insert into wallet_tags (token, chain, wallet, tag, updated_at)
+           values ($1,$2,$3,$4, now())
+           on conflict (token, chain, wallet) do update
+             set tag = excluded.tag, updated_at = now()`,
+          [token, chain, wallet, tag]);
+        sendJson(res, 200, { ok: true, tag });
+      } catch (err) {
+        log.error('token tag write failed', errorFields(err as Error));
+        sendJson(res, 500, { error: 'write failed' });
+      }
+      return;
     }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -296,7 +337,18 @@ export function createWebServer(opts: WebServerOptions): Server {
           readAt: x.read_at ? new Date(String(x.read_at)).toISOString() : null,
         }));
       }
-      sendHtml(res, 200, renderCatePnlPage(rows, clusters, new Date(), tokenMeta, groups, scans));
+      let tags: TagRow[] = [];
+      const haveT = await pool.query(`select to_regclass('public.wallet_tags') t`);
+      if (haveT.rows[0]?.t) {
+        const tr = await pool.query(
+          `select token, chain, lower(wallet) wallet, tag from wallet_tags where token = 'ODYSSEUS'`);
+        tags = tr.rows.map((x: Record<string, unknown>) => ({
+          token: String(x.token), chain: String(x.chain),
+          wallet: String(x.wallet), tag: String(x.tag),
+        }));
+      }
+      sendHtml(res, 200,
+        renderCatePnlPage(rows, clusters, new Date(), tokenMeta, groups, scans, tags));
       return;
     }
 

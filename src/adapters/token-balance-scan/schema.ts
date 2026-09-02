@@ -38,4 +38,33 @@ export async function migrate(client: PoolClient): Promise<void> {
       on token_balance_scans (token, scanned_at desc)`);
   await client.query(`create index if not exists tbs_kind_idx
       on token_balance_scans (token, scan_kind)`);
+
+  /*
+   * Per-token wallet tags.
+   *
+   * DELIBERATELY NOT wallet_pnl.tag. That column is bound to /api/wallet-tag,
+   * which updates `where wallet = any(...)` with no token filter, so a tag set
+   * on one token's tab would land on that wallet's rows in every token -- and
+   * 558 wallets appear in more than one cohort. Keying on (token, chain, wallet)
+   * here keeps tags per token and leaves the existing endpoint untouched.
+   *
+   * It also survives a re-run structurally: no loader writes a table it does not
+   * know about, whereas wallet_pnl.tag survives only while every loader keeps
+   * its `tag_source is distinct from 'manual'` guard intact.
+   *
+   * An empty tag deletes the row rather than storing a blank, so absence is the
+   * representation of "no tag".
+   *
+   * Created here because migrate() is the boot-time hook that runs before the
+   * web server serves a request; it is not otherwise related to balance scans.
+   */
+  await client.query(`
+    create table if not exists wallet_tags (
+      token      text not null,
+      chain      text not null,
+      wallet     text not null,
+      tag        text not null,
+      updated_at timestamptz not null default now(),
+      primary key (token, chain, wallet)
+    )`);
 }

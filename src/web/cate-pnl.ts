@@ -149,6 +149,15 @@ export interface ScanRow {
   readAt: string | null;
 }
 
+/**
+ * A per-token wallet tag.
+ *
+ * Stored in wallet_tags, NOT wallet_pnl.tag: that column is written by
+ * /api/wallet-tag with no token filter, so a tag set here would spread to the
+ * same wallet's rows in every other token. Absence of a row means no tag.
+ */
+export interface TagRow { token: string; chain: string; wallet: string; tag: string }
+
 /** A wallet_clusters row. Independent of wallet_pnl and its cohort filter. */
 export interface ClusterRow {
   chain: string;
@@ -169,6 +178,7 @@ export function renderCatePnlPage(
   tokenMeta: TokenMetaRow[] = [],
   groups: GroupRow[] = [],
   scans: ScanRow[] = [],
+  tags: TagRow[] = [],
 ): string {
   const tokens = [...new Set(rows.map((r) => r.token))].sort();
   return `<!doctype html>
@@ -233,6 +243,8 @@ export function renderCatePnlPage(
   tbody tr.grouphead td { background:rgba(108,182,255,.10); font-weight:600; color:var(--link); cursor:pointer; }
   .pos { color:var(--ok); } .neg { color:var(--bad); }
   .bad { color:var(--bad); font-weight:600; }
+  input.bad { border-color:var(--bad); }
+  input.okflash { border-color:var(--ok); }
   .wallet { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; border-bottom:1px dotted var(--muted); }
   .wallet:hover { color:var(--link); }
   .tag { display:inline-block; font-size:11px; padding:1px 7px; border-radius:999px; background:rgba(108,182,255,.15); color:var(--link); cursor:text; }
@@ -274,6 +286,7 @@ const TOKENS = ${JSON.stringify(tokens)};
 const TOKENMETA = ${JSON.stringify(tokenMeta)};
 const GROUPS = ${JSON.stringify(groups)};
 const SCANS = ${JSON.stringify(scans)};
+const TAGS = ${JSON.stringify(tags)};
 const PER = 50;
 let tab = '__all';
 let sortKey='realized_pnl_sol', sortDir=-1, page=1, mode='flat';
@@ -849,6 +862,35 @@ function groupsOf(w){
     (_gmemo[g.wallet]=_gmemo[g.wallet]||[]).push(g.groupNo); }); }
   return _gmemo[w]||[];
 }
+/**
+ * One tag per (token, wallet), so both sub-tabs of a wallet in groups 2 and 3
+ * read the same entry and show the same value.
+ */
+var _tmemo = null;
+function tagOf(w){
+  if(!_tmemo){ _tmemo={}; TAGS.forEach(function(t){ _tmemo[t.wallet]=t.tag; }); }
+  return _tmemo[w]||'';
+}
+function setTagLocal(w,v){ if(!_tmemo) tagOf(w); if(v) _tmemo[w]=v; else delete _tmemo[w]; }
+async function saveOdysseusTag(w, v, el){
+  try{
+    const r=await fetch('/api/token-tag',{method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({token:'ODYSSEUS',chain:'robinhood',wallet:w,tag:v})});
+    const j=await r.json();
+    if(!r.ok||!j.ok) throw new Error(j.error||('HTTP '+r.status));
+    setTagLocal(w, j.tag);
+    el.classList.remove('bad'); el.classList.add('okflash');
+    toast(j.tag? 'tag saved' : 'tag cleared');
+    setTimeout(function(){ el.classList.remove('okflash'); }, 900);
+  }catch(err){
+    // A failed write is shown, never swallowed: the field stays marked and the
+    // in-memory value is not updated, so the page never claims a save happened.
+    el.classList.add('bad');
+    toast('tag NOT saved: '+(err&&err.message?err.message:'unknown error'), true);
+  }
+}
+
 var _smemo = null;
 function scanOf(w){
   if(!_smemo){ _smemo={}; SCANS.forEach(function(x){ _smemo[x.wallet]=x; }); }
@@ -887,20 +929,21 @@ function balUsd(r){
   if(!b.known || !m || m.price_usd==null) return '<span class="muted">—</span>';
   return '$'+(b.value*m.price_usd).toLocaleString('en-US',{maximumFractionDigits:2});
 }
+var TAGCOL = ['tag','Tag','tag'];
 var OCOLS = {
-  1:[['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+  1:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
      ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
      ['tokens_bought','Tokens bought','num0'],['sol_in','ETH spent','num6'],
      ['usd_spent','USD spent','usd'],['tokens_still_held','Held at window close','num0'],
      ['cur_bal','Current balance','bal'],['cur_usd','Current USD','balusd'],['status','Status','text']],
-  2:[['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+  2:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
      ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
      ['tokens_bought','Tokens bought','num0'],['sol_in','ETH in','num6'],['usd_in','USD in','usd'],
      ['n_sells','Sells','int'],['tokens_sold','Tokens sold','num0'],['sol_out','ETH out','num6'],
      ['usd_out','USD out','usd'],['realized_pnl_sol','PnL ETH','num6'],
      ['realized_pnl_usd','PnL USD','usd'],['tokens_still_held','Left at window close','num0'],
      ['cur_bal','Current balance','bal'],['cur_usd','Current USD','balusd'],['status','Status','text']],
-  3:[['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
+  3:[TAGCOL,['wallet','Wallet','wallet'],['first_buy_time_utc','First buy','time'],
      ['first_buy_mcap_usd','Buy mcap $','num0'],['n_buys','Buys','int'],
      ['tokens_bought','Tokens bought','num0'],['sol_in','ETH in','num6'],['usd_in','USD in','usd'],
      ['tokens_still_held','Left at window close','num0'],
@@ -908,6 +951,8 @@ var OCOLS = {
 };
 function oCell(r,c){
   var k=c[0], kind=c[2];
+  if(kind==='tag') return '<input class="tagin otag" data-otag="'+r.wallet+
+    '" value="'+esc(tagOf(r.wallet))+'" placeholder="tag" style="width:110px">';
   if(kind==='wallet') return cell(r,{k:'wallet',kind:'wallet'});
   if(kind==='bal') return balCell(r);
   if(kind==='balusd') return balUsd(r);
@@ -960,10 +1005,10 @@ function renderOdysseus(){
         return '<button class="'+(oSub===g?'on':'')+'" data-osub="'+g+'">'+lbl+' ('+odysseusRows(g).length+')</button>';
       }).join('')+'</div>'+
     '<div class="tablebox"><table><thead><tr>'+
-      OCOLS[oSub].map(function(c){ return '<th'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'?' class="l"':'')+'>'+c[1]+'</th>'; }).join('')+
+      OCOLS[oSub].map(function(c){ return '<th'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'||c[2]==='tag'?' class="l"':'')+'>'+c[1]+'</th>'; }).join('')+
       '</tr></thead><tbody>'+
       oFiltered().map(function(r){ return '<tr>'+OCOLS[oSub].map(function(c){
-        return '<td'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'?' class="l"':'')+'>'+oCell(r,c)+'</td>'; }).join('')+'</tr>'; }).join('')+
+        return '<td'+(c[2]==='wallet'||c[2]==='time'||c[2]==='text'||c[2]==='tag'?' class="l"':'')+'>'+oCell(r,c)+'</td>'; }).join('')+'</tr>'; }).join('')+
       '</tbody></table></div>';
 }
 function oFiltered(){
@@ -1128,6 +1173,16 @@ function exportCsv(){
   toast('exported '+rows.length+' rows');
 }
 
+document.addEventListener('change',(e)=>{
+  const t=e.target;
+  if(t && t.dataset && t.dataset.otag){ saveOdysseusTag(t.dataset.otag, t.value.trim(), t); }
+});
+document.addEventListener('keydown',(e)=>{
+  const t=e.target;
+  if(t && t.dataset && t.dataset.otag && e.key==='Enter'){
+    e.preventDefault(); saveOdysseusTag(t.dataset.otag, t.value.trim(), t); t.blur();
+  }
+});
 document.addEventListener('input',(e)=>{
   const f=e.target.dataset && e.target.dataset.f;
   if(!f) return;
