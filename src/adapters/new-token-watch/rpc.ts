@@ -10,6 +10,18 @@
  */
 import type { Logger } from '../../logger.js';
 
+/**
+ * A JSON-RPC error that retrying cannot fix -- an oversized or malformed query.
+ *
+ * IT EXISTS ONLY SO THE CATCH BELOW CAN TELL IT APART. call() threw a plain
+ * Error for this case and its own catch, which retries anything that is not an
+ * abort, swallowed it: an oversized getLogs burned all seven attempts and
+ * 3000*(n+1)^2 of backoff -- measured at 210 s on one chunk -- before logs()
+ * ever got the chance to split the window. The comment said "throw instead, so
+ * logs() splits immediately"; the code did the opposite.
+ */
+export class NonRetryableRpcError extends Error {}
+
 export interface RpcLog {
   address: string;
   topics: string[];
@@ -113,11 +125,15 @@ export class PublicRpc {
             await new Promise((r) => setTimeout(r, Math.min(45_000, 3000 * (attempt + 1) ** 2)));
             continue;
           }
-          throw new Error(`${method}: ${msg}`);
+          throw new NonRetryableRpcError(`${method}: ${msg}`);
         }
         return body.result;
       } catch (err) {
         if (this.signal.aborted) throw err;
+        // PROPAGATE, DO NOT RETRY. This is the throw six lines above: retrying
+        // an oversized window just times out again, and logs() is waiting to
+        // split it. Rate limiting keeps every one of its attempts.
+        if (err instanceof NonRetryableRpcError) throw err;
         if (attempt === 6) throw err;
         this.retries++;
         await new Promise((r) => setTimeout(r, Math.min(45_000, 3000 * (attempt + 1) ** 2)));
