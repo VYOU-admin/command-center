@@ -77,7 +77,15 @@ options:
 
   watchlist_chunk: 200
   transfer_block_window: 20000
-  sweep_block_window: 20000
+  # 5,000 for the Initialize sweep, NOT group2's 20,000. Measured on the two
+  # aborted cold starts: 5 sweep requests consumed 300 s, so ~284 s was spent
+  # INSIDE individual eth_getLogs calls, not in pacing -- a 20,000-block query
+  # against the PoolManager does not return in reasonable time on this endpoint,
+  # and PublicRpc treats a timeout as retryable with 3000*(n+1)^2 backoff.
+  # Smaller windows trade more requests (paced, predictable) for fewer timeouts
+  # (unbounded). A full 1h catch-up is 8 windows here = ~32 s of pacing.
+  # group2 keeps 20,000: its cursor is warm and it sweeps a few hundred blocks.
+  sweep_block_window: 5000
   # Measured: 0 of 20 eth_getLogs refused at 4,000 ms, 6 of 20 at 2,500 ms.
   min_interval_ms: 4000
 
