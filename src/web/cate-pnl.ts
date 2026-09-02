@@ -121,6 +121,9 @@ export interface TokenMetaRow {
   cohort_size: number | null;
   price_usd: number | null;
   price_block: number | null;
+  /** Solana read point: price_block is an EVM block and is null there. */
+  price_slot: number | null;
+  price_read_at: string | null;
   balance_block: number | null;
   decode_check: string | null;
 }
@@ -1039,6 +1042,12 @@ function oStatusCell(r){
 function fmtTok(v){ return v===null||v===undefined?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:0}); }
 function balCell(r){
   var b=scanBalance(r.wallet);
+  // THREE DISTINCT ABSENCES, never collapsed into one another or into 0:
+  //   no account  -- the wallet has no token account for this mint at all
+  //   unknown     -- a read was attempted and failed, or none has run yet
+  //   0           -- read successfully, and the balance really is zero
+  if(!b.known && b.note==='no_account')
+    return '<span class="zb" title="no token account exists for this mint">no account</span>';
   if(!b.known) return '<span class="zb" title="'+esc(b.note)+'">unknown</span>';
   return fmtTok(b.value);
 }
@@ -1054,7 +1063,8 @@ function balCell(r){
 function balReadCell(r){
   var s=scanOf(r.wallet);
   if(!s || !s.readAt) return '<span class="muted">\u2014</span>';
-  return '<span class="muted" title="block '+Number(s.block).toLocaleString('en-US')+
+  var unit = chainOf(tab)==='solana' ? 'slot ' : 'block ';
+  return '<span class="muted" title="'+unit+Number(s.block).toLocaleString('en-US')+
     (s.sweepNo==null?' \u00b7 read before sweeps existed':' \u00b7 sweep '+s.sweepNo)+
     '">'+esc(fmtRead(s.readAt))+'</span>';
 }
@@ -1170,7 +1180,13 @@ function renderOdysseus(){
   // The range the sum was actually built from, not its newest member.
   var when=scanReadLabel(g1);
   var px=meta.price_usd, cap=(px!=null&&meta.total_supply!=null)?px*Number(meta.total_supply):null;
-  var pwhen=meta.price_block!=null?('block '+Number(meta.price_block).toLocaleString('en-US')):'unknown';
+  // Solana has no block number: price_slot / price_read_at carry the read
+  // point instead, and the timestamp is what a reader can actually use.
+  var pwhen = chainOf(tab)==='solana'
+    ? (meta.price_read_at ? fmtRead(meta.price_read_at)+' UTC'
+        + (meta.price_slot!=null?' \u00b7 slot '+Number(meta.price_slot).toLocaleString('en-US'):'')
+       : 'unknown')
+    : (meta.price_block!=null?('block '+Number(meta.price_block).toLocaleString('en-US')):'unknown');
   document.getElementById('sub').textContent='· '+tab+' · '+rs.length+' wallets in group '+oSub;
   var card=function(l,v,s){ return '<div class="card"><div class="k">'+l+'</div><div class="v">'+v+
     '</div>'+(s?'<div class="k">'+s+'</div>':'')+'</div>'; };

@@ -302,6 +302,8 @@ export function createWebServer(opts: WebServerOptions): Server {
           cohort_size: x.cohort_size == null ? null : Number(x.cohort_size),
           price_usd: x.price_usd == null ? null : Number(x.price_usd),
           price_block: x.price_block == null ? null : Number(x.price_block),
+          price_slot: x.price_slot == null ? null : Number(x.price_slot),
+          price_read_at: x.price_read_at == null ? null : String(x.price_read_at),
           balance_block: x.balance_block == null ? null : Number(x.balance_block),
           decode_check: x.decode_check == null ? null : String(x.decode_check),
         }));
@@ -360,6 +362,25 @@ export function createWebServer(opts: WebServerOptions): Server {
           readAt: x.read_at ? new Date(String(x.read_at)).toISOString() : null,
           sweepNo: x.sweep_no == null ? null : Number(x.sweep_no),
         }));
+      }
+      // Solana balances live in their own table: `slot`, not `block`, and a
+      // no_account state the EVM scanner has no equivalent for. Latest row per
+      // wallet, same distinct-on shape. Wallets are NOT lowercased -- base58.
+      const haveS = await pool.query(`select to_regclass('public.solana_balance_scans') s`);
+      if (haveS.rows[0]?.s) {
+        const ss = await pool.query(
+          `select distinct on (token, wallet) token, wallet,
+                  balance_raw::text balance_raw, status, slot, read_at
+             from solana_balance_scans
+            order by token, wallet, scanned_at desc`);
+        for (const x of ss.rows as Record<string, unknown>[])
+          scans.push({
+            token: String(x.token), wallet: String(x.wallet),
+            balanceRaw: x.balance_raw == null ? null : String(x.balance_raw),
+            status: String(x.status), block: Number(x.slot),
+            readAt: x.read_at ? new Date(String(x.read_at)).toISOString() : null,
+            sweepNo: null,
+          });
       }
       let tags: TagRow[] = [];
       const haveT = await pool.query(`select to_regclass('public.wallet_tags') t`);
