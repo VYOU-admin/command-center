@@ -327,7 +327,12 @@ export function createWebServer(opts: WebServerOptions): Server {
       const haveM = await pool.query(`select to_regclass('public.mos_wallet_groups') m`);
       if (haveM.rows[0]?.m) {
         const mr = await pool.query(
-          `select token, lower(wallet) wallet, group_no from mos_wallet_groups`);
+          // NOT lower(): Solana addresses are case-sensitive base58, and
+          // lowercasing one destroys it. wallet_pnl stores them as-is, so
+          // lowercasing here made every MOS group lookup miss and the page
+          // rendered 0 rows in all three groups. EVM hex above is stored
+          // lowercase already, so its lower() is a no-op and stays.
+          `select token, wallet, group_no from mos_wallet_groups`);
         for (const x of mr.rows as Record<string, unknown>[])
           groups.push({ token: String(x.token), wallet: String(x.wallet),
             groupNo: Number(x.group_no) });
@@ -360,7 +365,10 @@ export function createWebServer(opts: WebServerOptions): Server {
       const haveT = await pool.query(`select to_regclass('public.wallet_tags') t`);
       if (haveT.rows[0]?.t) {
         const tr = await pool.query(
-          `select token, chain, lower(wallet) wallet, tag from wallet_tags`);
+          // Same base58 hazard: tags are written from the page with the wallet
+          // exactly as the row carries it, so selecting it back raw matches both
+          // chains. EVM wallets are already lowercase, so nothing changes there.
+          `select token, chain, wallet, tag from wallet_tags`);
         tags = tr.rows.map((x: Record<string, unknown>) => ({
           token: String(x.token), chain: String(x.chain),
           wallet: String(x.wallet), tag: String(x.tag),
