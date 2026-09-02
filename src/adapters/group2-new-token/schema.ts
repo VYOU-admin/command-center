@@ -36,6 +36,35 @@ export async function migrate(client: PoolClient): Promise<void> {
       primary key (token, chain)
     )`);
 
+  /*
+   * The pool this monitor links for a token, and where the choice came from.
+   *
+   * ITS OWN TABLE, NOT token_pool_first. That table is shared with
+   * new-token-watch, which reads pool_id to build ITS links, and its write uses
+   * coalesce(existing, new) so a cached pool is never replaced. Both of those
+   * stay exactly as they are: changing either would alter what the disabled
+   * monitor emits when re-enabled, which is a silent change to shared state.
+   *
+   * NO COALESCE HERE, deliberately -- that freeze is the second half of the bug.
+   * A later, better-evidenced pool replaces an earlier one on every write, so a
+   * token whose real market moves is re-linked rather than stuck.
+   *
+   * source is 'swap' (the pool the wallets actually traded, from the Swap log)
+   * or 'fallback' (DexScreener's highest-liquidity pair). n_transfers is how
+   * many of that token's qualifying transfers carried the chosen poolId, and is
+   * null for a fallback.
+   */
+  await client.query(`
+    create table if not exists group2_token_pool (
+      token       text        not null,
+      chain       text        not null,
+      pool_id     text        not null,
+      source      text        not null,
+      n_transfers int,
+      updated_at  timestamptz not null default now(),
+      primary key (token, chain)
+    )`);
+
   await client.query(`
     create table if not exists group2_new_token_cursor (
       chain            text primary key,
@@ -66,6 +95,11 @@ export async function migrate(client: PoolClient): Promise<void> {
       omitted_no_pool_id  int,
       omitted_no_pair     int,
       duplicate_symbols   int,
+      linked_from_swap    int,
+      linked_from_fallback int,
+      multi_poolid_tokens int,
+      ambiguous_receipts  int,
+      extra_rpc_requests  int,
       swept_from          bigint,
       swept_to            bigint,
       duration_ms         int,

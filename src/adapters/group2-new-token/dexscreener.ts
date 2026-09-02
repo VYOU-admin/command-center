@@ -52,3 +52,36 @@ export async function resolvePairs(
   }
   return { found, failedBatches };
 }
+
+/**
+ * The highest-liquidity pair for a token, used ONLY when no swap poolId was
+ * obtained. One request per token -- there is no batch form of the tokens
+ * endpoint -- so this is called for the fallback set alone, never for every
+ * candidate.
+ *
+ * A request that throws yields null, and the caller counts it as unresolved
+ * rather than as "no pair": an outage must not be recorded as an absence.
+ */
+export async function topPairByToken(
+  chainSlug: string, token: string, signal: AbortSignal,
+  fetchImpl: typeof fetch = fetch,
+): Promise<PairInfo | null> {
+  try {
+    const res = await fetchImpl(
+      `https://api.dexscreener.com/latest/dex/tokens/${token}`, { signal });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { pairs?: unknown };
+    const pairs = (Array.isArray(body.pairs) ? body.pairs : []) as Record<string, unknown>[];
+    if (!pairs.length) return null;
+    const best = pairs
+      .map((p) => ({ p, liq: Number((p.liquidity as { usd?: number } | undefined)?.usd ?? 0) }))
+      .sort((a, b) => b.liq - a.liq)[0]!.p;
+    const addr = String(best.pairAddress ?? '').toLowerCase();
+    if (!addr) return null;
+    const base = best.baseToken as { symbol?: string } | undefined;
+    return { poolId: addr, symbol: base?.symbol ? String(base.symbol) : null,
+             url: String(best.url ?? '') };
+  } catch {
+    return null;
+  }
+}

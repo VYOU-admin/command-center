@@ -40,13 +40,16 @@ import type { PoolClient } from '../store/db.js';
 import { migrate } from './group2-new-token/schema.js';
 import { loadWatchlist } from './group2-new-token/watchlist.js';
 import { PublicRpc, topicAddress, padAddress, type RpcLog } from './new-token-watch/rpc.js';
-import { resolvePairs } from './group2-new-token/dexscreener.js';
+import { resolvePairs, topPairByToken } from './group2-new-token/dexscreener.js';
+import { resolveSwapPools } from './group2-new-token/swappool.js';
 import { renderAlert, type AlertLine } from './group2-new-token/message.js';
 
 interface Alerted { token: string; chain: string; count: number }
+interface PoolPick { token: string; chain: string; poolId: string; source: string; transfers: number | null }
 interface RunResult {
   alerted: Alerted[];
   pools: { token: string; block: number; poolId: string; at: Date }[];
+  picks: PoolPick[];
   parts: string[];
   stats: Record<string, number>;
   sweptFrom: number;
@@ -66,6 +69,7 @@ const adapter: SourceAdapter<RunResult> = {
     requireString(o, 'pool_manager', id);
     requireString(o, 'initialize_topic', id);
     requireString(o, 'transfer_topic', id);
+    requireString(o, 'swap_topic', id);
     requireString(o, 'dashboard_url', id);
     requireString(o, 'dexscreener_chain', id);
     if (num(o, 'min_realized_pnl_usd', -1) < 0)
@@ -81,6 +85,7 @@ const adapter: SourceAdapter<RunResult> = {
     const PM = String(o.pool_manager).toLowerCase();
     const INIT = String(o.initialize_topic).toLowerCase();
     const TRANSFER = String(o.transfer_topic).toLowerCase();
+    const SWAP = String(o.swap_topic).toLowerCase();
     const maxAgeMin = num(o, 'max_pool_age_minutes', 120);
     const lookbackH = num(o, 'lookback_hours', 1);
     const bootstrapH = num(o, 'bootstrap_hours', 3);
@@ -175,6 +180,10 @@ const adapter: SourceAdapter<RunResult> = {
     const maxAgeBlocks = (maxAgeMin * 60) / blockSeconds;
     const eligible = new Set<string>();
     const buyers = new Map<string, Set<string>>();
+    // The transactions behind each token's qualifying transfers. Kept here so
+    // the poolId lookup later costs no extra log queries -- only receipts, and
+    // only for tokens that survive the re-alert rule.
+    const txsOf = new Map<string, string[]>();
     for (const l of venue) {
       const token = l.address.toLowerCase();
       const r = resolved.get(token);
@@ -186,6 +195,8 @@ const adapter: SourceAdapter<RunResult> = {
       let s = buyers.get(token);
       if (!s) { s = new Set(); buyers.set(token, s); }
       s.add(wallet);
+      const t = txsOf.get(token);
+      if (t) t.push(l.transactionHash); else txsOf.set(token, [l.transactionHash]);
     }
 
     // ---- re-alert rule: strictly above the highest count ever alerted -----
@@ -201,25 +212,45 @@ const adapter: SourceAdapter<RunResult> = {
     const candidates = withBuyer.filter((t) => (buyers.get(t)?.size ?? 0) > (highs.get(t) ?? 0));
     const suppressed = withBuyer.length - candidates.length;
 
-    // ---- only a token with a real DexScreener pair gets a line ------------
-    const withPool = candidates.filter((t) => resolved.get(t)?.poolId);
-    const omittedNoPoolId = candidates.length - withPool.length;
-    const poolIds = withPool.map((t) => String(resolved.get(t)!.poolId));
-    const { found, failedBatches } = poolIds.length
-      ? await resolvePairs(String(o.dexscreener_chain), poolIds, ctx.signal)
+    // ---- which pool to link -----------------------------------------------
+    // THE POOL THE WALLETS ACTUALLY TRADED, not the earliest one created. Only
+    // candidates are looked up, which is what keeps the receipt cost small.
+    const work = new Map<string, string[]>();
+    for (const t of candidates) { const h = txsOf.get(t); if (h?.length) work.set(t, h); }
+    const swap = await resolveSwapPools(rpc, PM, SWAP, work, num(o, 'receipt_batch', 25));
+
+    // Confirm the swap pool is one DexScreener actually indexes; that call also
+    // supplies the symbol, so it replaces a per-token eth_call.
+    const swapIds = [...swap.chosen.values()].map((v) => v.poolId);
+    const { found, failedBatches } = swapIds.length
+      ? await resolvePairs(String(o.dexscreener_chain), swapIds, ctx.signal)
       : { found: new Map(), failedBatches: 0 };
 
     const lines: AlertLine[] = [];
-    for (const token of withPool) {
-      const poolId = String(resolved.get(token)!.poolId);
-      const pair = found.get(poolId);
-      if (!pair) continue;                       // not indexed: omit the line entirely
+    const picks: PoolPick[] = [];
+    let linkedFromSwap = 0, linkedFromFallback = 0, multiPoolIdTokens = 0;
+    for (const token of candidates) {
       const count = buyers.get(token)!.size;
       const prev = highs.get(token);
-      lines.push({ token, poolId, symbol: pair.symbol, wallets: count,
+      const pick = swap.chosen.get(token);
+      if (pick && pick.distinctPools > 1) multiPoolIdTokens++;
+      let poolId: string | null = null, symbol: string | null = null, source = '';
+      let transfers: number | null = null;
+      if (pick && found.has(pick.poolId)) {
+        poolId = pick.poolId; symbol = found.get(pick.poolId)!.symbol;
+        source = 'swap'; transfers = pick.transfers; linkedFromSwap++;
+      } else {
+        // FALLBACK, not a guess: highest liquidity for this token address.
+        const top = await topPairByToken(String(o.dexscreener_chain), token, ctx.signal);
+        if (top) { poolId = top.poolId; symbol = top.symbol; source = 'fallback'; linkedFromFallback++; }
+      }
+      if (!poolId) continue;                     // no pair anywhere: omit the line
+      picks.push({ token, chain, poolId, source, transfers });
+      lines.push({ token, poolId, symbol, wallets: count,
         growth: prev === undefined ? null : count - prev });
     }
-    const omittedNoPair = withPool.length - lines.length;
+    const omittedNoPoolId = 0;
+    const omittedNoPair = candidates.length - lines.length;
 
     const { parts, duplicateSymbols } = renderAlert(String(o.dashboard_url), lines);
     const messageText = parts.join('\n---\n');
@@ -230,6 +261,9 @@ const adapter: SourceAdapter<RunResult> = {
       tokensDetected: distinct.length, tokensEligibleAge: eligible.size,
       tokensWithBuyer: withBuyer.length, tokensAlerted: lines.length,
       tokensSuppressed: suppressed, omittedNoPoolId, omittedNoPair, duplicateSymbols,
+      linkedFromSwap, linkedFromFallback, multiPoolIdTokens,
+      ambiguousReceipts: swap.ambiguousReceipts, missingReceipts: swap.missingReceipts,
+      extraRpcRequests: swap.requests,
       dexscreenerFailedBatches: failedBatches, durationMs: Date.now() - started,
     };
     ctx.log.info('group2 new-token cycle', stats);
@@ -240,7 +274,7 @@ const adapter: SourceAdapter<RunResult> = {
         token, block: e.block, poolId: e.poolId,
         at: new Date((tHead - (head - e.block) * blockSeconds) * 1000),
       })),
-      parts, stats, sweptFrom, sweptTo: head, messageText,
+      picks, parts, stats, sweptFrom, sweptTo: head, messageText,
     }];
   },
 
@@ -265,10 +299,25 @@ const adapter: SourceAdapter<RunResult> = {
          b.map((p) => p.at), b.map(() => false), b.map((p) => p.poolId)]);
     }
 
+    const sendAlerts = ctx.options.send_alerts !== false;
+
+    // The pool this monitor chose. NO COALESCE: a better-evidenced pool always
+    // replaces the stored one. token_pool_first is untouched.
+    if (r.picks.length && sendAlerts) {
+      for (const p of r.picks) {
+        await client.query(
+          `insert into group2_token_pool (token, chain, pool_id, source, n_transfers, updated_at)
+           values ($1,$2,$3,$4,$5, now())
+           on conflict (token, chain) do update set
+             pool_id = excluded.pool_id, source = excluded.source,
+             n_transfers = excluded.n_transfers, updated_at = now()`,
+          [p.token, p.chain, p.poolId, p.source, p.transfers]);
+      }
+    }
+
     // ONLY WHAT WAS ACTUALLY SENT raises the high-water mark. A token whose line
     // was omitted for want of a pair must keep its old high, or it would be
     // suppressed at a count it was never announced at.
-    const sendAlerts = ctx.options.send_alerts !== false;
     let n = 0;
     if (r.alerted.length && sendAlerts) {
       for (const a of r.alerted) {
@@ -294,13 +343,15 @@ const adapter: SourceAdapter<RunResult> = {
       `insert into group2_cycle_stats (ran_at, head_block, block_seconds, requests,
          watchlist_size, transfers_seen, venue_transfers, tokens_detected,
          tokens_eligible_age, tokens_with_buyer, tokens_alerted, tokens_suppressed,
-         omitted_no_pool_id, omitted_no_pair, duplicate_symbols, swept_from, swept_to,
-         duration_ms, message_text)
-       values (now(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+         omitted_no_pool_id, omitted_no_pair, duplicate_symbols, linked_from_swap,
+         linked_from_fallback, multi_poolid_tokens, ambiguous_receipts,
+         extra_rpc_requests, swept_from, swept_to, duration_ms, message_text)
+       values (now(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
       [s.head, s.blockSeconds, s.requests, s.watchlistSize, s.transfers, s.venueTransfers,
        s.tokensDetected, s.tokensEligibleAge, s.tokensWithBuyer, s.tokensAlerted,
        s.tokensSuppressed, s.omittedNoPoolId, s.omittedNoPair, s.duplicateSymbols,
-       r.sweptFrom, r.sweptTo, s.durationMs, r.messageText || null]);
+       s.linkedFromSwap, s.linkedFromFallback, s.multiPoolIdTokens, s.ambiguousReceipts,
+       s.extraRpcRequests, r.sweptFrom, r.sweptTo, s.durationMs, r.messageText || null]);
 
     if (r.parts.length && sendAlerts) {
       for (const p of r.parts)

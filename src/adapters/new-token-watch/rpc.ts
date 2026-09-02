@@ -36,6 +36,43 @@ export class PublicRpc {
     this.last = Date.now();
   }
 
+  /**
+   * One batched JSON-RPC request. ADDITIVE: nothing in the new-token watch calls
+   * this, so its behaviour is unchanged. Shares the pacing clock and the request
+   * counter with call(), because the endpoint rate-limits per request and a
+   * batch is one request.
+   *
+   * Returns the raw array, entries keyed by the id each caller supplied. A batch
+   * whose transport fails returns null rather than an empty array -- an outage
+   * must not read as "no results".
+   */
+  async batch(bodies: unknown[]): Promise<unknown[] | null> {
+    if (!bodies.length) return [];
+    for (let attempt = 0; attempt < 7; attempt++) {
+      if (this.signal.aborted) throw new Error('run aborted');
+      await this.pace();
+      this.requests++;
+      try {
+        const res = await fetch(this.url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(bodies),
+          signal: this.signal,
+        });
+        if (res.status === 429 || res.status >= 500) {
+          await new Promise((r) => setTimeout(r, Math.min(45_000, 3000 * (attempt + 1) ** 2)));
+          continue;
+        }
+        const body = await res.json();
+        return Array.isArray(body) ? body : [body];
+      } catch (e) {
+        if (this.signal.aborted) throw e;
+        await new Promise((r) => setTimeout(r, Math.min(45_000, 3000 * (attempt + 1) ** 2)));
+      }
+    }
+    return null;
+  }
+
   async call(method: string, params: unknown[]): Promise<unknown> {
     for (let attempt = 0; attempt < 7; attempt++) {
       if (this.signal.aborted) throw new Error('run aborted');
