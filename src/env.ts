@@ -75,6 +75,28 @@ export function loadEnv(): Env {
     discordChannels.set(match[1]!.toLowerCase(), value);
   }
 
+  /*
+   * Webhooks whose env var does not follow the DISCORD_WEBHOOK_<NAME> shape.
+   *
+   * ADDITIVE ONLY. Nothing above is changed, and an alias never overwrites a
+   * channel the loop already registered. Without this, a monitor pointed at
+   * "mos-price-alert" would resolve to no channel and DiscordSink would quietly
+   * fall back to DISCORD_WEBHOOK_URL -- posting price alerts into the general
+   * channel while reporting success. A missing alias is left unregistered
+   * rather than defaulted, so /health shows via:"fallback" and the misrouting
+   * is visible instead of silent.
+   */
+  const WEBHOOK_ALIASES: ReadonlyArray<readonly [string, string]> = [
+    ['MOS_PRICE_CHECK', 'mos-price-alert'],
+  ];
+  for (const [envVar, channel] of WEBHOOK_ALIASES) {
+    const value = process.env[envVar]?.trim();
+    if (!value) continue;
+    if (!value.startsWith('https://')) throw new Error(`${envVar} must be an https:// URL`);
+    if (discordChannels.has(channel)) continue;   // never shadow a real channel
+    discordChannels.set(channel, value);
+  }
+
   // Railway injects RAILWAY_PUBLIC_DOMAIN once a domain is attached, so alerts
   // can link back to the dashboard without any extra configuration.
   const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();

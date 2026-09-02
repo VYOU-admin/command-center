@@ -29,7 +29,13 @@ alerts:
   #   MOS · GROUP 1 BALANCE CHANGES    -- cohort balance moves
   #   MOS · PRICE · HOURLY             -- this heartbeat
   #   MOS · NEW ALL-TIME HIGH          -- this ATH
-  channel: newtoken
+  # Its OWN channel, #mos-price-alert, not the shared newtoken one. The webhook
+  # comes from MOS_PRICE_CHECK, which does not follow the DISCORD_WEBHOOK_<NAME>
+  # convention and is therefore registered by an explicit alias in env.ts. If
+  # that variable were ever unset the channel would not resolve and the sink
+  # would fall back to DISCORD_WEBHOOK_URL -- /health reports via:"fallback"
+  # when that happens, so the misrouting is visible rather than silent.
+  channel: mos-price-alert
 
 options:
   token: MOS
