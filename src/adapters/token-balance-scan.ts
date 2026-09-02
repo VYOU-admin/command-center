@@ -56,6 +56,8 @@ const adapter: SourceAdapter<RunResult> = {
       last = Date.now();
     };
     let requests = 0;
+    const backoff = num(o, 'backoff_base_ms', 1500);
+    const backoffCap = num(o, 'backoff_cap_ms', 30_000);
     const call = async (body: unknown): Promise<unknown[] | null> => {
       for (let a = 0; a < 6; a++) {
         if (ctx.signal.aborted) throw new Error('run aborted');
@@ -64,10 +66,20 @@ const adapter: SourceAdapter<RunResult> = {
           const r = await fetch(url, { method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(body), signal: ctx.signal });
-          if (r.status === 429 || r.status >= 500) continue;
+          // ESCALATING BACKOFF, not just the pacing gap. Relying on the 4,000 ms
+          // pace alone meant a rate-limited batch retried six times at the same
+          // cadence and failed all 20 wallets: 120 of 266 reads were lost that
+          // way on the first pass.
+          if (r.status === 429 || r.status >= 500) {
+            await new Promise((res) => setTimeout(res, Math.min(backoffCap, backoff * (a + 1) ** 2)));
+            continue;
+          }
           const j = await r.json();
           return Array.isArray(j) ? j : [j];
-        } catch (e) { if (ctx.signal.aborted) throw e; }
+        } catch (e) {
+          if (ctx.signal.aborted) throw e;
+          await new Promise((res) => setTimeout(res, Math.min(backoffCap, backoff * (a + 1) ** 2)));
+        }
       }
       return null;
     };
@@ -118,34 +130,48 @@ const adapter: SourceAdapter<RunResult> = {
         `select token_address from wallet_pnl_tokens where token = $1 and chain = $2`,
         [token, chain])).rows[0]?.token_address;
       if (!contract) { ctx.log.warn('no token_address; skipping', { token }); continue; }
-      for (let i = 0; i < wallets.length; i += batch) {
-        const ch = wallets.slice(i, i + batch);
-        const res = await call(ch.map((w, j) => ({ jsonrpc: '2.0', id: j, method: 'eth_call',
-          params: [{ to: contract, data: '0x70a08231' + '0'.repeat(24) + w.slice(2) },
-                   '0x' + head.toString(16)] })));
-        if (res === null) {
-          for (const w of ch) { errors++;
-            readings.push({ token, chain, wallet: w, block: head, readAt,
-              balanceRaw: null, status: 'transport failure' }); }
-          continue;
-        }
-        const seen = new Set<string>();
-        for (const r of res as Record<string, unknown>[]) {
-          const w = ch[Number(r.id)]; if (w === undefined) continue;
-          seen.add(w);
-          const v = r.result as string | undefined;
-          if (r.error || !v || v === '0x') {
-            errors++;
-            readings.push({ token, chain, wallet: w, block: head, readAt, balanceRaw: null,
-              status: String((r.error as { message?: string })?.message ?? 'empty result').slice(0, 120) });
-          } else {
-            readings.push({ token, chain, wallet: w, block: head, readAt,
-              balanceRaw: BigInt(v).toString(), status: 'ok' });
+      // RETRY INDIVIDUAL WALLETS, never discard a whole batch. A failed batch
+      // used to mark all 20 of its wallets as errors; now failures go back into
+      // a retry pool and only become errors after every round is exhausted.
+      const ok = new Map<string, string>();
+      const failed = new Map<string, string>();
+      let todo = wallets.slice();
+      const maxRounds = num(o, 'max_rounds', 5);
+      for (let round = 0; round < maxRounds && todo.length; round++) {
+        const size = round === 0 ? batch : Math.max(1, Math.floor(batch / (2 ** round)));
+        const next: string[] = [];
+        for (let i = 0; i < todo.length; i += size) {
+          const ch = todo.slice(i, i + size);
+          const res = await call(ch.map((w, j) => ({ jsonrpc: '2.0', id: j, method: 'eth_call',
+            params: [{ to: contract, data: '0x70a08231' + '0'.repeat(24) + w.slice(2) },
+                     '0x' + head.toString(16)] })));
+          if (res === null) {
+            for (const w of ch) { next.push(w); failed.set(w, 'transport failure'); }
+            continue;
           }
+          const seen = new Set<string>();
+          for (const r of res as Record<string, unknown>[]) {
+            const w = ch[Number(r.id)]; if (w === undefined) continue;
+            seen.add(w);
+            const v = r.result as string | undefined;
+            if (r.error || !v || v === '0x') {
+              next.push(w);
+              failed.set(w, String((r.error as { message?: string })?.message ?? 'empty result').slice(0, 120));
+            } else { ok.set(w, BigInt(v).toString()); failed.delete(w); }
+          }
+          for (const w of ch) if (!seen.has(w)) { next.push(w); failed.set(w, 'no response for id'); }
         }
-        for (const w of ch) if (!seen.has(w)) { errors++;
-          readings.push({ token, chain, wallet: w, block: head, readAt,
-            balanceRaw: null, status: 'no response for id' }); }
+        todo = next.filter((w) => !ok.has(w));
+        if (todo.length) ctx.log.info('balance retry round',
+          { token, round: round + 1, remaining: todo.length, batch: size });
+      }
+      for (const [w, bal] of ok)
+        readings.push({ token, chain, wallet: w, block: head, readAt, balanceRaw: bal, status: 'ok' });
+      for (const w of wallets) {
+        if (ok.has(w)) continue;
+        errors++;
+        readings.push({ token, chain, wallet: w, block: head, readAt,
+          balanceRaw: null, status: failed.get(w) ?? 'unresolved' });
       }
     }
     ctx.log.info('balance scan pass', { tokens: due.map((d) => d.token), block: head,
