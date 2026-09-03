@@ -1,8 +1,9 @@
 /**
- * Tables for the MOS-P1 cost and correctness probe.
+ * Tables for the MOS-P1 cohort monitor.
  *
- * A TEST HARNESS, NOT A PRODUCTION MONITOR. Own tables, no Discord, nothing
- * else reads them.
+ * Began as a 10-wallet cost probe with no Discord. It now runs the full 74-wallet
+ * cohort and alerts to the new-token channel, so the tables below are read by
+ * something other than a report.
  *
  * FOUR READ STATES, KEPT APART, exactly as solana_balance_scans does:
  *   status='ok'         amount = the figure   -- may legitimately be 0
@@ -31,8 +32,8 @@ export async function migrate(client: PoolClient): Promise<void> {
   await client.query(`create index if not exists mp1_snap_cycle_idx
       on mos_p1_balance_snapshots (cycle_at desc)`);
 
-  /* The 10 wallets this probe actually reads, out of the 74 tagged. Kept as a
-     table rather than a config list so scaling to 74 is a data change. */
+  /* Which of the tagged wallets are actually read. Kept as a table rather than a
+     config list so changing the cohort is a data change, not a deploy. */
   await client.query(`
     create table if not exists mos_p1_test_batch (
       wallet     text primary key,
@@ -77,5 +78,52 @@ export async function migrate(client: PoolClient): Promise<void> {
       duration_ms      int,
       failures         jsonb,
       error            text
+    )`);
+
+  /*
+   * create table if not exists IS A NO-OP ON AN EXISTING TABLE. Five columns
+   * added to group2_cycle_stats this way were silently absent after deploy,
+   * because the table already existed and the new definition was ignored. Every
+   * column added after the first release has to come through alter table.
+   */
+  for (const col of [
+    'mints_held           int',
+    'mints_candidate      int',
+    'mints_below_floor    int',
+    'mints_denylisted     int',
+    'mints_alerted        int',
+    'mints_suppressed     int',
+    'symbols_unresolved   int',
+    'dexscreener_requests int',
+    'dexscreener_failed   int',
+    'duplicate_symbols    int',
+    'alert_parts          int',
+    'bootstrap            boolean',
+    'batch_requests       int',
+    'batch_failures       int',
+    'message_text         text',
+  ]) await client.query(`alter table mos_p1_test_stats add column if not exists ${col}`);
+
+  /*
+   * The high-water mark per mint, and the whole reason a cohort of 74 wallets
+   * does not emit 5,902 lines on its first cycle.
+   *
+   * A mint alerts only when the number of cohort wallets holding it exceeds
+   * every count previously alerted -- the same rule as group2_token_alerts. The
+   * first cycle SEEDS this table at the current counts and sends nothing, so
+   * the marks describe "what the cohort already held" rather than zero.
+   *
+   * ONLY WHAT WAS ACTUALLY SENT RAISES THE MARK, except during that seed. A
+   * line dropped for any reason must keep its old high, or the mint is silently
+   * retired from alerting without ever having been reported.
+   */
+  await client.query(`
+    create table if not exists mos_p1_mint_alerts (
+      mint               text primary key,
+      last_alerted_count int         not null,
+      last_alerted_at    timestamptz,
+      first_alerted_at   timestamptz not null default now(),
+      symbol             text,
+      seeded             boolean     not null default false
     )`);
 }
