@@ -162,7 +162,15 @@ const adapter: SourceAdapter<RunResult> = {
     const prevCycle = await ctx.db.query(
       `select max(cycle_at) c from mos_p1_balance_snapshots where cycle_at < $1`, [cycleAt]);
     s2req = 0;   // database only; no RPC in this stage
-    const prevAt = prevCycle.rows[0]?.c ? new Date(String(prevCycle.rows[0].c)) : null;
+    // NOT new Date(String(...)). pg returns a Date; String() renders it as
+    // "Wed Sep 03 2026 04:09:37 GMT+0000 (...)", which DROPS MILLISECONDS.
+    // cycle_at values carry them (…:32.373Z), so the reparsed value was …:32.000Z
+    // and `where cycle_at = $1` matched nothing. `prior` came back empty, every
+    // wallet hit the "no prior snapshot" branch, and four cycles reported
+    // flagged 0 / mints_new 0 while four positions moved >5% and a new mint
+    // appeared. Same defect as price_read_at in server.ts, reintroduced here.
+    const prevRaw = prevCycle.rows[0]?.c ?? null;
+    const prevAt = prevRaw === null ? null : new Date(prevRaw as string | number | Date);
     const prior = new Map<string, Map<string, bigint>>();
     if (prevAt) {
       const pr = await ctx.db.query(
