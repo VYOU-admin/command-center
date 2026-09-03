@@ -1,7 +1,11 @@
 /**
  * The MOS-P1 cohort-activity alert body.
  *
- * ONE LINE PER MINT: link, how many cohort wallets hold it, total held. The
+ * ONE LINE PER MINT: link, how many cohort wallets hold it, total held, and how
+ * much of that arrived since the previous cycle. The cohort-wide total alone can
+ * badly misdescribe a line -- ANSEM alerted at "13 wallets · 12,789" where one
+ * wallet that had held for hours accounted for 12,150 of it and the new holder
+ * brought 617. The
  * header is repeated on every part, unlike group2's dashboard link, because a
  * split message's second half is otherwise unattributable in a busy channel.
  *
@@ -31,6 +35,21 @@ export interface MintLine {
   total: number;
   /** Increase over the highest count previously alerted; null on a first alert. */
   growth: number | null;
+  /**
+   * Amount held by wallets that started holding SINCE THE PREVIOUS CYCLE -- what
+   * actually triggered the line, as opposed to `total`, which is cohort-wide and
+   * can be dominated by a wallet that has held for hours.
+   *
+   * NULL MEANS UNKNOWN, NOT ZERO, and the segment is then omitted entirely. It
+   * is null when any current holder had no prior snapshot to compare against
+   * (an unread wallet last cycle, or a cohort that just grew), because the true
+   * figure could be larger and a smaller one would read as the whole story.
+   * It is also null when every holder is new, since `total` already says it.
+   *
+   * This is measured against the previous cycle while `growth` is measured
+   * against the all-time high, so the two need not agree.
+   */
+  newAmount: number | null;
 }
 
 export const shortMint = (m: string): string =>
@@ -58,7 +77,9 @@ export function renderLine(l: MintLine, suffix = ''): string {
   const url = l.url ?? `${DEXSCREENER_SOLANA}${l.mint}`;
   const base = `[${label}](${url}) · ${l.wallets} ${l.wallets === 1 ? 'wallet' : 'wallets'}`
     + ` · ${fmtAmount(l.total)}`;
-  return l.growth === null ? base : `${base} · +${l.growth}`;
+  const growth = l.growth === null ? '' : ` · +${l.growth}`;
+  const fresh = l.newAmount === null ? '' : ` · new ${fmtAmount(l.newAmount)}`;
+  return `${base}${growth}${fresh}`;
 }
 
 export interface RenderedAlert {

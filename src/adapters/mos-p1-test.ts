@@ -388,9 +388,30 @@ const adapter: SourceAdapter<RunResult> = {
         // it would raise no high-water mark and quietly lose the mint.
         if (!s) unresolved++;
         const prev = highs.get(mint);
+
+        // WHAT ACTUALLY TRIGGERED THE LINE. `total` is cohort-wide and can be
+        // dominated by a wallet that has held for hours: ANSEM alerted at
+        // "13 wallets · 12,789" where one long-standing wallet held 12,150 and
+        // the new holder brought 617.
+        //
+        // A HOLDER WITH NO PRIOR SNAPSHOT MAKES THIS UNKNOWN, NOT ZERO. It
+        // cannot be compared, so the true figure could be larger, and the whole
+        // segment is dropped rather than understated.
+        let freshHolders = 0, freshAmt = 0n, incomparable = false;
+        for (const w of bothOk) {
+          const cur = held.get(w)?.get(mint);
+          if (!cur || cur.amount <= 0n) continue;      // not a holder now
+          const was = prior.get(w);
+          if (!was) { incomparable = true; continue; }
+          if ((was.get(mint) ?? 0n) === 0n) { freshHolders++; freshAmt += cur.amount; }
+        }
+        const newAmount = incomparable || freshHolders === 0 || freshHolders === v.n
+          ? null                                       // unknown, none, or "all of it"
+          : Number(freshAmt) / Math.pow(10, v.dec);
+
         lines.push({ mint, symbol: s?.symbol ?? null, url: s?.url ?? null,
           wallets: v.n, total: Number(v.total) / Math.pow(10, v.dec),
-          growth: prev === undefined ? null : v.n - prev });
+          growth: prev === undefined ? null : v.n - prev, newAmount });
       }
     }
     const { parts, duplicateSymbols } = renderAlert(lines);
@@ -466,7 +487,14 @@ const adapter: SourceAdapter<RunResult> = {
            on conflict (mint) do update set
              last_alerted_count = excluded.last_alerted_count,
              last_alerted_at = now(),
-             symbol = coalesce(excluded.symbol, mos_p1_mint_alerts.symbol)`,
+             symbol = coalesce(excluded.symbol, mos_p1_mint_alerts.symbol),
+             -- A SEEDED ROW HAS NEVER BEEN ALERTED. Its bootstrap timestamp is
+             -- not a first alert, so the first real alert stamps it here and
+             -- clears the flag. A row that has genuinely alerted before keeps
+             -- its original first_alerted_at.
+             first_alerted_at = case when mos_p1_mint_alerts.seeded then now()
+                                     else mos_p1_mint_alerts.first_alerted_at end,
+             seeded = false`,
           [a.mint, a.count, a.symbol]);
       }
     }

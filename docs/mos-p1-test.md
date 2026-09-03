@@ -390,3 +390,65 @@ Sorted by wallet count, then total, then mint. Colliding symbols get trailing
 asterisks, display only. The header repeats on every part, unlike group2's
 dashboard link, so a split message's second half is still attributable. No
 mints crossing means no parts and nothing sent.
+
+
+## Two fixes after the first live alert (2026-09-03)
+
+The first real alert was ANSEM at 06:56 -- `13 wallets · 12,789 · +1` -- and it
+exposed two problems.
+
+### The line described the cohort, not the event
+
+`total` is cohort-wide. For ANSEM one wallet that had held for hours accounted
+for 12,150 of the 12,789, and the new 13th holder brought 617. The number that
+explained the alert was absent from it.
+
+Lines now carry ` · new <amount>`: the amount held by wallets that started
+holding SINCE THE PREVIOUS CYCLE.
+
+    [ANSEM](...) · 13 wallets · 12,789 · +1 · new 617.09
+
+Note the two figures are measured against different baselines and need not
+agree. `+1` is growth against the ALL-TIME HIGH-WATER MARK; `new` is measured
+against the PREVIOUS CYCLE.
+
+The segment is omitted, never shown as 0, in three cases:
+
+  * any current holder had no prior snapshot -- an unread wallet last cycle, or
+    a cohort that just grew. The true figure could be larger, and a smaller one
+    would read as the whole story.
+  * no holder is new.
+  * every holder is new, since `total` already says it.
+
+### Rows claimed a seed time as their first alert
+
+`on conflict do update` set the count, timestamp and symbol but never cleared
+`seeded` or set `first_alerted_at`. A mint seeded by the bootstrap and later
+genuinely alerted therefore kept `seeded = true` and a `first_alerted_at` from
+the seed -- a time at which nothing was sent. ANSEM read as first alerted at
+06:41:05, the bootstrap persist, when its actual first alert was 06:56.
+
+The clause now stamps `first_alerted_at = now()` and clears `seeded` only when
+the row was still seeded; a row that has genuinely alerted before keeps its
+original timestamp.
+
+The gate itself was never affected -- it reads `last_alerted_count`, which was
+always correct.
+
+### Backfill
+
+One row was affected. Dry run: 486 rows, 486 seeded, 485 seeded-and-never-
+alerted, 1 seeded-and-alerted, reconciling as 485 + 1 = 486. The update touched
+1 row and a fresh connection then returned 0 rows still claiming a seed time as
+a first alert, with the 485 untouched.
+
+The first-alert time was recovered from `mos_p1_test_stats.message_text`, not
+guessed from `last_alerted_at`, which is the LAST alert and would be wrong for
+any mint alerted more than once. The script refuses to fix any row it cannot
+pin to exactly one cycle.
+
+CAUTION FOR ANY FUTURE BACKFILL: the message carries the PAIR address, not the
+mint, so a mint cannot be found in `message_text` by its own address. The symbol
+is the only handle, and an unresolved mint has none. There is no per-alert log
+table; if that recovery path is needed routinely, add one rather than widening
+the symbol match.
