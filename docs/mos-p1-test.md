@@ -259,3 +259,134 @@ select b.wallet from mos_p1_test_batch b
   `railway ssh --service command-center` with a script written to `/app`.
 - The adapter reads wallets **as-is**. Never add `lower()`.
 - Nothing else reads these four tables. Dropping them affects nothing.
+
+
+---
+
+# Scale-up to 74 wallets with Discord alerting (2026-09-03)
+
+## What changed
+
+The probe became a monitor. Cohort 10 -> 74, and it now alerts to the
+`newtoken` channel (Discord #new-tokens), the same channel group1-new-token and
+group2-new-token use.
+
+## The millisecond bug that made the first four cycles meaningless
+
+`new Date(String(pgDate))` renders a Postgres timestamp as
+`"Wed Sep 03 2026 04:09:37 GMT+0000 (...)"`, which DROPS MILLISECONDS.
+`cycle_at` values carry them (`03:54:32.373Z`), so the reparsed lookup key was
+`03:54:32.000Z` and `where cycle_at = $1` matched zero rows. `prior` came back
+empty, every wallet took the "no prior snapshot -> do not flag" branch, and four
+consecutive cycles reported `flagged 0 / mints_new 0` while the raw snapshots
+contained a -99.997% move, a -99.514% move, a +38.309% move, a +10.878% move and
+one new mint. Stage 3 never ran once.
+
+This is the same defect as `price_read_at` in `server.ts`, fixed earlier the
+same session and reintroduced here. pg already returns a Date; pass it through.
+
+Fixed in `22186c1`. After the fix, the adapter's counts matched an independent
+recomputation from the raw snapshots on all five following transitions, and
+mismatched on all three preceding ones.
+
+## The provider caps a batch between 28 and 32 sub-calls
+
+74 wallets x 2 token programs = 148 sub-calls, which one request cannot carry.
+Measured on this Helius key:
+
+    20 sub-calls -> HTTP 200    24 -> HTTP 200    28 -> HTTP 200
+    32 sub-calls -> HTTP 429    40 -> 429    100 -> 429    148 -> 429
+
+40 stayed refused across three attempts with 12s backoff, so this is a size
+ceiling and not a rate limit. A 429 also poisons the following few seconds, so
+back-to-back chunks need spacing. Eight chunks of 20 spaced 5s went 8/8 with
+zero sub-errors in 40.7s, comfortably inside the 300s guard.
+
+`batch_subcalls` fails validation above 28, so a bad config breaks the deploy
+rather than every cycle.
+
+## Alerting is deliberately narrower than the flag set
+
+The balance diff still flags percentage moves and stage 3 still pulls their
+activity. Alerts are a separate gate: only mints crossing a wallet-count
+high-water mark are ever sent, the same rule as `group2_token_alerts`.
+
+Measured across four post-fix cycles at 10 wallets, USDC moves alone accounted
+for most of the flag rate. That is cohort plumbing, not signal.
+
+Two filters, both in YAML:
+
+  * `denylist_mints` -- USDC, USDT and wrapped SOL never alert at any count.
+    USDC is held by 40 of the 74 wallets.
+  * `min_holders: 2` -- of the 5,902 mints the cohort holds with a positive
+    balance, 5,413 are held by exactly one wallet, and that tail is airdrop and
+    LST dust with totals like 0.02. A floor of 2 leaves roughly 489 candidates;
+    only 21 mints are held by 5 or more.
+
+HOLDING MEANS A POSITIVE BALANCE. 82.4% of the cohort's token accounts sit at
+exactly 0 -- opened and drained -- and counting those as holders would put a
+meaningless number on the line.
+
+## The bootstrap cycle sends nothing
+
+On an empty `mos_p1_mint_alerts` every one of the ~5,900 held mints clears a
+zero high-water mark at once. The first cycle therefore writes the current
+counts with `seeded = true` and queues no alert. From then on a line means the
+count genuinely rose.
+
+To re-bootstrap deliberately, truncate `mos_p1_mint_alerts`; the next cycle
+reseeds and stays silent.
+
+## Links are built from the mint, never a pool address
+
+`group2-new-token/dexscreener.ts` lowercases `pairAddress`. That is correct for
+EVM and would corrupt every Solana base58 address, so `mos-p1-test/dexscreener.ts`
+is a separate resolver that never changes the case of an address. It resolves by
+mint through `/latest/dex/tokens/{mint}`, picks the highest-liquidity pair, and
+keeps three outcomes apart -- `ok`, `none`, `failed` -- so a DexScreener outage
+cannot be recorded as "these mints have no page".
+
+A symbol is only used when the pair's `baseToken.address` IS the mint; otherwise
+the mint is the quote side and the symbol names something else.
+
+An unindexed mint STILL GETS A LINE, labelled with a short address, because the
+cohort demonstrably holds it. So does a mint past `dexscreener_cap` -- dropping
+it would leave its high-water mark unraised and lose the mint silently.
+
+## Partial reads are failures, not balances
+
+A wallet is "read" only when BOTH of its sub-calls came back and neither
+errored, counted by response rather than by first success. A response merely
+missing from the batch array would otherwise leave a wallet looking read with
+half its token accounts. A chunk that fails marks only its own wallets unread.
+
+## New table
+
+    mos_p1_mint_alerts (
+      mint text primary key, last_alerted_count int not null,
+      last_alerted_at timestamptz, first_alerted_at timestamptz not null,
+      symbol text, seeded boolean not null default false )
+
+Fifteen columns were added to `mos_p1_test_stats` via `alter table ... add
+column if not exists`, NOT by editing the `create table` -- which is a no-op on
+an existing table and silently dropped five columns from `group2_cycle_stats`
+once already.
+
+## Cohort seed - done and verified
+
+Dry run predicted 64 inserts against 10 existing and 74 tagged; the insert
+returned 64; a fresh connection then reported 74 rows, 74 joining `wallet_tags`
+on a case-sensitive match, 0 all-lowercase, and RETURNED NO ROWS for tagged
+wallets still missing.
+
+## Message shape
+
+    **MOS-P1 · cohort activity**
+    [MOS](https://dexscreener.com/solana/...) · 24 wallets · 60,214,439 · +3
+    [GPRR…YvDH](https://dexscreener.com/solana/GPRR...) · 13 wallets · 24.4 · +1
+    [BONK](https://dexscreener.com/solana/...) · 12 wallets · 12,172
+
+Sorted by wallet count, then total, then mint. Colliding symbols get trailing
+asterisks, display only. The header repeats on every part, unlike group2's
+dashboard link, so a split message's second half is still attributable. No
+mints crossing means no parts and nothing sent.
