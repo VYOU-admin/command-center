@@ -3,7 +3,8 @@
 Written 2026-09-03 as a handover. **Assume no memory of the session that built
 this.** Everything needed to finish the job is here.
 
-**Status: built, deployed, seeded. ZERO measured cycles so far.** One cycle has
+**Status: built, deployed, seeded. Credit baseline captured (47,213 at
+03:47Z). Awaiting four completed cycles and the "after" dashboard reading.** One cycle has
 run and it failed for a benign reason (below). The numbers this probe exists to
 produce do not yet exist.
 
@@ -202,9 +203,21 @@ After **four completed cycles** (`select * from mos_p1_test_stats where complete
    cost figure was explicitly ruled out.
 
    The user must read **dashboard.helius.dev → Usage & credits** before and after,
-   and the difference is the answer. The "before" reading was requested at
-   03:45Z. Cycle 1 burned 0 credits, so a reading taken any time before ~03:54:32Z
-   is a clean baseline.
+   and the difference is the answer.
+
+   > **BASELINE SUPPLIED BY THE USER: 47,213 credits at 2026-09-03T03:47Z.**
+   >
+   > This is a clean baseline. Cycle 1 (03:39:32Z) failed before making any RPC
+   > call and spent 0 credits, and the first *successful* cycle was not due until
+   > ~03:54:32Z, so nothing from this probe is inside the reading.
+   >
+   > **Still needed: the "after" reading**, taken once four cycles have
+   > completed (~04:39-04:40Z). Credits consumed = after - 47,213.
+   >
+   > Caveat to state when reporting: the Helius account is shared with other
+   > work. Anything else that touched Helius inside the window is included in
+   > the difference. Nothing else was deliberately run against it during this
+   > period, but that is an assumption, not a measurement.
 
 3. **Extrapolated daily cost at 74 wallets on a 15m cycle.** 96 cycles/day.
    Stage 1 scales with wallet count (74 wallets = 148 sub-calls, still 1 batched
