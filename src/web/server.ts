@@ -136,7 +136,12 @@ export function createWebServer(opts: WebServerOptions): Server {
       catch { sendJson(res, 400, { error: 'invalid json' }); return; }
       const token = String(body.token ?? '').trim();
       const chain = String(body.chain ?? '').trim();
-      const wallet = String(body.wallet ?? '').trim().toLowerCase();
+      // NOT lowercased. Solana addresses are case-sensitive base58, and the
+      // read path selects them raw, so lowercasing on write meant a Solana tag
+      // was stored under an address that could never match on read -- written
+      // successfully, then permanently invisible. EVM wallets arrive already
+      // lowercase from wallet_pnl, so passing through raw is correct for both.
+      const wallet = String(body.wallet ?? '').trim();
       const tag = String(body.tag ?? '').trim().slice(0, 128);
       if (!token || !chain || !wallet) {
         sendJson(res, 400, { error: 'token, chain and wallet are required' }); return;

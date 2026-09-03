@@ -1,0 +1,36 @@
+# MOS-P1: a cost and correctness probe, NOT a production monitor.
+#
+# 10 wallets out of the 74 tagged MOS-P1. No Discord, own tables, nothing else
+# reads it. Its output is a request count and a flag rate, so "what would 74
+# wallets cost" can be answered from measurement rather than arithmetic.
+#
+# BOTH TOKEN PROGRAMS. getTokenAccountsByOwner takes one programId, so covering
+# legacy SPL Token and Token-2022 needs two sub-calls per wallet, sent as one
+# batched HTTP request for the stage. Querying only the legacy program returns
+# NOTHING for MOS, which is Token-2022 -- measured: 0 accounts on the legacy
+# filter for this mint. Both the request count and the sub-call count are
+# reported, because an HTTP request and a billable sub-call are not the same
+# unit and the provider's price for either has never been verified.
+
+id: mos-p1-test
+name: MOS P1 Test
+source: mos-p1-test
+enabled: true
+
+schedule: 15m
+
+alerts:
+  # Failure and recovery only. This monitor raises no content alerts at all.
+  channel: system
+
+options:
+  rpc_url: "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
+  tag: MOS-P1
+
+  # A mint whose balance moves more than this flags the wallet. A NEW mint
+  # always flags regardless of size: there is no prior balance to take a
+  # percentage against.
+  move_pct: 5
+
+  # Stage 3 pulls this much history, for flagged wallets only.
+  activity_minutes: 30
