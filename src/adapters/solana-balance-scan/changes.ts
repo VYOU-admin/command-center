@@ -7,6 +7,20 @@
  * holding out of an absence of data -- on the exact table built to keep those
  * apart. Those wallets are excluded and counted as noPrior.
  *
+ * ALL THREE FIGURES SHARE ONE BASELINE. The line reads `had <prev> · now <cur> ·
+ * <delta>`, and delta is exactly cur - prev, so every line reconciles by
+ * inspection.
+ *
+ * IT USED TO PRINT `bought` INSTEAD OF `prev`, taken from wallet_pnl.tokens_bought
+ * -- a cumulative lifetime figure frozen at backfill time, on no snapshot basis
+ * at all. Sitting next to a live balance it read as the prior holding, so a
+ * wallet that had acquired MOS outside the tracked venue appeared to lose more
+ * than it held: 5dn4…pRyK showed "bought 1,059,364 · now 0 · -1,626,660" when its
+ * actual prior balance was 1,626,660. Only 79 of 267 group-1 wallets were ever in
+ * the state where prev happened to equal bought, so roughly two thirds of lines
+ * carried figures that could not add up. There is no labelling that makes a
+ * frozen lifetime total read correctly beside a live balance, so it is gone.
+ *
  * AN ACCOUNT THAT CLOSED IS NOT A SALE. A wallet going from a real balance to
  * no_account means its token account no longer exists. The tokens may have been
  * sold, transferred, or the account emptied and closed in one instruction -- and
@@ -18,7 +32,7 @@
 export interface Reading { wallet: string; balanceRaw: string | null; status: string }
 
 export interface Change {
-  wallet: string; bought: number; prev: number; now: number; delta: number;
+  wallet: string; prev: number; now: number; delta: number;
 }
 export interface Comparison {
   changes: Change[];
@@ -28,7 +42,7 @@ export interface Comparison {
 
 export function compare(
   group1: string[], current: Map<string, Reading>, previous: Map<string, Reading>,
-  bought: Map<string, number>, scale: number,
+  scale: number,
 ): Comparison {
   const changes: Change[] = [];
   let compared = 0, unchanged = 0, noPrior = 0, accountClosed = 0;
@@ -42,7 +56,7 @@ export function compare(
     compared++;
     const a = Number(prv.balanceRaw) / scale, b = Number(cur.balanceRaw) / scale;
     if (a === b) { unchanged++; continue; }
-    changes.push({ wallet: w, bought: bought.get(w) ?? 0, prev: a, now: b, delta: b - a });
+    changes.push({ wallet: w, prev: a, now: b, delta: b - a });
   }
   // Largest absolute move first: the point of the alert is what moved most.
   changes.sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta));
@@ -65,7 +79,7 @@ export function renderChangeAlert(c: Comparison): string[] {
   // announces BALANCE MOVES of a known cohort, so it names both.
   const header = `**MOS · GROUP 1 BALANCE CHANGES · ${c.changed} wallet${c.changed === 1 ? '' : 's'}**`;
   const lines = c.changes.map((x) =>
-    `[${short(x.wallet)}](${SOLSCAN}${x.wallet}) · bought ${n0(x.bought)} · now ${n0(x.now)} · ${signed(x.delta)}`);
+    `[${short(x.wallet)}](${SOLSCAN}${x.wallet}) · had ${n0(x.prev)} · now ${n0(x.now)} · ${signed(x.delta)}`);
   const parts: string[] = [];
   let cur = header;
   for (const line of lines) {

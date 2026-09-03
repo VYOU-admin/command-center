@@ -321,3 +321,36 @@ message: 2 parts, 1,887 and 355 chars, both inside the 2,000 cap
 A second run through the adapter itself (send_alerts=false) confirmed the wiring:
 267 = 4 changed + 249 unchanged + 13 no prior + 1 account closed, one alert part
 rendered, `queueAlert` called 0 times.
+
+## The Group 1 balance-change line now shares one baseline (2026-09-03)
+
+The line was `wallet · bought N · now X · ±D`. `bought` came from
+`wallet_pnl.tokens_bought` -- a cumulative lifetime buy total through the tracked
+Meteora DYN2 venue, frozen at backfill time, on no snapshot basis at all. The
+delta was `now - prev` against the previous scan, and `prev` was never printed.
+
+So the line put a frozen lifetime figure where a reader expects the prior
+holding, and the delta was taken against a third number that never appeared. A
+wallet that acquired MOS outside the tracked venue then appeared to lose more
+than it held: `5dn4…pRyK` read "bought 1,059,364 · now 0 · -1,626,660" when its
+actual prior balance was 1,626,660.
+
+It reconciled only by coincidence, when `prev` happened to equal `bought` -- a
+wallet that had never sold, never received MOS outside the venue, and never moved
+any out. Across seven consecutive cycles 29 lines reconciled and 51 did not, and
+only 79 of 267 group-1 wallets were in that state at all (52 held MORE than
+tokens_bought, 101 held less).
+
+The line is now `wallet · had <prev> · now <cur> · <delta>`, so all three figures
+share the previous-scan baseline and every line reconciles by inspection.
+`bought` is gone; no labelling makes a frozen lifetime total read correctly
+beside a live balance. The `wallet_pnl` query is dropped from the adapter too,
+since nothing else used it.
+
+THE DELTA WAS NEVER WRONG. `now - prev` between two status='ok' readings was
+correct throughout, with no-prior and account-closed cases already excluded. The
+defect was entirely in what the line displayed.
+
+Verified before deploy by feeding the real 16:58:31 and 15:58:25 scans through
+the built code: 12 changed wallets, all 12 reconciling, `5dn4…pRyK` rendering
+`had 1,626,660 · now 0 · -1,626,660`, and zero occurrences of "bought".

@@ -161,12 +161,12 @@ const adapter: SourceAdapter<RunResult> = {
         { wallet: String(r.wallet),
           balanceRaw: r.balance_raw == null ? null : String(r.balance_raw),
           status: String(r.status) }]));
-      const bq = await ctx.db.query(
-        `select wallet, tokens_bought from wallet_pnl where token = $1 and chain = 'solana'`, [token]);
-      const bought = new Map((bq.rows as Record<string, unknown>[]).map((r) =>
-        [String(r.wallet), Number(r.tokens_bought ?? 0)]));
+      // wallet_pnl is no longer read here. It supplied `bought`, a frozen
+      // lifetime buy total that the line printed beside a live balance; the
+      // alert now shows the prior scan instead, which is the figure the delta
+      // is actually taken against.
       const curMap = new Map(readings.map((r) => [r.wallet, r]));
-      comparison = compare(group1, curMap, previous, bought, Math.pow(10, decimals ?? 9));
+      comparison = compare(group1, curMap, previous, Math.pow(10, decimals ?? 9));
       parts = renderChangeAlert(comparison);
       ctx.log.info('group1 balance changes', { group1: comparison.group1,
         compared: comparison.compared, changed: comparison.changed,
