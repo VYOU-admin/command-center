@@ -170,3 +170,28 @@ Chain dependent steps with `&&` rather than `;` or separate lines, and have the
 consuming step validate its own input rather than trusting that the producer
 succeeded — a script that is handed SQL should confirm the SQL contains what it
 expects before executing it.
+
+## 13. A value that is zero in arithmetic but not in floating point
+
+A quantity summed from signed components can be genuinely zero and still test as
+positive. Netting a wallet's token transfers left `2.8e-14` where exact
+arithmetic gives `0`, and the filter `if (got <= 0) continue` let it through as a
+real purchase. 89 such rows entered storage, and 10 wallets had no other rows —
+they were tagged into cohorts as buyers who never bought.
+
+Compare against a domain floor, never against zero. Here that is one raw unit of
+the token (`1 / 10^decimals`); for a currency it is the smallest representable
+amount. Guarding one side of a calculation is not enough: this code already had a
+dust floor on the amount paid, and lacked one on the amount received.
+
+Note how it stayed hidden, because that generalises. The rows carried `$0.000000`,
+so every total looked correct. A later repair pass recomputed the affected column
+from a clean source, which replaced the absurd values with plausible ones and
+removed the only visible symptom while leaving the cause in place. **A repair that
+overwrites a derived column can erase the evidence of the defect that produced
+it** — after any such repair, check that the inputs still explain the outputs.
+
+The check that found it: a derived column's stored range must fall inside the
+range of the inputs it was computed from. Prices spanning `1.2e-14 .. 0.25` could
+not have come from ticks spanning `0.065 .. 0.102`, and that mismatch is the
+whole detection.

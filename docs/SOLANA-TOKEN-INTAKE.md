@@ -149,6 +149,19 @@ asset, and a fixed base/quote assumption inverts every result in that pool —
 recording sellers as buyers — while producing plausible-looking rows. Key the
 direction off which side of the swap the mint is actually on.
 
+**A positive net delta is not enough — it must clear one raw unit.** Summing
+signed transfers in floating point leaves residue on a delta that is really
+zero: a wallet that received and sent the same amount inside one transaction
+comes out at `2.8e-14` tokens rather than `0`, and `got > 0` accepts it as a
+purchase. Require the net amount to be at least one raw unit (`1 / 10^decimals`,
+so `0.000001` at six decimals) before a leg becomes a row. Guarding only the
+paid side is not sufficient; the token side needs its own floor.
+
+The damage is not in the money — these rows carry no meaningful USD and no
+total moves when they are removed. It is in the cohort: each one is a wallet
+that appears to have bought and never did, and it gets tagged into the window
+like any other buyer.
+
 ## Attribution
 
 **The buyer is the owner of the token account that received the mint.** Not the
@@ -531,3 +544,23 @@ market cap divided by supply and stop if it is absurd.
 Re-pricing does not need new RPC: `usd = token_amount x price(t)` is
 reproducible from stored rows, using the stablecoin-pool rows already written as
 the tick series.
+
+### Float residue passes a `> 0` test and invents buyers
+
+`legsOf` rejected a leg only when the net token amount was `<= 0`. A wallet
+whose receipts and sends cancel within one transaction nets to zero in exact
+arithmetic but to `2.8e-14` in floating point, so the leg was written as a
+purchase. 89 such rows existed across all four USELESS pools, and 10 wallets
+had no other rows at all — they were tagged into P1, P2 and P3 as buyers who
+never bought.
+
+Two things hid it. The rows carry `$0.000000`, so no USD total looked wrong.
+And an earlier re-pricing pass overwrote `price_usd` for every row from the
+stored tick series, which replaced the absurd ratios these rows had with
+in-range prices — the repair erased the symptom while leaving the cause.
+
+It surfaced only because a stored price range (`1.2e-14 .. 0.25`) was compared
+against the range of the ticks that were supposed to have produced it
+(`0.065 .. 0.102`). That comparison is worth running after any collection:
+**stored prices must fall inside the range of the ticks they came from**, and
+anything outside it is a defect to explain rather than an outlier to accept.
