@@ -79,16 +79,16 @@ export function loadEnv(): Env {
    * Webhooks whose env var does not follow the DISCORD_WEBHOOK_<NAME> shape.
    *
    * ADDITIVE ONLY. Nothing above is changed, and an alias never overwrites a
-   * channel the loop already registered. Without this, a monitor pointed at
-   * "mos-price-alert" would resolve to no channel and DiscordSink would quietly
-   * fall back to DISCORD_WEBHOOK_URL -- posting price alerts into the general
-   * channel while reporting success. A missing alias is left unregistered
-   * rather than defaulted, so /health shows via:"fallback" and the misrouting
-   * is visible instead of silent.
+   * channel the loop already registered. A missing alias is left unregistered
+   * rather than defaulted, so /health shows via:"fallback" and a misrouting is
+   * visible instead of silent.
+   *
+   * Currently empty. The one entry that lived here routed a channel whose
+   * monitor has been removed; the environment variable is still set on the
+   * service so its Discord webhook is not lost, but nothing registers it as a
+   * channel any more.
    */
-  const WEBHOOK_ALIASES: ReadonlyArray<readonly [string, string]> = [
-    ['MOS_PRICE_CHECK', 'mos-price-alert'],
-  ];
+  const WEBHOOK_ALIASES: ReadonlyArray<readonly [string, string]> = [];
   for (const [envVar, channel] of WEBHOOK_ALIASES) {
     const value = process.env[envVar]?.trim();
     if (!value) continue;
@@ -133,7 +133,7 @@ export function loadEnv(): Env {
     // lands tens of milliseconds after `now`. The following tick therefore
     // computed an elapsed time a hair under 30,000ms, judged the monitor not
     // due, and skipped it until the tick after. Measured in production:
-    // pumpfun-early-window drained every 60.0s against a configured 30s.
+    // A monitor on the 30s minimum drained every 60.0s against its config.
     //
     // A 5s tick leaves that headroom. It only changes when a due monitor is
     // noticed; isDue still gates every monitor by its own schedule, so nothing

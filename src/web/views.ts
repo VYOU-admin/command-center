@@ -5,7 +5,6 @@
  */
 
 import type { MonitorHealth, HealthStatus } from '../health.js';
-import type { StoredRecord } from '../store/records.js';
 
 export function escapeHtml(input: string): string {
   return input
@@ -83,42 +82,6 @@ function monitorCard(monitor: MonitorHealth): string {
     </article>`;
 }
 
-/** The default panel: a reverse-chronological record list, used by RSS. */
-export function renderRecordListPanel(args: {
-  monitorName: string;
-  records: StoredRecord[];
-  windowHours: number;
-}): string {
-  const { monitorName, records, windowHours } = args;
-
-  if (records.length === 0) {
-    return (
-      `<h2 class="section">${escapeHtml(monitorName)} · last ${windowHours}h</h2>` +
-      `<p class="empty">Nothing ingested in the last ${windowHours} hours. If that looks wrong, check the monitor status above.</p>`
-    );
-  }
-
-  const rows = records
-    .map((record) => {
-      const href = safeUrl(record.url);
-      const when = new Date(record.publishedAt ?? record.firstSeenAt).toISOString();
-      const title = escapeHtml(record.title);
-      return `
-      <li>
-        <div class="record-head">
-          <h3>${href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${title}</a>` : title}</h3>
-          <time datetime="${escapeHtml(when)}">${relative(when)}</time>
-        </div>
-        ${record.summary ? `<p class="summary">${escapeHtml(record.summary)}</p>` : ''}
-      </li>`;
-    })
-    .join('');
-
-  return (
-    `<h2 class="section">${escapeHtml(monitorName)} · last ${windowHours}h · ${records.length} record${records.length === 1 ? '' : 's'}</h2>` +
-    `<ul class="records">${rows}</ul>`
-  );
-}
 
 export function renderDashboard(args: {
   monitors: MonitorHealth[];
@@ -181,9 +144,6 @@ export function renderDashboard(args: {
   .card p.panel-meta { margin:0; }
   code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
   .error { margin:10px 0 0; padding:8px 10px; background:rgba(255,107,107,.1); border-left:3px solid var(--bad); border-radius:4px; font-size:13px; word-break:break-word; }
-  ul.records { list-style:none; margin:0; padding:0; border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--panel); }
-  ul.records li { padding:14px 16px; border-bottom:1px solid var(--border); }
-  ul.records li:last-child { border-bottom:none; }
   .record-head { display:flex; align-items:baseline; justify-content:space-between; gap:14px; }
   .record-head h3 { font-size:15px; font-weight:600; margin:0; line-height:1.4; }
   .record-head time { color:var(--muted); font-size:12px; white-space:nowrap; }
@@ -236,8 +196,7 @@ export function renderDashboard(args: {
 
   <footer>
     Machine-readable status at <a href="/health">/health</a> ·
-    <a href="/api/monitors">/api/monitors</a> ·
-    <a href="/api/records">/api/records</a>
+    <a href="/api/monitors">/api/monitors</a>
   </footer>
 </div>
 <script>
