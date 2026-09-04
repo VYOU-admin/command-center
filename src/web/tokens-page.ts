@@ -154,6 +154,15 @@ function fmtNum(v, dp){
   if (v === null || v === undefined) return null;
   return v.toLocaleString('en-US', {minimumFractionDigits: dp, maximumFractionDigits: dp});
 }
+// A MEASURED SUB-CENT VALUE IS NOT ZERO. Rounding $0.001359 to "$0.00" puts a
+// zero on screen for a purchase that did have a price, which reads the same as
+// no measurement — the same confusion a null rendered as 0 would cause, one
+// decimal place further down.
+function fmtUsd(v){
+  if (v === null || v === undefined) return null;
+  if (v > 0 && v < 0.005) return '&lt;$0.01';
+  return '$' + fmtNum(v, 2);
+}
 function shortAddr(a){ return a.length <= 14 ? a : a.slice(0,6) + '…' + a.slice(-6); }
 function fmtTime(iso){ return iso.replace('T',' ').slice(0,19) + 'Z'; }
 
@@ -292,7 +301,7 @@ function rows(){
 
 function usdCell(a){
   if (a.priced === 0) return '<span class="unk">unknown</span>';
-  let s = '$' + fmtNum(a.usd, 2);
+  let s = fmtUsd(a.usd);
   if (a.unpriced > 0) s += ' <span class="part">+' + a.unpriced + ' unpriced</span>';
   return s;
 }
@@ -338,7 +347,7 @@ function renderTable(){
           + '<td><span class="chip">' + p.windowTag + '</span></td>'
           + '<td class="num">' + fmtNum(p.tokenAmount, 6) + '</td>'
           + '<td class="num">' + (p.usdAmount === null || p.usdAmount === undefined
-              ? '<span class="unk">unknown</span>' : '$' + fmtNum(p.usdAmount, 2)) + '</td>'
+              ? '<span class="unk">unknown</span>' : fmtUsd(p.usdAmount)) + '</td>'
           + '<td class="num">' + (p.priceUsd === null || p.priceUsd === undefined
               ? '<span class="unk">unknown</span>' : '$' + fmtNum(p.priceUsd, 8)) + '</td>'
           + '<td class="addr">' + shortAddr(p.pool) + '</td>'
@@ -357,7 +366,7 @@ function renderTable(){
       // just in the summary line instead of the table.
       const pricedTxt = (ps.length - nUnp) === 0
         ? 'none priced'
-        : '$' + fmtNum(sumUsd, 2) + ' priced';
+        : fmtUsd(sumUsd) + ' priced';
       const rec = '<div class="rec' + (good ? '' : ' bad') + '">'
         + (good
           ? 'reconciles: ' + ps.length + ' purchases, ' + fmtNum(sumTok, 4) + ' tokens, '
