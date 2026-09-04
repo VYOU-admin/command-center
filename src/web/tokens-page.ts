@@ -44,12 +44,28 @@ export interface WindowRow {
   label: string | null;
 }
 
+/**
+ * The one current-price observation this render uses. ONE row per token per
+ * render: the header and every Change cell read this same object, so the
+ * percentage in a row can always be reconciled against the price printed above
+ * it. Letting the two read separate rows is the paired-baseline defect in
+ * FAILURE_MODES section 8, and would be invisible -- both numbers would look
+ * right on their own.
+ */
+export interface TokenPrice {
+  priceUsd: number;
+  pool: string;
+  source: string;
+  observedAt: string;
+}
 export interface TokenGroup {
   mint: string;
   ticker: string;
   name: string | null;
   decimals: number;
   chartedPair: string | null;
+  /** Null when the token has never been priced; the page must render that. */
+  price: TokenPrice | null;
   /** The windows as commissioned, ordered by start. Never derived from purchases. */
   windows: WindowRow[];
   wallets: WalletRow[];
@@ -133,6 +149,8 @@ export function renderTokensPage(args: {
     font-family:ui-monospace,Menlo,monospace}
   .addr{font-family:ui-monospace,Menlo,monospace;font-size:12px}
   .unk{color:var(--warn);font-style:italic}
+  .up{color:#3fb950;font-variant-numeric:tabular-nums}
+  .down{color:#f85149;font-variant-numeric:tabular-nums}
   .part{color:var(--faint);font-size:11px}
   .chip{display:inline-block;background:var(--panel2);border:1px solid var(--border);
     border-radius:11px;padding:1px 9px;font-size:11px;margin:1px 3px 1px 0;white-space:nowrap}
@@ -205,15 +223,34 @@ function toast(msg, isErr){
 // AGGREGATES ARE SUMS OVER THE SAME ARRAY THE DETAIL ROWS RENDER FROM.
 function agg(w){
   let tok = 0, usd = 0, priced = 0, unpriced = 0, first = null, last = null;
+  // TOKENS ON PRICED ROWS ONLY, tracked apart from the total. Average cost
+  // divides these two, and an unpriced row must leave BOTH sides -- counting
+  // its tokens while its USD is absent would divide real dollars by more
+  // tokens than those dollars bought, understating every such wallet's cost
+  // basis. That is the paired-baseline rule in FAILURE_MODES section 8.
+  let tokPriced = 0;
   for (const p of w.purchases){
     tok += p.tokenAmount;
     if (p.usdAmount === null || p.usdAmount === undefined) { unpriced++; }
-    else { usd += p.usdAmount; priced++; }
+    else { usd += p.usdAmount; priced++; tokPriced += p.tokenAmount; }
     if (first === null || p.blockTime < first) first = p.blockTime;
     if (last === null || p.blockTime > last) last = p.blockTime;
   }
+  // Null, never 0. A wallet with no priced row has an UNKNOWN cost basis, and
+  // rendering that as $0.00 would claim it bought for nothing.
+  const avg = (priced > 0 && tokPriced > 0) ? (usd / tokPriced) : null;
   return {n: w.purchases.length, tok: tok, usd: usd, priced: priced,
-          unpriced: unpriced, first: first, last: last};
+          unpriced: unpriced, first: first, last: last,
+          tokPriced: tokPriced, avg: avg};
+}
+
+// Percent change from what the wallet paid on average to what the token is
+// worth now. Null in, null out -- an unknown cost basis cannot produce a
+// percentage, and 0% would read as "went nowhere".
+function changePct(avg, price){
+  if (avg === null || avg === undefined || !(avg > 0)) return null;
+  if (price === null || price === undefined || !(price > 0)) return null;
+  return (price - avg) / avg * 100;
 }
 
 let state = {chain: 0, token: 0, sort: 'usd', dir: -1, open: {}, f: {}};
@@ -301,6 +338,7 @@ function renderHeader(){
         + '<dt>pair</dt><dd>' + (t.chartedPair || '—') + '</dd>'
         + '<dt>mint</dt><dd id="mintVal">' + t.mint + copyBtn(t.mint, 'mint') + '</dd>'
         + '<dt>chart</dt><dd><a href="' + ds + '" target="_blank" rel="noopener noreferrer">DexScreener</a></dd>'
+        + '<dt>price</dt><dd>' + priceCell(t) + '</dd>'
       + '</dl>'
     + '</div>'
     + '<div class="hcol">'
@@ -311,6 +349,30 @@ function renderHeader(){
       + orphanRow + '</tbody></table>'
     + '</div>';
 
+}
+
+/*
+ * The header price. Reads t.price -- the SAME object every Change cell in the
+ * table reads -- so the two can never disagree within a render.
+ *
+ * The observation time and the pool are shown beside the number because
+ * neither is optional context: a price is only meaningful with its age (the
+ * monitor writes nothing when a read fails, so the last row can be old) and
+ * with the pool it came from (price is per pool; this token's pools spanned
+ * 0.2351 to 0.2494 at one instant).
+ */
+function priceCell(t){
+  if (!t.price) return '<span class="unk">no price recorded</span>';
+  const age = Math.round((Date.now() - Date.parse(t.price.observedAt)) / 1000);
+  const ageTxt = age < 90 ? age + 's ago'
+    : age < 5400 ? Math.round(age / 60) + 'm ago'
+    : Math.round(age / 3600) + 'h ago';
+  // Anything older than a few cycles is called out rather than shown plainly,
+  // because a stale price silently makes every Change cell stale with it.
+  const stale = age > 900 ? ' class="unk"' : '';
+  return '<b>$' + fmtNum(t.price.priceUsd, 8) + '</b>'
+    + '<span class="part"> ' + t.price.source + ' · pool ' + shortAddr(t.price.pool)
+    + ' · <span' + stale + '>' + ageTxt + '</span> (' + fmtTime(t.price.observedAt) + ')</span>';
 }
 
 // ONE copy control, used by the header mint and by every wallet row, so the two
@@ -364,6 +426,8 @@ const COLS = [
   {k:'n',     t:'buys',      sort:true, num:true},
   {k:'tok',   t:'tokens',    sort:true, num:true},
   {k:'usd',   t:'usd',       sort:true, num:true},
+  {k:'avg',   t:'avg cost',  sort:true, num:true},
+  {k:'chg',   t:'change',    sort:true, num:true},
   {k:'first', t:'first buy', sort:true},
   {k:'last',  t:'last buy',  sort:true}
 ];
@@ -401,17 +465,59 @@ function rows(){
     if (f.fBefore && (a.last === null || a.last > f.fBefore.replace('T',' '))) continue;
     out.push({w: w, a: a});
   }
+  // THE PRICE IS READ ONCE, HERE, and the same value reaches every row. The
+  // header renders from this identical object, so a Change cell can always be
+  // reconciled against the price shown above the table.
+  const px = t.price ? t.price.priceUsd : null;
+  for (const r of out) r.a.chg = changePct(r.a.avg, px);
+
   const k = state.sort, d = state.dir;
   out.sort(function(x, y){
     let A, B;
     if (k === 'wallet'){ A = x.w.wallet; B = y.w.wallet; }
     else if (k === 'first' || k === 'last'){ A = x.a[k] || ''; B = y.a[k] || ''; }
     else { A = x.a[k]; B = y.a[k]; }
+    // Unknown is not a quantity and must not sort as one. Nulls collect at the
+    // bottom whichever way the column is sorted, rather than posing as the
+    // smallest value and topping an ascending sort.
+    const an = (A === null || A === undefined), bn = (B === null || B === undefined);
+    if (an && bn) return 0;
+    if (an) return 1;
+    if (bn) return -1;
     if (A < B) return -d;
     if (A > B) return d;
     return 0;
   });
   return out;
+}
+
+// Average cost is per token, so it needs far more precision than a dollar
+// figure -- these tokens trade at $0.001 and $0.25. Unknown is rendered as the
+// word, in the same style as an unpriced USD cell, never as $0.00.
+function avgCell(a){
+  if (a.avg === null) return '<span class="unk">unknown</span>';
+  /*
+   * A value too small to show at 8dp must NOT be printed as $0.00000000. One
+   * wallet's only buy carries 8.27 tokens against a USD amount of 5.7e-14 --
+   * float residue on the paid side, the mirror of the dust legs removed from
+   * the token side -- and its average is genuinely about 7e-15. Rendered
+   * fixed-width that reads as a hard zero, which is a different and much
+   * stronger claim than "smaller than this column can show".
+   */
+  let s = a.avg < 0.00000001
+    ? '$' + a.avg.toExponential(1) + ' <span class="part">below display precision</span>'
+    : '$' + fmtNum(a.avg, 8);
+  // Say so when the average rests on only part of the wallet's buying, rather
+  // than presenting a partial basis as a complete one.
+  if (a.unpriced > 0) s += ' <span class="part">of ' + a.priced + '/' + a.n + '</span>';
+  return s;
+}
+
+function chgCell(a){
+  if (a.chg === null || a.chg === undefined) return '<span class="unk">unknown</span>';
+  const cls = a.chg >= 0 ? 'up' : 'down';
+  const sign = a.chg >= 0 ? '+' : '';
+  return '<span class="' + cls + '">' + sign + fmtNum(a.chg, 2) + '%</span>';
 }
 
 function usdCell(a){
@@ -435,7 +541,7 @@ function renderTable(){
   $('count').textContent = list.length + ' of ' + t.wallets.length + ' wallets · '
     + totalBuys + ' purchases shown';
   const body = $('body');
-  if (list.length === 0){ body.innerHTML = '<tr><td colspan="8" class="empty">No wallets match these filters.</td></tr>'; return; }
+  if (list.length === 0){ body.innerHTML = '<tr><td colspan="10" class="empty">No wallets match these filters.</td></tr>'; return; }
   let html = '';
   for (const r of list){
     const w = r.w, a = r.a;
@@ -449,6 +555,8 @@ function renderTable(){
       + '<td class="num">' + a.n + '</td>'
       + '<td class="num">' + fmtNum(a.tok, 4) + '</td>'
       + '<td class="num">' + usdCell(a) + '</td>'
+      + '<td class="num">' + avgCell(a) + '</td>'
+      + '<td class="num">' + chgCell(a) + '</td>'
       + '<td class="num">' + (a.first ? fmtTime(a.first) : '—') + '</td>'
       + '<td class="num">' + (a.last ? fmtTime(a.last) : '—') + '</td>'
       + '</tr>';

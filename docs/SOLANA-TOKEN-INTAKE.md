@@ -435,6 +435,87 @@ purchases, never dropped by a re-run.
 
 Unique on `(wallet, mint, tag)` — a wallet can carry several tags for one token.
 
+## Current price, and the two derived columns
+
+Collection answers what a wallet paid. These answer what that is worth now.
+
+### The source is DexScreener, one request per token
+
+DexScreener is free, needs no key, and answers in about 150ms from the Railway
+host. FAILURE_MODES records it returning 403 — that is true of `curl`, whose
+User-Agent is blocked, and not of Node's `fetch`. Verify from the host rather
+than from a laptop before concluding either way.
+
+The alternative was pricing from recent swaps on the pool. That would spend
+Helius credits on every cycle forever to produce a worse number, and was
+rejected on those grounds rather than on feasibility.
+
+**Ask for one token per request.** `/latest/dex/tokens` accepts several mints
+comma-separated, but caps its response at 30 pairs in total: one token with many
+pools silently pushes another token's pools out of the answer, and nothing in
+the response says it happened. One request per token removes that entirely and
+costs one request each — at 1-minute cycles that is well inside the documented
+300 requests per minute for over a hundred tokens.
+
+`/tokens/v1/{chain}/{mints}` returns exactly one pair per token and did return
+the deepest pool in testing, which would be a single request for every token.
+It is not used: nothing documents that the pair it selects is the most liquid,
+and the difference is a real number, not a rounding — one token's pools quoted
+0.2351 to 0.2494 at the same instant.
+
+### Price is per pool, so the pool must be chosen
+
+`priceUsd` differs per pool, and choosing the pool is choosing the price. Take
+the **highest-liquidity pool, resolved every cycle**, never hardcoded: liquidity
+moves and the deepest pool changes with it.
+
+Two things this rule needs in practice:
+
+- **Sort by liquidity yourself.** The response is *not* ordered by liquidity —
+  one token's pools came back 169176, 103178, 170295 in that order — so taking
+  the first pair silently picks an arbitrary pool.
+- **Only pools where our mint is the base asset, quoted in a recognised pricing
+  asset.** A pair holding our token as its counter-side is pricing something
+  else against us. A pair quoted in another memecoin has a `priceUsd` inherited
+  from that coin's own price, and is not eligible however deep it is.
+
+Store the pool and the observation time on every price row. A price without its
+pool cannot be interpreted, and one without its age cannot be trusted.
+
+Prices are append-only, and a cycle that cannot price a token **writes no row**.
+The previous row stands and the page shows how old it is. There is deliberately
+no mutable "current price" field, because a failed read would have somewhere to
+write into it.
+
+### Average cost excludes unpriced rows from BOTH sides
+
+A wallet's average cost is its total USD divided by its total tokens — but only
+over rows that have a USD amount. **An unpriced row must leave the denominator
+as well as the numerator.** Keeping its tokens while its dollars are absent
+divides real money by more tokens than that money bought, and understates the
+cost basis of exactly those wallets whose data is already weakest. This is the
+paired-baseline rule: both halves of a ratio come from the same set of rows.
+
+A wallet with no priced row at all has an **unknown** average cost. Not zero.
+Zero is a claim that it bought for nothing.
+
+The same follows for percent change: unknown average cost gives unknown change,
+never 0%. And a computed average too small to show at the column's precision is
+rendered in exponential form rather than as `$0.00000000` — one wallet's only
+buy carries 8.27 tokens against 5.7e-14 USD, float residue on the paid side, and
+a fixed-width zero would state something much stronger than "below what this
+column can display".
+
+### The header and the table read one price row per render
+
+The page reads the latest price **once**, and the header and every Change cell
+derive from that single value. Reading it separately per consumer is the
+paired-baseline defect again, and it would be invisible: both numbers look
+correct alone, and only reconciling a row against the header exposes them.
+
+`select distinct on (mint) ... order by mint, observed_at desc` is the whole
+query. A token with no row stays null all the way to the page, which says so.
+
 ## Failure modes seen
 
 Append to this section as real ones surface. Seeded with two that are certain to

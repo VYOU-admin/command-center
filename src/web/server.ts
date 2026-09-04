@@ -12,8 +12,8 @@ import type { DiscordSink } from '../sinks/discord.js';
 import type { Pool } from '../store/db.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard } from './views.js';
-import { renderTokensPage, type ChainGroup, type TokenGroup, type WalletRow,
-  type WindowRow } from './tokens-page.js';
+import { renderTokensPage, type ChainGroup, type TokenGroup, type TokenPrice,
+  type WalletRow, type WindowRow } from './tokens-page.js';
 
 export interface WebServerOptions {
   pool: Pool;
@@ -199,7 +199,7 @@ export function createWebServer(opts: WebServerOptions): Server {
       // purchase for the tokens tracked so far, which is small enough to hand
       // to the browser whole -- and doing so is what lets the collapsed row's
       // totals be summed from exactly the rows the expanded view renders.
-      const [toks, buys, tags, wins] = await Promise.all([
+      const [toks, buys, tags, wins, prices] = await Promise.all([
         pool.query(`select mint, chain, ticker, name, decimals, charted_pair
                       from tokens order by chain, ticker`),
         pool.query(`select mint, wallet, signature, pool, block_time, token_amount,
@@ -211,6 +211,20 @@ export function createWebServer(opts: WebServerOptions): Server {
         // first and last buy inside a window are not the window.
         pool.query(`select mint, tag, window_start, window_end, label
                       from token_windows order by mint, window_start`),
+        /*
+         * THE LATEST PRICE PER TOKEN, READ ONCE FOR THE WHOLE RENDER.
+         *
+         * distinct on takes the newest row per mint in a single pass. The
+         * header and every Change cell are then computed from this one value,
+         * so the percentage in a row always reconciles against the price
+         * printed above the table -- reading the price separately per consumer
+         * is the paired-baseline defect in FAILURE_MODES section 8.
+         *
+         * A token with no row here is unpriced, and stays null all the way to
+         * the page. Nothing substitutes a zero.
+         */
+        pool.query(`select distinct on (mint) mint, price_usd, pool, source, observed_at
+                      from token_prices order by mint, observed_at desc`),
       ]);
 
       const byToken = new Map<string, Map<string, WalletRow>>();
@@ -252,6 +266,16 @@ export function createWebServer(opts: WebServerOptions): Server {
         winsByMint.set(m, list);
       }
 
+      const priceByMint = new Map<string, TokenPrice>();
+      for (const r of prices.rows as Record<string, unknown>[]) {
+        priceByMint.set(String(r.mint), {
+          priceUsd: Number(r.price_usd),
+          pool: String(r.pool),
+          source: String(r.source),
+          observedAt: (r.observed_at as Date).toISOString(),
+        });
+      }
+
       const chains = new Map<string, TokenGroup[]>();
       for (const r of toks.rows as Record<string, unknown>[]) {
         const mint = String(r.mint);
@@ -261,6 +285,7 @@ export function createWebServer(opts: WebServerOptions): Server {
           name: r.name === null ? null : String(r.name),
           decimals: Number(r.decimals),
           chartedPair: r.charted_pair === null ? null : String(r.charted_pair),
+          price: priceByMint.get(mint) ?? null,
           windows: winsByMint.get(mint) ?? [],
           wallets: [...(byToken.get(mint)?.values() ?? [])],
         };

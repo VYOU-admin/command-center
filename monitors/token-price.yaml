@@ -1,0 +1,55 @@
+# Current USD price for every token the dashboard tracks.
+#
+# ONE MONITOR FOR ALL TOKENS. It reads the `tokens` table each cycle, so adding
+# a token needs no change here and no new monitor.
+#
+# SOURCE. DexScreener, free and keyless, answering in ~150ms from this host.
+# FAILURE_MODES records DexScreener returning 403 — that is true of curl, whose
+# User-Agent is blocked; Node's fetch is not affected, which was measured from
+# the Railway host before this was written. The alternative, pricing from recent
+# swaps on the pool, would spend Helius credits every cycle forever to produce a
+# worse number.
+#
+# ONE REQUEST PER TOKEN. The endpoint accepts several mints at once but caps its
+# answer at 30 pairs, so one token with many pools silently pushes another
+# token's pools out of the response. Asking per token costs one request each and
+# removes that failure entirely. At 1-minute cycles that is a request per token
+# per minute, against a documented 300/minute — room for well over a hundred
+# tokens before the schedule has to change.
+#
+# THE POOL IS CHOSEN PER CYCLE, BY LIQUIDITY, IN THE ADAPTER. Not configured
+# here and not taken from the response order, which is NOT sorted by liquidity —
+# a token's pools came back 169176, 103178, 170295 in that order. Price is per
+# pool, not per token: the same token read 0.2351 to 0.2494 across its pools at
+# one instant, so choosing the pool is choosing the price.
+#
+# NO CYCLE EVER WRITES A ZERO. A token that cannot be priced gets no row and its
+# previous row stands, timestamped, so the page can show the price as old. A
+# plausible wrong price is worse than a visibly stale one.
+
+id: token-price
+name: Token Price
+source: token-price
+enabled: true
+
+# One minute. Two tokens is two requests per cycle against a 300/minute limit,
+# so the schedule is bounded by usefulness rather than by the source.
+schedule: 1m
+
+alerts:
+  channel: system
+
+options:
+  pricing:
+    request_timeout_ms: 15000
+
+    # Pools thinner than this are ignored however they rank. A near-empty pool
+    # quotes a price that one small trade moves, and several of this token's
+    # pools hold under $800.
+    min_liquidity_usd: 500
+
+    # Consecutive failures for ONE token before the system channel hears about
+    # it. A single token failing does not fail the run — the others still store,
+    # the same way oil-prices treats its sources as independent. Every token
+    # failing does fail the run, and takes the normal monitor failure path.
+    alert_after_failures: 3
