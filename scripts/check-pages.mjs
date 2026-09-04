@@ -12,9 +12,35 @@
  * fails the deploy instead of reaching production.
  */
 import { renderDashboard } from '../dist/web/views.js';
+import { renderTokensPage } from '../dist/web/tokens-page.js';
+
+// A token with a wallet that has BOTH a priced and an unpriced purchase, so the
+// null-rendering branch and the partial-total branch are both exercised by the
+// gate rather than only on production data.
+const SAMPLE_TOKENS = [{
+  chain: 'solana',
+  tokens: [{
+    mint: '4ChT49V1iazP2XUGtycGkEsS6pRMqvGfUbqvRC9Z91ZT',
+    ticker: 'MOS', name: 'Mosaic', decimals: 9,
+    chartedPair: 'gjL62zuUAdJm7cZhrWtnBoCGN31kSFyWHScEYfTWiWh',
+    wallets: [{
+      wallet: 'HbPEA8hC6QnuxEfcQhfepY3s5akxuKMGa2T97WZVWB4a',
+      tags: [{ tag: 'MOS-P1', source: 'auto' }, { tag: 'watch', source: 'manual' }],
+      purchases: [
+        { signature: '5xQ', pool: 'gjL62zuUAdJm7cZhrWtnBoCGN31kSFyWHScEYfTWiWh',
+          blockTime: '2026-09-02T12:34:56.000Z', tokenAmount: 1234.5,
+          usdAmount: 2000.25, priceUsd: 0.00162, windowTag: 'MOS-P1' },
+        { signature: '6yR', pool: 'EVw13whn1d8dy1fggVFkeaeVgAWNnemFf6fMgtJM9ZDQ',
+          blockTime: '2026-09-02T19:10:00.000Z', tokenAmount: 10,
+          usdAmount: null, priceUsd: null, windowTag: 'MOS-P2' },
+      ],
+    }],
+  }],
+}];
 
 const pages = [
-  ['dashboard', () => renderDashboard({ monitors: [], panels: [], overall: 'ok', generatedAt: new Date() })],
+  ['dashboard', () => renderDashboard({ monitors: [], overall: 'ok', generatedAt: new Date() })],
+  ['tokens', () => renderTokensPage({ chains: SAMPLE_TOKENS, generatedAt: new Date() })],
 ];
 
 let failures = 0;

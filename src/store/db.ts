@@ -105,6 +105,81 @@ create index if not exists records_monitor_published_idx
 
 create index if not exists records_first_seen_idx
   on records (first_seen_at desc);
+
+/*
+ * Token intake. See docs/SOLANA-TOKEN-INTAKE.md for the procedure these serve.
+ *
+ * EVERY ADDRESS COLUMN HERE IS CASE-SENSITIVE. Solana mints, pools and wallets
+ * are base58. Nothing may lower() them on the way in or on the way out; that
+ * mistake recurred four separate times before, each time writing rows that were
+ * then permanently invisible.
+ */
+create table if not exists tokens (
+  mint          text primary key,
+  chain         text        not null,
+  ticker        text        not null,
+  name          text,
+  decimals      integer     not null,
+  charted_pair  text,
+  created_at    timestamptz not null default now()
+);
+
+/*
+ * One row per BUY LEG, not per transaction.
+ *
+ * The unique key includes pool and wallet because a single transaction can
+ * legitimately contain more than one swap leg -- an aggregator routing across
+ * two pools produces two buys for the same wallet under one signature, and
+ * keying on signature alone would silently discard one of them.
+ *
+ * usd_amount and price_usd are NULLABLE ON PURPOSE. A purchase whose USD value
+ * cannot be derived stores null, never 0: a reader cannot tell a measured zero
+ * from an absent measurement, and a $0 purchase is a plausible-looking lie.
+ */
+create table if not exists token_purchases (
+  id            bigserial primary key,
+  mint          text        not null references tokens(mint),
+  wallet        text        not null,
+  signature     text        not null,
+  pool          text        not null,
+  block_time    timestamptz not null,
+  slot          bigint      not null,
+  token_amount  numeric     not null,
+  usd_amount    numeric,
+  price_usd     numeric,
+  window_tag    text        not null,
+  created_at    timestamptz not null default now()
+);
+
+create unique index if not exists token_purchases_leg_idx
+  on token_purchases (signature, wallet, mint, pool);
+
+create index if not exists token_purchases_mint_window_idx
+  on token_purchases (mint, window_tag);
+
+create index if not exists token_purchases_mint_wallet_idx
+  on token_purchases (mint, wallet);
+
+/*
+ * Tags live in their OWN table so that a re-run of a window, which deletes and
+ * reinserts that window's purchase rows, cannot destroy an operator's manual
+ * edits. source distinguishes what a run asserted from what a human decided.
+ */
+create table if not exists wallet_tags (
+  id          bigserial primary key,
+  wallet      text        not null,
+  mint        text        not null references tokens(mint),
+  tag         text        not null,
+  source      text        not null,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+create unique index if not exists wallet_tags_wallet_mint_tag_idx
+  on wallet_tags (wallet, mint, tag);
+
+create index if not exists wallet_tags_mint_idx
+  on wallet_tags (mint);
 `;
 
 export async function migrate(pool: Pool): Promise<void> {

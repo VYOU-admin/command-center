@@ -157,3 +157,16 @@ defects here were introduced by trusting a header comment that described what
 the author intended rather than what the function did — including a "both reads
 must succeed" rule that was actually implemented as "at least one read
 succeeded".
+
+## 12. A failed edit that does not stop the command depending on it
+
+A patch step that aborts does not, on its own, prevent the next command in the
+same shell invocation from running against the unpatched file. Seen twice in one
+session: an empty schema string that `client.query('')` executed and reported as
+applied while creating nothing, and a re-run that silently used the code path
+being replaced.
+
+Chain dependent steps with `&&` rather than `;` or separate lines, and have the
+consuming step validate its own input rather than trusting that the producer
+succeeded — a script that is handed SQL should confirm the SQL contains what it
+expects before executing it.
