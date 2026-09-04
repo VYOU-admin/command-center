@@ -236,7 +236,8 @@ function renderChainTabs(){
       + c.chain + ' <span style="opacity:.7">' + c.tokens.length + '</span></div>';
   }).join('');
   Array.from($('chainTabs').children).forEach(function(el){
-    el.onclick = function(){ state.chain = +el.dataset.i; state.token = 0; state.open = {}; renderAll(); };
+    el.onclick = function(){
+      state.chain = +el.dataset.i; state.token = 0; state.open = {}; state.f = {}; renderAll(); };
   });
 }
 function renderTokenTabs(){
@@ -246,7 +247,12 @@ function renderTokenTabs(){
       + t.ticker + ' <span style="opacity:.7">' + t.wallets.length + '</span></div>';
   }).join('');
   Array.from($('tokenTabs').children).forEach(function(el){
-    el.onclick = function(){ state.token = +el.dataset.i; state.open = {}; renderAll(); };
+    el.onclick = function(){
+      // FILTERS RESET ON A TOKEN SWITCH. They were written when only one token
+      // existed. Carrying fTag='MOS-P1' onto another token filters the table to
+      // nothing while the rebuilt select shows "any" — the control and the
+      // result would disagree, with no error.
+      state.token = +el.dataset.i; state.open = {}; state.f = {}; renderAll(); };
   });
 }
 
@@ -282,8 +288,9 @@ function renderHeader(){
   const orphan = Object.keys(perTag).filter(function(k){
     return !wins.some(function(w){ return w.tag === k; }); });
   const orphanRow = orphan.length
-    ? '<tr><td colspan="6" style="color:var(--bad)">' + orphan.length
-      + ' tag(s) with purchases but no window row: ' + orphan.join(', ') + '</td></tr>'
+    ? '<tr><td colspan="6" style="color:var(--warn)">' + orphan.length
+      + ' cohort(s) collected but not yet complete, so no window is recorded: '
+      + orphan.join(', ') + '</td></tr>'
     : '';
 
   $('tokenHeader').innerHTML =

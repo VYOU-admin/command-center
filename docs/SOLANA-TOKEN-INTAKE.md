@@ -177,6 +177,134 @@ API is introduced.
 distinguish a measured zero from an absent measurement, and a zero dollar
 purchase is a plausible-looking lie.
 
+## Reading swaps: which method, and what it costs
+
+Two methods work. Which one you need depends on how far back the window is and
+how busy the token is.
+
+### Backwards pagination from the chain head — only for recent windows
+
+`getSignaturesForAddress` paged with `before` from the head. Its cost scales
+with **distance from now**, not with window length, because there is no slot or
+time parameter — the walk is linear from the head.
+
+For a token doing ~1,000 signatures every 15 seconds, a window 4.5 days back
+needs roughly 25,000 pages *on one pool* before a single transaction is fetched.
+Measured: six pages of 1,000 signatures walked back **93 seconds** of wall
+clock. This method is fine for a window hours old and useless for one days old.
+
+### type=SWAP paging from a window-end anchor — for anything older
+
+Cost scales with **window length**, which is what makes distant windows
+reachable.
+
+1. Find the last slot at or before the window end. Batch `getBlockTime` probes
+   20 to a request and narrow ~20x per round; both edges of a 2h15m window were
+   pinned exactly in **12 requests / 164 sub-calls**.
+2. Read that block with `transactionDetails:'signatures'` and take any
+   signature from it.
+3. Page `/v0/addresses/{pool}/transactions?type=SWAP&before=<that signature>`
+   backwards until the timestamp falls below the window start.
+
+**The anchor does not have to belong to the pool being queried.** A signature
+from any transaction in a block at the window end bounds `before` correctly for
+every pool. One anchor per window serves all pools, which removes the need to
+hunt for a per-pool signature — a real problem for sparse pools, which appear in
+0 of ~1,600 transactions in a given block.
+
+**A 404 is not an error.** `Failed to find events within the search period`
+means the API scanned a chunk and found no matches. Do not retry it and do not
+treat it as the end. Advance the cursor with one `getSignaturesForAddress` page
+— **1 credit instead of another 100-credit miss** — and continue. On a sparse
+pool this was 4 of 8 requests.
+
+### What the enhanced payload contains
+
+It reproduces the pipeline exactly; it is not an approximation. Verified against
+`getTransaction` on real data:
+
+- `tokenTransfers` summed per owner gave **identical receiver sets and amounts**
+  to `pre/postTokenBalances` net deltas on 20 of 20 transactions.
+- `accountData[].nativeBalanceChange` **is** `postBalances - preBalances`:
+  identical on **503 of 503** accounts compared. The paid-in-native-SOL test is
+  therefore reproducible, which matters — it recovered 18% of one token's buys.
+
+### Parameters: two are honoured, two are silently ignored
+
+**Test every filter by checking it changes the result set.** On this endpoint:
+
+| parameter | behaviour |
+|---|---|
+| `before` (signature) | **honoured** |
+| `type=SWAP` | **honoured** — returns a different set, all of type SWAP |
+| `source=RAYDIUM` | **honoured** |
+| `until` | rejected outright, HTTP 400 |
+| `startTime` | **accepted, returns 200, and silently ignored** |
+| `slot` | **accepted, returns 200, and silently ignored** |
+
+A bad value for `type` or `source` returns HTTP 404 rather than being quietly
+dropped, so those two fail loudly. `startTime` and `slot` do not: they look like
+they worked and constrain nothing. A bound that appears accepted and does
+nothing produces a confidently wrong window, so a filter is only established as
+working once a nonsense value has been shown to behave differently from a real
+one.
+
+## Credits, and the budget gate
+
+From Helius's pricing page, which is the only authority — there is no usage API,
+so **spend is computed as request-count x published unit cost, never read**:
+
+    RPC calls                         1 credit
+    getProgramAccounts, archival     10 credits
+    DAS calls                        10 credits
+    Enhanced Transaction API        100 credits per request
+
+What Helius counts as "archival" is not documented at a URL that resolves;
+`/docs/rpc/archival` is a 404. Assume RPC reads against windows more than a day
+or two old may bill at 10x until that is settled.
+
+**Project the credit cost before collecting, and stop if it does not fit.**
+The per-pool figure is `window_seconds / seconds_covered_per_request x 100`.
+Seconds covered per request varies enormously with pool activity and must be
+measured per pool, not assumed from the busiest one — measured on one token:
+
+    charted raydium CPMM   32.3 s/request      1,199 requests    119,900 credits
+    meteora DLMM SOL       44.3 s/request        874 requests     87,400 credits
+    orca wp SOL           217.2 s/request        179 requests     17,900 credits
+    meteora DLMM USDC    3,478   s/request         12 requests      1,200 credits
+
+A 6-request sample per pool is enough to project and cheap to take. Assuming
+every pool is as dense as the busiest one overstated the total by a wide margin.
+
+State the projection and the decision explicitly before writing anything. If it
+exceeds the working budget, stop and report which subsets fit rather than
+quietly collecting less.
+
+## Multi-pool scope when no pool dominates
+
+One token had a single pool carrying 57% of volume across four pools covering
+99%; another had one pool carrying essentially all of it. Where no pool
+dominates, collecting only the charted pair silently drops every wallet an
+aggregator routed elsewhere.
+
+The set covering 99% of in-scope volume is the useful cut. Below that the tail
+is cheap — the pools under 1% of volume cost hundreds of credits, not tens of
+thousands — so the cut is about the dense secondary pools, not the long tail.
+
+## Collecting in passes
+
+When a token's full collection does not fit one budget, split it by pool and
+run passes. Two rules make a partial state safe:
+
+- **Write purchase rows progressively**, per pool per window, not accumulated in
+  memory and flushed at the end. A run that dies mid-window then leaves a
+  truthful partial record rather than nothing.
+- **Write the `token_windows` row only when the window is complete across every
+  pool in scope.** A window with purchase rows and no `token_windows` row is the
+  signal that it was interrupted or is mid-pass. Because the dashboard legend
+  reads from `token_windows`, such a window renders with no legend entry — which
+  is correct: a half-collected cohort must not look complete.
+
 ## Reading swaps: Helius limits
 
 Measured on this project's key. These are hard numbers, not guidance:
@@ -371,3 +499,35 @@ The mistake was reading "every indexed pair holding the mint" as "every market
 for the mint". They are not the same set. See "Which pairs are in scope" above
 for the comparison that separates them, and note that the base/quote labels are
 not stable enough to be that comparison.
+
+### A degenerate swap becomes a price tick and poisons a whole window
+
+Price ticks built as `abs(quote_amount) / abs(token_amount)` per swap will
+occasionally include a swap whose token side is near zero against a normal quote
+side. The ratio is then astronomically large, and it is indistinguishable from a
+real tick in the series.
+
+Measured on one window: 35 rows were priced at exactly **549,755,813,888** —
+2^39, which is what a float ratio degenerates to — and the window's USD total
+came to **$136,522,225,213,212,380**. The token's real price in that window was
+about $0.095, and the stored ticks that *did* become purchase rows ranged
+0.0885–0.1023. The bad tick came from a swap that never became a purchase row,
+so inspecting the stored ticks afterwards showed nothing wrong.
+
+The `±120s median` does not protect against this. A median defends against one
+bad tick among several; where a lone degenerate tick is the only one near a
+swap, it wins outright.
+
+**Fence the tick series before using it.** Take the window median, then discard
+any tick more than an order of magnitude away from it in either direction, and
+report how many were discarded. A token's price does not move 10x inside a
+collection window; a tick that says it did is a broken swap, not a price.
+
+**Sanity-check the window total before reporting it.** A USD sum is the cheapest
+possible tripwire here — $136 quadrillion is obvious where a single row at
+549,755,813,888 might not be. Compare the implied price against the token's
+market cap divided by supply and stop if it is absurd.
+
+Re-pricing does not need new RPC: `usd = token_amount x price(t)` is
+reproducible from stored rows, using the stablecoin-pool rows already written as
+the tick series.
