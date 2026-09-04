@@ -352,10 +352,16 @@ function renderTable(){
       const okUsd = Math.abs(sumUsd - a.usd) < 1e-6;
       const okN = ps.length === a.n;
       const good = okTok && okUsd && okN;
+      // "$0.00 priced" for a wallet where NOTHING was priced renders a measured
+      // zero where there is no measurement — the same defect as a $0.00 cell,
+      // just in the summary line instead of the table.
+      const pricedTxt = (ps.length - nUnp) === 0
+        ? 'none priced'
+        : '$' + fmtNum(sumUsd, 2) + ' priced';
       const rec = '<div class="rec' + (good ? '' : ' bad') + '">'
         + (good
-          ? 'reconciles: ' + ps.length + ' purchases, ' + fmtNum(sumTok, 4) + ' tokens, $'
-            + fmtNum(sumUsd, 2) + ' priced' + (nUnp ? ', ' + nUnp + ' unpriced' : '')
+          ? 'reconciles: ' + ps.length + ' purchases, ' + fmtNum(sumTok, 4) + ' tokens, '
+            + pricedTxt + (nUnp ? ', ' + nUnp + ' unpriced' : '')
           : 'MISMATCH between the summary row and these purchases')
         + '</div>';
       html += '<tr class="exp"><td colspan="8">' + rec + inner + '</td></tr>';
