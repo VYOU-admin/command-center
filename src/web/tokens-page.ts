@@ -191,6 +191,7 @@ function fmtUsd(v){
   if (v > 0 && v < 0.005) return '&lt;$0.01';
   return '$' + fmtNum(v, 2);
 }
+const SOLSCAN_ACCT = 'https://solscan.io/account/';
 function shortAddr(a){ return a.length <= 14 ? a : a.slice(0,6) + '…' + a.slice(-6); }
 function fmtTime(iso){ return iso.replace('T',' ').slice(0,19) + 'Z'; }
 
@@ -291,8 +292,7 @@ function renderHeader(){
       + '<dl class="hk">'
         + '<dt>chain</dt><dd>' + chain + '</dd>'
         + '<dt>pair</dt><dd>' + (t.chartedPair || '—') + '</dd>'
-        + '<dt>mint</dt><dd id="mintVal">' + t.mint
-          + '<button class="copy" id="copyMint" title="copy mint">copy</button></dd>'
+        + '<dt>mint</dt><dd id="mintVal">' + t.mint + copyBtn(t.mint, 'mint') + '</dd>'
         + '<dt>chart</dt><dd><a href="' + ds + '" target="_blank" rel="noopener noreferrer">DexScreener</a></dd>'
       + '</dl>'
     + '</div>'
@@ -304,15 +304,30 @@ function renderHeader(){
       + orphanRow + '</tbody></table>'
     + '</div>';
 
-  const btn = $('copyMint');
-  if (btn) btn.onclick = function(){
-    const v = currentToken().mint;
-    if (navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(v).then(function(){ toast('mint copied'); },
-        function(){ toast('could not copy', true); });
-    } else { toast('clipboard unavailable', true); }
-  };
 }
+
+// ONE copy control, used by the header mint and by every wallet row, so the two
+// cannot drift apart. The value carried is always the FULL address: truncation
+// is display only and must never reach the clipboard or an href.
+//
+// NOTHING HERE CHANGES CASE. Solana addresses are base58 and case-sensitive; a
+// lowercased address yields a Solscan URL that resolves to nothing and a
+// clipboard value that matches nothing, with no error anywhere.
+function copyBtn(value, label){
+  return '<button class="copy" data-copy="' + value + '" title="copy ' + label + '">copy</button>';
+}
+
+document.addEventListener('click', function(ev){
+  const b = ev.target.closest ? ev.target.closest('[data-copy]') : null;
+  if (!b) return;
+  ev.stopPropagation();
+  ev.preventDefault();
+  const v = b.getAttribute('data-copy');
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(v).then(function(){ toast('copied ' + shortAddr(v)); },
+      function(){ toast('could not copy', true); });
+  } else { toast('clipboard unavailable', true); }
+});
 
 function renderFilters(){
   const t = currentToken();
@@ -421,7 +436,9 @@ function renderTable(){
     html += '<tr class="w" data-w="' + w.wallet + '">'
       + '<td><span class="caret">' + (isOpen ? '▾' : '▸') + '</span></td>'
       + '<td>' + tagCell(w) + '</td>'
-      + '<td class="addr">' + shortAddr(w.wallet) + '</td>'
+      + '<td class="addr"><a href="' + SOLSCAN_ACCT + w.wallet
+        + '" target="_blank" rel="noopener noreferrer">' + shortAddr(w.wallet) + '</a>'
+        + copyBtn(w.wallet, 'wallet') + '</td>'
       + '<td class="num">' + a.n + '</td>'
       + '<td class="num">' + fmtNum(a.tok, 4) + '</td>'
       + '<td class="num">' + usdCell(a) + '</td>'
@@ -472,7 +489,8 @@ function renderTable(){
   body.innerHTML = html;
   Array.from(body.querySelectorAll('tr.w')).forEach(function(tr){
     tr.onclick = function(ev){
-      if (ev.target.dataset && ev.target.dataset.act) return;
+      // clicking a tag control, a copy button or a link must not toggle the row
+      if (ev.target.closest && ev.target.closest('[data-act],[data-copy],a')) return;
       const w = tr.dataset.w;
       state.open[w] = !state.open[w];
       renderTable();
