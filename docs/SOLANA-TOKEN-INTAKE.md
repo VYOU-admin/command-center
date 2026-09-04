@@ -318,6 +318,21 @@ run passes. Two rules make a partial state safe:
   reads from `token_windows`, such a window renders with no legend entry — which
   is correct: a half-collected cohort must not look complete.
 
+**Do not change a Railway variable while a collection is running.** Setting or
+editing any service variable triggers a redeploy, and the redeploy replaces the
+container filesystem — the collector process is killed and every working file
+under `/app` is destroyed, including the script itself, `pools.json`, the log and
+the progress summary. This happened mid-session: a variable set for an unrelated
+monitor wiped pass 1's working files and would have killed the collection had it
+landed fifteen minutes later.
+
+Progressive writes are what makes this survivable — the purchase rows are already
+in Postgres, so a relaunched run resumes from storage. Nothing else survives.
+Treat variable edits, redeploys and anything else that restarts the service as
+mutually exclusive with an active collection, and prefer running a long
+collection detached with `setsid` so that at least an SSH disconnect does not
+also end it.
+
 ## Reading swaps: Helius limits
 
 Measured on this project's key. These are hard numbers, not guidance:
