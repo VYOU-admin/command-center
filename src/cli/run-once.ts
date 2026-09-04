@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     alerter: app.alerter,
     discord: app.discord,
     tickMs: app.env.tickMs,
+    platform: app.env.platform,
   });
 
   let failures = 0;

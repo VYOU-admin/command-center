@@ -37,6 +37,22 @@ export interface Env {
    * cannot reach an unrelated variable.
    */
   configVars: Map<string, string>;
+  /**
+   * Platform identity, injected by Railway into every container. Read here
+   * rather than in an adapter so the "only env.ts touches process.env" rule
+   * holds, and threaded through AdapterContext rather than through monitor
+   * YAML -- a value interpolated into YAML is persisted into monitors.config
+   * by the registry, which is how an API key once ended up sitting in the
+   * database in plaintext.
+   */
+  platform: PlatformInfo;
+}
+
+export interface PlatformInfo {
+  /** Railway API token. Null when not running on Railway. */
+  apiToken: string | null;
+  projectId: string | null;
+  environmentId: string | null;
 }
 
 /** Environment variables monitor YAML is permitted to interpolate. */
@@ -110,6 +126,11 @@ export function loadEnv(): Env {
     discordChannels,
     port,
     monitorsDir: resolve(process.env.MONITORS_DIR?.trim() || 'monitors'),
+    platform: {
+      apiToken: process.env.RAILWAY_API_TOKEN?.trim() || null,
+      projectId: process.env.RAILWAY_PROJECT_ID?.trim() || null,
+      environmentId: process.env.RAILWAY_ENVIRONMENT_ID?.trim() || null,
+    },
     configVars: (() => {
       const m = new Map<string, string>();
       for (const key of CONFIG_VAR_ALLOWLIST) {

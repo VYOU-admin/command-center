@@ -6,10 +6,15 @@
  * and "how long do I have" is the only question that matters when a volume is
  * filling. Two readings hours apart answer it.
  *
- * Postgres cannot see the size of the volume it sits on — pg_database_size
- * reports the database, not the filesystem — so the ceiling is configuration.
- * If the volume is resized, the YAML must be updated to match or the projection
- * silently describes the wrong disk.
+ * BOTH THE CEILING AND THE USAGE COME FROM THE HOSTING PROVIDER. pg_database_size
+ * reports the database, which is not the same thing as the volume: a 27 MB
+ * database has sat on a volume reporting 14.4 GB used, because WAL, indexes
+ * reclaimed lazily and the filesystem's own overhead are all outside it. Asking
+ * Postgres how full its disk is gives the wrong answer by construction.
+ *
+ * volume_bytes and volume_used_bytes are therefore what the provider reports.
+ * db_bytes and wal_bytes are kept alongside them as context -- useful for
+ * "what is growing", useless as a measure of "how full".
  */
 export const SCHEMA = `
 create table if not exists disk_usage_samples (
@@ -23,6 +28,12 @@ create table if not exists disk_usage_samples (
 
   primary key (monitor_id, sampled_at)
 );
+
+-- Added after first release. create table if not exists is a NO-OP on an
+-- existing table, so a column added by editing the statement above would
+-- silently never appear.
+alter table disk_usage_samples add column if not exists volume_used_bytes bigint;
+alter table disk_usage_samples add column if not exists measured_from     text;
 
 create index if not exists disk_usage_time_idx
   on disk_usage_samples (monitor_id, sampled_at desc);

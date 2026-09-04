@@ -25,6 +25,7 @@
 
 import type { Logger } from '../logger.js';
 import type { Alert } from '../sinks/discord.js';
+import type { PlatformInfo } from '../env.js';
 import type { Pool, PoolClient } from '../store/db.js';
 
 export interface NormalizedRecord {
@@ -55,6 +56,12 @@ export interface AdapterContext {
    * monitor needs its tracked universe before it can decide what to poll.
    */
   db: Pool;
+  /**
+   * Platform identity from the environment. Present so an adapter can ask the
+   * hosting provider about the infrastructure it runs on instead of being told
+   * in configuration -- a constant in YAML is a claim, not a measurement.
+   */
+  platform: PlatformInfo;
   /**
    * Queue a Discord alert. Deliberately queued rather than sent: alerts are
    * raised inside the persist transaction but must not perform network I/O

@@ -15,6 +15,7 @@ import type { MonitorConfig } from './config.js';
 import { errorFields, errorMessage, log } from './logger.js';
 import type { Alert, DiscordSink } from './sinks/discord.js';
 import { withTransaction, type Pool } from './store/db.js';
+import type { PlatformInfo } from './env.js';
 import { insertRecords } from './store/records.js';
 import { getMonitorStates, recordRun, type MonitorState } from './store/registry.js';
 
@@ -28,6 +29,7 @@ export interface SchedulerOptions {
   alerter: Alerter;
   discord: DiscordSink;
   tickMs: number;
+  platform: PlatformInfo;
 }
 
 export class Scheduler {
@@ -134,6 +136,7 @@ export class Scheduler {
         log: runLog,
         signal: controller.signal,
         db: this.opts.pool,
+        platform: this.opts.platform,
         queueAlert: (alert, channel) => pendingAlerts.push({ alert, channel }),
       };
 

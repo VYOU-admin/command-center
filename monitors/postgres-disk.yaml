@@ -1,50 +1,55 @@
 # Postgres volume usage watch.
 #
-# The volume filled and every monitor stopped writing with "could not extend
-# file: No space left on device". The spine watches whether monitors RUN, not
-# whether the disk they write to has room, so nothing saw it coming. This
-# closes that gap.
+# WHY THIS EXISTS. The volume filled once and every monitor stopped writing with
+# "could not extend file: No space left on device". Nothing saw it coming: the
+# spine watches whether monitors run, not whether the disk they write to has
+# room.
 #
-# Alerts go to the system channel: a full disk is an operational failure, not a
-# crypto or oil finding, and belongs with the other outage alerts.
+# THE VOLUME SIZE IS NOT CONFIGURED HERE, DELIBERATELY. This monitor used to
+# divide by a `volume_gb: 5` constant. The real volume is 50 GB, so it reported
+# 212% full, latched at `critical`, and could never alert again — for a week.
+# After the teardown the same constant would have read under 1%. Both figures
+# were wrong the same way: arithmetic against a number we wrote down, not a
+# reading.
+#
+# Size and usage now both come from the Railway API, via the RAILWAY_API_TOKEN
+# that Railway injects into the container. The token reaches the adapter through
+# AdapterContext.platform, NOT through this file — a value interpolated into
+# YAML is persisted into monitors.config by the registry, which is how an API
+# key once ended up in the database in plaintext.
+#
+# If the API read fails, the run FAILS. It does not fall back to a constant: a
+# plausible wrong percentage is worse than a monitor that is visibly broken.
+#
+# NOTE ALSO that pg_database_size is not this number. A 27 MB database has sat
+# on a volume reporting 14.4 GB used — WAL, lazily reclaimed space and
+# filesystem overhead all live outside the database. db_bytes and wal_bytes are
+# still recorded, as context for "what is growing", not as the measure of
+# "how full".
 
 id: postgres-disk
 name: Postgres Disk
 source: postgres-disk
 enabled: true
 
-# Cheap: two catalogue queries. Frequent enough to catch a fast fill, rare
-# enough that the sample history stays small.
 schedule: 15m
 
 alerts:
   channel: system
 
 options:
-  # ⚠️ MUST MATCH THE RAILWAY VOLUME. Postgres cannot see the size of the
-  # filesystem it sits on — pg_database_size reports the database, not the
-  # disk — so this is the only source of truth for the ceiling. If the volume
-  # is resized, change this in the same breath or every projection below
-  # describes a disk that no longer exists.
-  #
-  # Resized from 0.5 GB to 5 GB on 2026-08-25 after the volume filled.
-  volume_gb: 5
+  # Which volume to read. The project has exactly one today; the adapter throws
+  # rather than guessing if it ever finds more than one and this is unset.
+  volume_name: postgres-volume
 
   thresholds:
-    # Two levels, alerting only when the level RISES: crossing 70% says it
-    # once rather than every fifteen minutes, and 85% still says it again.
-    # Dropping back below clears the state so a later crossing is announced
-    # afresh.
     warn_pct: 70
     critical_pct: 85
 
-  # Growth is measured against the oldest sample inside this window, so one
-  # spike cannot dominate the projection. Under 30 minutes of history the
-  # growth rate is reported as unknown rather than guessed — a confident wrong
-  # number about time-until-full is worse than admitting there isn't one yet.
+  # Growth is MEASURED from stored samples, never assumed. With fewer than two
+  # samples spanning the window, the projection is reported as unknown rather
+  # than guessed: a wrong "days until full" is worse than no number.
   growth_window_hours: 6
   min_samples_for_projection: 2
 
-  # A watcher that grows without bound is a bad watcher. At 15m this is ~2,880
-  # rows a month, a few hundred kB.
   sample_retention_days: 30
