@@ -85,11 +85,10 @@ function monitorCard(monitor: MonitorHealth): string {
 
 export function renderDashboard(args: {
   monitors: MonitorHealth[];
-  panels: string[];
   overall: 'ok' | 'degraded';
   generatedAt: Date;
 }): string {
-  const { monitors, panels, overall, generatedAt } = args;
+  const { monitors, overall, generatedAt } = args;
 
   const banner =
     overall === 'degraded'
@@ -192,7 +191,6 @@ export function renderDashboard(args: {
   <h2 class="section">Monitors</h2>
   <div class="cards">${monitors.map(monitorCard).join('')}</div>
 
-  ${panels.join('\n')}
 
   <footer>
     Machine-readable status at <a href="/health">/health</a> ·

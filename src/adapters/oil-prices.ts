@@ -20,13 +20,12 @@
  *    source, not one alert per site.
  */
 
-import type { AdapterContext, PanelContext, SourceAdapter } from './types.js';
+import type { AdapterContext, SourceAdapter } from './types.js';
 import type { PoolClient } from '../store/db.js';
 import { parseOilConfig, type OilConfig, type SourceConfig } from './oil/config.js';
 import { SCHEMA } from './oil/schema.js';
 import { createFetcher } from './oil/fetch.js';
 import { SCRAPERS, scrapeMcKinleyHistory, type Observation } from './oil/sources.js';
-import { renderOilPanel } from '../web/oil-panel.js';
 import {
   buildCashWorkbook,
   buildOtherWorkbook,
@@ -706,10 +705,6 @@ const adapter: SourceAdapter<ScrapeRun> = {
     });
 
     return stored + historyRows;
-  },
-
-  async renderPanel(ctx: PanelContext) {
-    return renderOilPanel(ctx);
   },
 };
 

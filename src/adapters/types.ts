@@ -8,9 +8,8 @@
  * overwrite" rule.
  *
  * So storage shape is now the adapter's business. A source may declare its own
- * tables (`migrate`), its own write path (`persist`), and its own dashboard
- * panel (`renderPanel`). Sources that are genuinely document-shaped, like RSS,
- * declare none of these and get the shared behaviour for free.
+ * tables (`migrate`) and its own write path (`persist`). A source that declares
+ * neither gets the shared record store for free.
  *
  * The pump.fun monitor extended the same idea to liveness. Its source is a
  * persistent websocket rather than a request, which fits none of `fetch()`'s
@@ -75,14 +74,6 @@ export interface AdapterContext {
   queueAlert(alert: Alert, channel?: string): void;
 }
 
-export interface PanelContext {
-  db: Pool;
-  monitorId: string;
-  monitorName: string;
-  options: Record<string, unknown>;
-  /** The monitor's configured dashboard window, from its `dashboard:` block. */
-  windowHours: number;
-}
 
 export interface SourceAdapter<TRecord = NormalizedRecord> {
   /** Matches the `source:` field in monitor YAML. Must be unique. */
@@ -106,8 +97,6 @@ export interface SourceAdapter<TRecord = NormalizedRecord> {
    */
   persist?(ctx: AdapterContext, client: PoolClient, records: TRecord[]): Promise<number>;
 
-  /** Render this source's dashboard section. Omit for the default record list. */
-  renderPanel?(ctx: PanelContext): Promise<string>;
 
   /**
    * Release anything held between runs. Polled sources own nothing outside a

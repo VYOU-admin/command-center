@@ -4,7 +4,6 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import type { AnyAdapter, PanelContext } from '../adapters/types.js';
 import type { MonitorConfig } from '../config.js';
 import { assessAll, overallStatus } from '../health.js';
 import { DEFAULT_ALERT_CHANNEL } from '../config.js';
@@ -17,7 +16,6 @@ import { escapeHtml, renderDashboard } from './views.js';
 export interface WebServerOptions {
   pool: Pool;
   monitors: MonitorConfig[];
-  adapters: Map<string, AnyAdapter>;
   /** Read only to report alert routing; the web sink never sends alerts. */
   discord: DiscordSink;
   port: number;
@@ -128,44 +126,17 @@ export function createWebServer(opts: WebServerOptions): Server {
 
 
     if (path === '/') {
+      // STATUS ONLY. This page answers one question: which monitors exist, are
+      // they enabled, when did each last succeed, and how long did it take. The
+      // per-monitor panel mechanism is gone -- the one panel that used it
+      // rendered a long price table that buried the thing the page is for.
       const states = await getMonitorStates(pool, monitors.map((m) => m.id));
       const health = assessAll(monitors, states);
-
-      // Each monitor renders its own panel. One panel failing must not blank the
-      // whole dashboard — the status cards above it are the thing you most need
-      // to see when something is broken.
-      const panels = await Promise.all(
-        monitors.map(async (monitor) => {
-          const panelCtx: PanelContext = {
-            db: pool,
-            monitorId: monitor.id,
-            monitorName: monitor.name,
-            options: monitor.options,
-            windowHours: monitor.dashboard.windowHours,
-          };
-          try {
-            const adapter = opts.adapters.get(monitor.source);
-            if (adapter?.renderPanel) return await adapter.renderPanel(panelCtx);
-            // A monitor with no panel of its own now contributes nothing. The
-            // generic record-list fallback went with the feed monitor that was
-            // the only thing using it; its status card still appears above.
-            return '';
-          } catch (err) {
-            log.error('panel render failed', { monitor_id: monitor.id, ...errorFields(err) });
-            return (
-              `<h2 class="section">${escapeHtml(monitor.name)}</h2>` +
-              `<p class="error">This panel failed to render: ${escapeHtml((err as Error).message)}</p>`
-            );
-          }
-        }),
-      );
-
       sendHtml(
         res,
         200,
         renderDashboard({
           monitors: health,
-          panels: panels.filter((p) => p !== ''),
           overall: overallStatus(health),
           generatedAt: new Date(),
         }),
