@@ -210,11 +210,20 @@ const adapter: SourceAdapter<Reading> = {
 
     // Growth from the oldest sample inside the window, so a single spike does
     // not dominate and a resize does not have to be special-cased.
+    //
+    // ONLY SAMPLES MEASURED THE SAME WAY. volume_used_bytes is null on every row
+    // written before this monitor started reading the provider, and those rows
+    // hold db+wal instead -- a different quantity entirely. Falling back to
+    // total_bytes here compared 14 GB of real volume usage against 11 GB of
+    // database size and produced "growing 15.6 GB/day, 2.2 days until full" out
+    // of a database that had just been emptied. Two figures on one line must
+    // share a baseline; where they cannot, the answer is unknown, not a number.
     const prev = await ctx.db.query<{ total_bytes: string; age_hours: string }>(
-      `select coalesce(volume_used_bytes, total_bytes)::bigint as total_bytes,
+      `select volume_used_bytes::bigint as total_bytes,
               extract(epoch from (now() - sampled_at)) / 3600 as age_hours
          from disk_usage_samples
         where monitor_id = $1 and sampled_at > now() - ($2 || ' hours')::interval
+          and volume_used_bytes is not null
         order by sampled_at
         limit 1`,
       [ctx.monitorId, cfg.growthWindowHours],
