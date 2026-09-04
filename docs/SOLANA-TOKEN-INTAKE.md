@@ -45,13 +45,14 @@ It returns a bare JSON array of every indexed pair holding the mint, each with
 `pairAddress`, `dexId`, `baseToken`, `quoteToken`, `liquidity.usd` and
 `volume.h24`.
 
-**Read swaps from every pool, not only the charted one.** The charted pair is
+**Read swaps from every in-scope pool, not only the charted one.** The charted pair is
 how the operator found the token; it is not a filter. A wallet that bought the
 same token in a different pool during the window is still a buyer, and
 restricting to one pool silently undercounts the cohort.
 
-Record the resolved pool list — address, dex, base and quote mints, liquidity,
-24h volume — **before reading any swaps**, so the set that was read is on record
+Record the resolved pool list — address, dex, both mints, which side was judged
+the pricing asset, liquidity, 24h volume — **before reading any swaps**, together
+with the pools excluded and why, so the set that was read is on record
 independently of what the read returned.
 
 **No liquidity floor is applied by default.** A tiny pool contributes few rows
@@ -59,13 +60,58 @@ and costs little. If a token resolves to a large number of pools, stop and
 report the list rather than reading all of them: the cost is linear in pools
 and the operator should choose.
 
-### Pairs where the mint is the quote asset
+### Which pairs are in scope
 
-A pair may hold the mint as its *quote* asset (`quoteToken.address == mint`)
-rather than its base. Buying the mint there means selling the base token. This
-is handled for free by the direction rule below, which keys off which side the
-mint is on rather than assuming a position — so such pairs need no special
-casing and are included.
+**A pair is in scope only when the target mint is the token the pair prices.**
+A pair belonging to a different token, which merely uses the target mint as its
+pricing side, is out of scope regardless of its liquidity or volume. Those pools
+are that other token's market; a wallet trading there is buying or selling that
+token, and sweeping them in inflates the cohort with people who were never
+trading ours.
+
+**Do not decide this from the base/quote labels.** DexScreener flipped the
+labelling on one real pool between two runs a day apart: the same
+`pairAddress` was reported as `WAIFU/MOS` with MOS as the quote, and later as
+`MOS/WAIFU` with MOS as the base. Any rule keyed on `baseToken.address ==
+mint` would have classified the same pool two different ways on two days.
+
+**The comparison actually used.** For each pair, take its two mint addresses,
+`baseToken.address` and `quoteToken.address`, without caring which is which.
+One of them is the target mint. Look at *the other one*:
+
+- if the other mint is a recognised **pricing asset** — a stablecoin or wrapped
+  SOL — the pair prices our token against it, and the pair is **in scope**;
+- otherwise the other mint is some other project's token, our mint is serving
+  as that pair's pricing side, and the pair is **out of scope**.
+
+Recognised pricing assets, as a set of mint addresses:
+
+    USDC  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+    USDT  Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB
+    wSOL  So11111111111111111111111111111111111111112
+
+This is a set membership test on the counter-side mint. It is symmetric, so it
+gives the same answer whichever way DexScreener labels the pair.
+
+**Known limitation, stated rather than hidden.** A genuine market for our token
+quoted in some third token — MOS/BONK, say — would be excluded by this rule,
+because BONK is not in the pricing-asset set. That is the safe direction to err:
+including another project's pool corrupts the cohort with wallets that never
+touched our token, while excluding an exotic quote pair loses only the buyers
+who used it. Extend the set above when such a pair is real and material, and say
+so in the run report.
+
+#### Worked example: the pool that was excluded
+
+    EVw13whn1d8dy1fggVFkeaeVgAWNnemFf6fMgtJM9ZDQ   orca
+    the two mints: 9yPNMiAGREqUe8yjP2UyHPC6vc69oBikgHcH8Qf5G6ha  (WAIFU)
+                   4ChT49V1iazP2XUGtycGkEsS6pRMqvGfUbqvRC9Z91ZT  (MOS, the target)
+    counter-side  = WAIFU, which is NOT in the pricing-asset set
+    verdict       = OUT OF SCOPE
+
+This is WAIFU's pool. MOS is its pricing side. It was wrongly included in the
+first MOS run at roughly $5 of liquidity, and the rows it produced were deleted
+once the rule was corrected.
 
 ## Direction
 
@@ -273,3 +319,16 @@ replaced.
 Chain the edit and the command that depends on it with `&&`, and have the
 consuming script re-check its own input — the migration script now refuses to run
 unless the SQL it received declares the tables it expects by name.
+
+### A pair of another token that uses ours as its pricing side
+
+The first MOS run resolved four pools and read all four. One of them was
+another token's pair that used MOS as its quote asset. It contributed no
+independent buyers — every leg in it turned out to be an arbitrage transaction
+that also touched the real pool — but it could have, and those wallets would
+have been traders of a different token entirely.
+
+The mistake was reading "every indexed pair holding the mint" as "every market
+for the mint". They are not the same set. See "Which pairs are in scope" above
+for the comparison that separates them, and note that the base/quote labels are
+not stable enough to be that comparison.
