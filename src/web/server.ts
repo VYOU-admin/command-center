@@ -12,7 +12,8 @@ import type { DiscordSink } from '../sinks/discord.js';
 import type { Pool } from '../store/db.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard } from './views.js';
-import { renderTokensPage, type ChainGroup, type TokenGroup, type WalletRow } from './tokens-page.js';
+import { renderTokensPage, type ChainGroup, type TokenGroup, type WalletRow,
+  type WindowRow } from './tokens-page.js';
 
 export interface WebServerOptions {
   pool: Pool;
@@ -198,7 +199,7 @@ export function createWebServer(opts: WebServerOptions): Server {
       // purchase for the tokens tracked so far, which is small enough to hand
       // to the browser whole -- and doing so is what lets the collapsed row's
       // totals be summed from exactly the rows the expanded view renders.
-      const [toks, buys, tags] = await Promise.all([
+      const [toks, buys, tags, wins] = await Promise.all([
         pool.query(`select mint, chain, ticker, name, decimals, charted_pair
                       from tokens order by chain, ticker`),
         pool.query(`select mint, wallet, signature, pool, block_time, token_amount,
@@ -206,6 +207,10 @@ export function createWebServer(opts: WebServerOptions): Server {
                       from token_purchases order by mint, wallet, block_time`),
         pool.query(`select mint, wallet, tag, source from wallet_tags
                      order by mint, wallet, tag`),
+        // The windows as COMMISSIONED. Not derived from the purchases: the
+        // first and last buy inside a window are not the window.
+        pool.query(`select mint, tag, window_start, window_end, label
+                      from token_windows order by mint, window_start`),
       ]);
 
       const byToken = new Map<string, Map<string, WalletRow>>();
@@ -234,6 +239,19 @@ export function createWebServer(opts: WebServerOptions): Server {
         });
       }
 
+      const winsByMint = new Map<string, WindowRow[]>();
+      for (const r of wins.rows as Record<string, unknown>[]) {
+        const m = String(r.mint);
+        const list = winsByMint.get(m) ?? [];
+        list.push({
+          tag: String(r.tag),
+          start: (r.window_start as Date).toISOString(),
+          end: (r.window_end as Date).toISOString(),
+          label: r.label === null ? null : String(r.label),
+        });
+        winsByMint.set(m, list);
+      }
+
       const chains = new Map<string, TokenGroup[]>();
       for (const r of toks.rows as Record<string, unknown>[]) {
         const mint = String(r.mint);
@@ -243,6 +261,7 @@ export function createWebServer(opts: WebServerOptions): Server {
           name: r.name === null ? null : String(r.name),
           decimals: Number(r.decimals),
           chartedPair: r.charted_pair === null ? null : String(r.charted_pair),
+          windows: winsByMint.get(mint) ?? [],
           wallets: [...(byToken.get(mint)?.values() ?? [])],
         };
         const chain = String(r.chain);

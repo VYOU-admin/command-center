@@ -37,12 +37,21 @@ export interface WalletRow {
   purchases: PurchaseRow[];
 }
 
+export interface WindowRow {
+  tag: string;
+  start: string;
+  end: string;
+  label: string | null;
+}
+
 export interface TokenGroup {
   mint: string;
   ticker: string;
   name: string | null;
   decimals: number;
   chartedPair: string | null;
+  /** The windows as commissioned, ordered by start. Never derived from purchases. */
+  windows: WindowRow[];
   wallets: WalletRow[];
 }
 
@@ -81,6 +90,24 @@ export function renderTokensPage(args: {
   .tab.on{background:var(--accent);border-color:var(--accent);color:#06222a;font-weight:600}
   .tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .tabs.sub-tabs .tab{font-size:12px;padding:5px 12px}
+  .header{display:grid;grid-template-columns:minmax(260px,340px) minmax(0,1fr);gap:18px;
+    background:var(--panel);border:1px solid var(--border);border-radius:8px;
+    padding:14px 16px;margin-bottom:14px}
+  @media (max-width:820px){ .header{grid-template-columns:1fr} }
+  .hcol h2{margin:0 0 8px;font-size:16px;font-weight:650;letter-spacing:-.01em}
+  .hcol h2 .nm{color:var(--muted);font-weight:400;font-size:14px;margin-left:6px}
+  .hk{display:grid;grid-template-columns:78px minmax(0,1fr);gap:3px 10px;font-size:12px}
+  .hk dt{color:var(--faint);text-transform:uppercase;letter-spacing:.07em;font-size:10px;padding-top:2px}
+  .hk dd{margin:0;color:var(--text);word-break:break-all;font-family:ui-monospace,Menlo,monospace}
+  .copy{background:transparent;border:1px solid var(--border);color:var(--faint);border-radius:4px;
+    font-size:10px;padding:0 5px;margin-left:6px;cursor:pointer}
+  .copy:hover{border-color:var(--accent);color:var(--accent)}
+  .legend{width:100%;border-collapse:collapse;font-size:12px}
+  .legend th{position:static;background:transparent;border-bottom:1px solid var(--border);
+    padding:4px 8px;font-size:9px}
+  .legend td{padding:5px 8px;border-bottom:1px solid var(--rule,#1e242c);vertical-align:middle}
+  .legend tr:last-child td{border-bottom:0}
+  .legend .lab{color:var(--muted)}
   .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:end;background:var(--panel);
     border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px}
   .f{display:flex;flex-direction:column;gap:4px}
@@ -138,6 +165,7 @@ export function renderTokensPage(args: {
   ${empty ? '<div class="empty">No tokens ingested yet.</div>' : `
   <div class="tabs" id="chainTabs"></div>
   <div class="tabs sub-tabs" id="tokenTabs"></div>
+  <div class="header" id="tokenHeader"></div>
   <div class="bar" id="filters"></div>
   <p class="count" id="count"></p>
   <div class="tw"><table>
@@ -219,6 +247,71 @@ function renderTokenTabs(){
   Array.from($('tokenTabs').children).forEach(function(el){
     el.onclick = function(){ state.token = +el.dataset.i; state.open = {}; renderAll(); };
   });
+}
+
+function renderHeader(){
+  const t = currentToken();
+  const chain = DATA[state.chain].chain;
+  const ds = 'https://dexscreener.com/solana/' + (t.chartedPair || t.mint);
+
+  // THE LEGEND COUNTS ARE COMPUTED FROM THE SAME ARRAY THE TABLE RENDERS FROM.
+  // Reading them from a stored aggregate instead would let the legend and the
+  // filtered table disagree while both looked authoritative.
+  const perTag = {};
+  for (const w of t.wallets){
+    const seen = {};
+    for (const p of w.purchases){
+      if (!perTag[p.windowTag]) perTag[p.windowTag] = {buys: 0, wallets: 0};
+      perTag[p.windowTag].buys++;
+      if (!seen[p.windowTag]){ seen[p.windowTag] = 1; perTag[p.windowTag].wallets++; }
+    }
+  }
+  const wins = t.windows || [];
+  const rows = wins.map(function(w){
+    const c = perTag[w.tag] || {buys: 0, wallets: 0};
+    return '<tr><td><span class="chip">' + w.tag + '</span></td>'
+      + '<td class="num">' + fmtTime(w.start) + '</td>'
+      + '<td class="num">' + fmtTime(w.end) + '</td>'
+      + '<td class="lab">' + (w.label || '—') + '</td>'
+      + '<td class="num">' + c.wallets + '</td>'
+      + '<td class="num">' + c.buys + '</td></tr>';
+  }).join('');
+  // A tag with purchases but no window row is a defect, and is shown as one
+  // rather than being quietly left out of the legend.
+  const orphan = Object.keys(perTag).filter(function(k){
+    return !wins.some(function(w){ return w.tag === k; }); });
+  const orphanRow = orphan.length
+    ? '<tr><td colspan="6" style="color:var(--bad)">' + orphan.length
+      + ' tag(s) with purchases but no window row: ' + orphan.join(', ') + '</td></tr>'
+    : '';
+
+  $('tokenHeader').innerHTML =
+    '<div class="hcol">'
+      + '<h2>' + t.ticker + '<span class="nm">' + (t.name || '') + '</span></h2>'
+      + '<dl class="hk">'
+        + '<dt>chain</dt><dd>' + chain + '</dd>'
+        + '<dt>pair</dt><dd>' + (t.chartedPair || '—') + '</dd>'
+        + '<dt>mint</dt><dd id="mintVal">' + t.mint
+          + '<button class="copy" id="copyMint" title="copy mint">copy</button></dd>'
+        + '<dt>chart</dt><dd><a href="' + ds + '" target="_blank" rel="noopener noreferrer">DexScreener</a></dd>'
+      + '</dl>'
+    + '</div>'
+    + '<div class="hcol">'
+      + '<table class="legend"><thead><tr><th>window</th><th class="num">from</th>'
+      + '<th class="num">to</th><th>label</th><th class="num">wallets</th>'
+      + '<th class="num">buys</th></tr></thead><tbody>'
+      + (rows || '<tr><td colspan="6" class="lab">No windows recorded.</td></tr>')
+      + orphanRow + '</tbody></table>'
+    + '</div>';
+
+  const btn = $('copyMint');
+  if (btn) btn.onclick = function(){
+    const v = currentToken().mint;
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(v).then(function(){ toast('mint copied'); },
+        function(){ toast('could not copy', true); });
+    } else { toast('clipboard unavailable', true); }
+  };
 }
 
 function renderFilters(){
@@ -418,7 +511,7 @@ function editTag(wallet, tag, action){
     .catch(function(e){ toast(String(e), true); });
 }
 
-function renderAll(){ renderChainTabs(); renderTokenTabs(); renderFilters(); renderHead(); renderTable(); }
+function renderAll(){ renderChainTabs(); renderTokenTabs(); renderHeader(); renderFilters(); renderHead(); renderTable(); }
 if (DATA.length) renderAll();
 </script>
 </body>

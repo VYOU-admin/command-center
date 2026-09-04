@@ -35,6 +35,30 @@ a duplicate.
 | window end | UTC timestamp, **inclusive**. |
 | tag | `TICKER-P<n>`. `n` distinguishes purchase periods within one token's history — P1 is the first window ingested, not a rank or a quality score. |
 
+## Recording the window
+
+**Every run writes its `token_windows` row, before or alongside the purchase
+rows.** The row records the window as commissioned: the mint, the tag, the start
+and end the operator specified, and a short label such as `accumulation` or
+`spike`.
+
+**A window that produced purchases but has no `token_windows` row is a defect.**
+It means a cohort exists whose definition was never written down, and the only
+remaining description of it is the rows themselves.
+
+**The window is not derived from the purchases.** The first and last buy inside
+a window are not the window: a run over 12:00–14:00 whose earliest buy landed at
+12:09:01 still covered 12:00–14:00. Deriving the bounds from `token_purchases`
+would silently redefine the period as whatever happened to trade, and would
+shrink a quiet window to nothing.
+
+**The re-run path must not drop it.** Re-running a token and window deletes and
+reinserts that window's `token_purchases` rows; `token_windows` is left alone,
+exactly as `wallet_tags` is. The definition of the window outlives any
+particular ingestion of it. If the operator is correcting the window bounds
+themselves, that is an update to the `token_windows` row and a re-run, not a
+delete.
+
 ## Pool resolution
 
 Query DexScreener's token-pairs endpoint for the mint:
@@ -180,7 +204,7 @@ Re-running a token and window is safe and is the intended way to correct a run.
 
 - The run **deletes that token+window's `token_purchases` rows and reinserts
   them.** Scoped to `(mint, window_tag)` — never wider.
-- **`wallet_tags` is never touched by the delete.** Tags live in their own table
+- **Neither `wallet_tags` nor `token_windows` is touched by the delete.** Tags live in their own table
   so that operator edits survive a re-run. A re-run re-asserts `auto` tags via
   upsert; it does not remove `manual` ones.
 - **Dry-run counts are reported before the delete**, including zeros. On a first
@@ -225,6 +249,21 @@ one transaction can legitimately contain more than one swap leg, including two
 legs for the same wallet in different pools.
 
 Indexed on `(mint, window_tag)` and `(mint, wallet)`.
+
+### `token_windows` — the windows as commissioned
+
+| column | type | meaning |
+|---|---|---|
+| `id` | bigserial PK | |
+| `mint` | text not null → `tokens(mint)` | |
+| `tag` | text not null | e.g. `MOS-P1` |
+| `window_start` | timestamptz not null | as specified, UTC |
+| `window_end` | timestamptz not null | as specified, UTC, **inclusive** |
+| `label` | text | short description: `accumulation`, `spike` |
+| `created_at` | timestamptz not null | |
+
+Unique on `(mint, tag)`. Written by the run, never derived from observed
+purchases, never dropped by a re-run.
 
 ### `wallet_tags` — mutable, operator-editable
 

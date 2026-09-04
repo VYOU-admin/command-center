@@ -23,6 +23,10 @@ const SAMPLE_TOKENS = [{
     mint: '4ChT49V1iazP2XUGtycGkEsS6pRMqvGfUbqvRC9Z91ZT',
     ticker: 'MOS', name: 'Mosaic', decimals: 9,
     chartedPair: 'gjL62zuUAdJm7cZhrWtnBoCGN31kSFyWHScEYfTWiWh',
+    windows: [
+      { tag: 'MOS-P1', start: '2026-09-02T12:00:00.000Z', end: '2026-09-02T14:00:00.000Z', label: 'accumulation' },
+      { tag: 'MOS-P2', start: '2026-09-02T19:05:00.000Z', end: '2026-09-02T19:45:00.000Z', label: 'spike' },
+    ],
     wallets: [{
       wallet: 'HbPEA8hC6QnuxEfcQhfepY3s5akxuKMGa2T97WZVWB4a',
       tags: [{ tag: 'MOS-P1', source: 'auto' }, { tag: 'watch', source: 'manual' }],

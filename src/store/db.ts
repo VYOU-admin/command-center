@@ -178,6 +178,36 @@ create table if not exists wallet_tags (
 create unique index if not exists wallet_tags_wallet_mint_tag_idx
   on wallet_tags (wallet, mint, tag);
 
+/*
+ * The windows as COMMISSIONED, not as observed.
+ *
+ * The first and last purchase inside a window are not the window: a run over
+ * 12:00-14:00 whose earliest buy landed at 12:09 still covered 12:00-14:00, and
+ * deriving the bounds from token_purchases would quietly redefine the period to
+ * whatever happened to trade. Every run records what it was asked to look at.
+ *
+ * window_end is INCLUSIVE, matching how the operator specifies it.
+ *
+ * A re-run of a token and window deletes and reinserts that window's purchase
+ * rows. It must NOT drop the row here -- the window definition outlives any
+ * particular ingestion of it.
+ */
+create table if not exists token_windows (
+  id            bigserial primary key,
+  mint          text        not null references tokens(mint),
+  tag           text        not null,
+  window_start  timestamptz not null,
+  window_end    timestamptz not null,
+  label         text,
+  created_at    timestamptz not null default now()
+);
+
+create unique index if not exists token_windows_mint_tag_idx
+  on token_windows (mint, tag);
+
+create index if not exists token_windows_mint_start_idx
+  on token_windows (mint, window_start);
+
 create index if not exists wallet_tags_mint_idx
   on wallet_tags (mint);
 `;
