@@ -57,7 +57,7 @@ export async function renderOilPanel(ctx: PanelContext): Promise<string> {
   const compareGallons =
     typeof ctx.options['compare_gallons'] === 'number' ? (ctx.options['compare_gallons'] as number) : 150;
 
-  const [current, history, sources] = await Promise.all([
+  const [current, sources] = await Promise.all([
     // Cheapest quote per source/zip/payment type that actually covers the
     // comparison quantity, from the most recent scrape of each.
     ctx.db.query(
@@ -85,25 +85,6 @@ export async function renderOilPanel(ctx: PanelContext): Promise<string> {
          left join dealer_counts d on d.source = l.source and d.zk = coalesce(l.zip,'')
         order by l.product, l.price_per_gallon asc, coalesce(l.company, l.source)`,
       [ctx.monitorId, compareGallons],
-    ),
-    // History: cheapest covering quote per source per day, plus any vendor
-    // published history, unioned so a backfilled table shows up here too.
-    ctx.db.query(
-      `select price_date::date as d, source, min(price_per_gallon) p
-         from oil_price_history
-        where monitor_id = $1 and price_date > now() - ($2 || ' days')::interval
-        group by 1,2
-       union all
-       select date_trunc('day', observed_at)::date as d, coalesce(company, source) as source,
-              min(price_per_gallon) p
-         from oil_observations
-        where monitor_id = $1 and observed_at > now() - ($2 || ' days')::interval
-          and product = 'fuel_oil'
-          and (gallon_min is null
-               or (gallon_min <= $3 and (gallon_max is null or gallon_max >= $3)))
-        group by 1,2
-        order by d desc, source`,
-      [ctx.monitorId, 30, compareGallons],
     ),
     ctx.db.query(
       `select source, consecutive_failures, last_ok_at, last_error, backfilled_at
@@ -171,54 +152,10 @@ export async function renderOilPanel(ctx: PanelContext): Promise<string> {
     })
     .join('');
 
-  // History pivot: one row per day, one column per source.
-  const hist = history.rows as { d: Date; source: string; p: string | number }[];
-  const bySource = [...new Set(hist.map((h) => h.source))].sort();
-  const byDay = new Map<string, Map<string, number>>();
-  for (const h of hist) {
-    const k = day(h.d);
-    const m = byDay.get(k) ?? new Map<string, number>();
-    const price = n(h.p);
-    const existing = m.get(h.source);
-    if (price !== null && (existing === undefined || price < existing)) m.set(h.source, price);
-    byDay.set(k, m);
-  }
-  const days = [...byDay.keys()].sort().reverse().slice(0, 30);
-
-  const historyTable = days.length
-    ? `<div class="table-wrap"><table class="tokens" style="min-width:420px">` +
-      `<thead><tr><th>Date</th>${bySource.map((s) => `<th>${escapeHtml(s)}</th>`).join('')}</tr></thead><tbody>` +
-      days
-        .map((d) => {
-          const m = byDay.get(d)!;
-          return (
-            `<tr><td>${escapeHtml(d)}</td>` +
-            bySource
-              .map((s) => {
-                const v = m.get(s);
-                return `<td>${v === undefined ? '—' : usd(v)}</td>`;
-              })
-              .join('') +
-            `</tr>`
-          );
-        })
-        .join('') +
-      `</tbody></table></div>`
-    : '';
-
-  const backfilled = (sources.rows as { source: string; backfilled_at: Date | null }[]).filter(
-    (s) => s.backfilled_at,
-  );
-
-  return (
-    header +
-    brokenBanner +
-    `<div class="cards stats">${cards}</div>` +
-    `<p class="panel-meta" style="margin-top:18px">Cheapest covering quote per source per day, last 30 days` +
-    (backfilled.length
-      ? ` · includes vendor-published history backfilled from ${backfilled.map((b) => escapeHtml(b.source)).join(', ')}`
-      : '') +
-    `</p>` +
-    historyTable
-  );
+  // CARDS ONLY. The 30-day price-per-source pivot table used to sit here and
+  // was the bulk of the page: 30 rows by one column per vendor, below every
+  // monitor's status. The current price per vendor is the thing worth seeing on
+  // a status dashboard; the history lives in oil_price_history and
+  // oil_observations, which are still written and still queryable.
+  return header + brokenBanner + `<div class="cards stats">${cards}</div>`;
 }
