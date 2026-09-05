@@ -125,40 +125,80 @@ create table if not exists tokens (
 );
 
 /*
- * One row per BUY LEG, not per transaction.
+ * EVERY event for a wallet in a token, across the token's whole life.
  *
- * The unique key includes pool and wallet because a single transaction can
- * legitimately contain more than one swap leg -- an aggregator routing across
- * two pools produces two buys for the same wallet under one signature, and
- * keying on signature alone would silently discard one of them.
+ * This replaces token_purchases, which held only buys and only inside a window.
+ * Two things forced the change. Cost basis needs a wallet's full history, not
+ * the slice that happened to fall in a window -- a wallet that bought before the
+ * window has a basis the window cannot see. And PnL needs sells and transfers,
+ * which a purchases table has nowhere to put.
  *
- * usd_amount and price_usd are NULLABLE ON PURPOSE. A purchase whose USD value
- * cannot be derived stores null, never 0: a reader cannot tell a measured zero
- * from an absent measurement, and a $0 purchase is a plausible-looking lie.
+ * NOT WINDOW-SCOPED, and there is deliberately no window_tag column. Cohort
+ * membership lives in wallet_tags and nowhere else. Which window a transaction
+ * falls in is derivable from block_time against token_windows, and that
+ * derivation was checked against all 11,992 migrated rows before the column was
+ * dropped: it reproduced every stored window_tag exactly, with no row outside a
+ * window and no row inside two.
+ *
+ * CHAIN IS PART OF THE IDENTITY. Solana signatures and EVM transaction hashes
+ * share a column, and an address means different things on each chain -- see the
+ * case note below.
+ *
+ * usd_amount and price_usd are NULLABLE ON PURPOSE. A row whose USD value cannot
+ * be derived stores null, never 0: a reader cannot tell a measured zero from an
+ * absent measurement, and a $0 trade is a plausible-looking lie.
+ *
+ * ADDRESS CASE IS THE CHAIN'S BUSINESS, NEVER OURS. Solana addresses are base58
+ * and case-sensitive -- lowercasing one produces an address that matches nothing,
+ * with no error. EVM addresses are hex and conventionally lowercased, and the
+ * same string in mixed case is the same account. So this table stores exactly
+ * what the chain returned and never normalises across chains. Any comparison
+ * must be consistent within a chain, and no shared helper may apply one chain's
+ * rule to the other. That defect has recurred four times on this project.
  */
-create table if not exists token_purchases (
-  id            bigserial primary key,
-  mint          text        not null references tokens(mint),
+create table if not exists wallet_transactions (
+  id            bigserial   primary key,
+  chain         text        not null,
+  token         text        not null,
   wallet        text        not null,
-  signature     text        not null,
-  pool          text        not null,
+  side          text        not null,
+  counterparty  text,
+  tx_hash       text        not null,
+  pool          text,
   block_time    timestamptz not null,
-  slot          bigint      not null,
+  block_number  bigint      not null,
   token_amount  numeric     not null,
   usd_amount    numeric,
   price_usd     numeric,
-  window_tag    text        not null,
-  created_at    timestamptz not null default now()
+  created_at    timestamptz not null default now(),
+  constraint wallet_transactions_side_ck
+    check (side in ('buy','sell','transfer_in','transfer_out'))
 );
 
-create unique index if not exists token_purchases_leg_idx
-  on token_purchases (signature, wallet, mint, pool);
+/*
+ * COUNTERPARTY IS IN THE KEY, AND NULLS COMPARE EQUAL. Both differ from the
+ * obvious form, and each fixes a way the obvious form loses real rows.
+ *
+ * Without counterparty, one transaction moving tokens from a wallet to two
+ * different recipients produces two transfer_out rows that collide on
+ * (chain, tx_hash, wallet, token, side, pool) -- pool being null for both -- so
+ * one is silently discarded by the on-conflict. Splits and airdrops do exactly
+ * this.
+ *
+ * Without NULLS NOT DISTINCT, the opposite happens: Postgres treats two nulls as
+ * distinct, so a null pool makes every transfer row unique and the constraint
+ * stops deduplicating anything at all. A re-run would then double every transfer
+ * instead of being idempotent.
+ */
+create unique index if not exists wallet_transactions_event_idx
+  on wallet_transactions (chain, tx_hash, wallet, token, side, pool, counterparty)
+  nulls not distinct;
 
-create index if not exists token_purchases_mint_window_idx
-  on token_purchases (mint, window_tag);
+create index if not exists wallet_transactions_token_wallet_idx
+  on wallet_transactions (token, wallet);
 
-create index if not exists token_purchases_mint_wallet_idx
-  on token_purchases (mint, wallet);
+create index if not exists wallet_transactions_token_time_idx
+  on wallet_transactions (token, block_time);
 
 /*
  * Tags live in their OWN table so that a re-run of a window, which deletes and

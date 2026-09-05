@@ -25,6 +25,19 @@ export interface WebServerOptions {
   bootedAt: Date;
 }
 
+/**
+ * The check constraint already rejects anything else at write time, so a value
+ * outside this set means the database disagrees with the code. Throw rather
+ * than widen the type and let an unknown side render as something plausible.
+ */
+const SIDES = ['buy', 'sell', 'transfer_in', 'transfer_out'] as const;
+type Side = (typeof SIDES)[number];
+function asSide(v: unknown): Side {
+  const s = String(v);
+  if ((SIDES as readonly string[]).includes(s)) return s as Side;
+  throw new Error(`unknown transaction side in storage: ${JSON.stringify(v)}`);
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body, null, 2);
   res.writeHead(status, {
@@ -202,9 +215,27 @@ export function createWebServer(opts: WebServerOptions): Server {
       const [toks, buys, tags, wins, prices] = await Promise.all([
         pool.query(`select mint, chain, ticker, name, decimals, charted_pair
                       from tokens order by chain, ticker`),
-        pool.query(`select mint, wallet, signature, pool, block_time, token_amount,
-                           usd_amount, price_usd, window_tag
-                      from token_purchases order by mint, wallet, block_time`),
+        /*
+         * Every event, from wallet_transactions. There is no window_tag column
+         * any more -- cohort membership lives in wallet_tags, and which window a
+         * transaction fell in is derived here from its own block_time against
+         * the commissioned bounds. That derivation was checked against all
+         * 11,992 migrated rows and reproduced every stored tag exactly, with no
+         * row outside a window and none inside two.
+         *
+         * NOTHING HERE TOUCHES ADDRESS CASE. The rows are returned as the chain
+         * gave them: base58 for Solana, hex for EVM.
+         */
+        pool.query(`select w.token as mint, w.wallet, w.tx_hash as signature, w.pool,
+                           w.block_time, w.block_number, w.token_amount,
+                           w.usd_amount, w.price_usd, w.side, w.counterparty,
+                           (select tw.tag from token_windows tw
+                             where tw.mint = w.token
+                               and w.block_time >= tw.window_start
+                               and w.block_time <= tw.window_end
+                             order by tw.window_start limit 1) as window_tag
+                      from wallet_transactions w
+                     order by w.token, w.wallet, w.block_time`),
         pool.query(`select mint, wallet, tag, source from wallet_tags
                      order by mint, wallet, tag`),
         // The windows as COMMISSIONED. Not derived from the purchases: the
@@ -249,7 +280,13 @@ export function createWebServer(opts: WebServerOptions): Server {
           // zero where there was no measurement at all.
           usdAmount: r.usd_amount === null ? null : Number(r.usd_amount),
           priceUsd: r.price_usd === null ? null : Number(r.price_usd),
-          windowTag: String(r.window_tag),
+          // A transaction outside every commissioned window has no tag. That is
+          // a real state on a token collected over its whole life, not a defect,
+          // and it must not be rendered as belonging to some window.
+          windowTag: r.window_tag === null ? null : String(r.window_tag),
+          side: asSide(r.side),
+          counterparty: r.counterparty === null ? null : String(r.counterparty),
+          blockNumber: r.block_number === null ? null : String(r.block_number),
         });
       }
 

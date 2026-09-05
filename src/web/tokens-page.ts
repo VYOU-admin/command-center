@@ -23,12 +23,18 @@ import { escapeHtml } from './views.js';
 
 export interface PurchaseRow {
   signature: string;
-  pool: string;
+  /** Null on transfers: a transfer has no pool. */
+  pool: string | null;
   blockTime: string;
+  blockNumber: string | null;
   tokenAmount: number;
   usdAmount: number | null;
   priceUsd: number | null;
-  windowTag: string;
+  /** Null when the transaction falls outside every commissioned window. */
+  windowTag: string | null;
+  side: 'buy' | 'sell' | 'transfer_in' | 'transfer_out';
+  /** The other address on a transfer; null on trades. */
+  counterparty: string | null;
 }
 
 export interface WalletRow {
@@ -305,6 +311,10 @@ function renderHeader(){
   for (const w of t.wallets){
     const seen = {};
     for (const p of w.purchases){
+      // A transaction outside every commissioned window has no tag. On a token
+      // collected over its whole life that is normal and must not become a
+      // "null" bucket in the legend.
+      if (p.windowTag === null || p.windowTag === undefined) continue;
       if (!perTag[p.windowTag]) perTag[p.windowTag] = {buys: 0, wallets: 0};
       perTag[p.windowTag].buys++;
       if (!seen[p.windowTag]){ seen[p.windowTag] = 1; perTag[p.windowTag].wallets++; }
@@ -569,7 +579,8 @@ function renderTable(){
         sumTok += p.tokenAmount;
         if (p.usdAmount === null || p.usdAmount === undefined) nUnp++; else sumUsd += p.usdAmount;
         inner += '<tr><td class="num">' + fmtTime(p.blockTime) + '</td>'
-          + '<td><span class="chip">' + p.windowTag + '</span></td>'
+          + '<td>' + (p.windowTag ? '<span class="chip">' + p.windowTag + '</span>'
+              : '<span class="lab">outside windows</span>') + '</td>'
           + '<td class="num">' + fmtNum(p.tokenAmount, 6) + '</td>'
           + '<td class="num">' + (p.usdAmount === null || p.usdAmount === undefined
               ? '<span class="unk">unknown</span>' : fmtUsd(p.usdAmount)) + '</td>'
