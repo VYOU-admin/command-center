@@ -19,7 +19,27 @@ import {
   score,
   type Trade,
 } from '../scoring/metrics.js';
-import { SCORES_SCHEMA } from '../scoring/schema.js';
+import { FLAG_INFLATED_PNL, FLAG_LOW_WEIGHT, SCORES_SCHEMA } from '../scoring/schema.js';
+
+/**
+ * A wallet scored on less than this fraction of the total weight is not
+ * comparable to one scored on all of it. 0.8 chosen against the PONS
+ * distribution, which is bimodal: 12,296 wallets at 1.000, then 67 at 0.875,
+ * 18 at 0.825 and 1 at 0.175. Thresholds of 0.5 and 0.8 make the same cut
+ * there; 0.9 would additionally flag 85 wallets missing only earliness, which
+ * is a question about cohort construction rather than data quality.
+ */
+const LOW_WEIGHT_THRESHOLD = 0.8;
+
+/**
+ * How negative a position has to be to count as acquisition we cannot see.
+ *
+ * NOT simply `< 0`. 589 PONS wallets are negative by less than a millionth of
+ * a token -- the smallest by 3e-18, one wei -- which is rounding residue from
+ * proportional allocation, not an off-market purchase. This is the same
+ * materiality floor the row writer already applies to a token amount.
+ */
+const INFLATED_POSITION_FLOOR = -0.001;
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -141,6 +161,34 @@ async function main(): Promise<void> {
     price_observed_at: priceRow.rows[0]?.observed ?? null,
   });
 
+  /*
+   * ---- score-quality flags ---------------------------------------------
+   *
+   * THE POSITION IS COMPUTED IN SQL, IN NUMERIC. Summing it as JavaScript
+   * doubles gave 2,098 negative wallets where numeric gives 2,682 -- a
+   * 584-wallet difference produced entirely by float error on quantities with
+   * 18 decimals. A materiality floor evaluated in double precision is not a
+   * materiality floor.
+   *
+   * The sides include transfers, so once transfer rows are collected the
+   * position stops being negative for wallets that acquired off-market and the
+   * flag simply is not re-applied on the next run.
+   */
+  const negativeRows = await app.pool.query<{ wallet: string; position: string }>(
+    `select wallet,
+            (coalesce(sum(token_amount) filter (where side in ('buy','transfer_in')), 0)
+           - coalesce(sum(token_amount) filter (where side in ('sell','transfer_out')), 0))::text
+              as position
+       from wallet_transactions
+      where chain = $1 and token = $2
+      group by wallet
+     having coalesce(sum(token_amount) filter (where side in ('buy','transfer_in')), 0)
+          - coalesce(sum(token_amount) filter (where side in ('sell','transfer_out')), 0)
+            < $3::numeric`,
+    [chain, token, String(INFLATED_POSITION_FLOOR)],
+  );
+  const inflated = new Set(negativeRows.rows.map((r) => r.wallet.toLowerCase()));
+
   /* ---- compute --------------------------------------------------------- */
   const facts = computeFacts({
     trades,
@@ -235,6 +283,32 @@ async function main(): Promise<void> {
       "those wallets' PnL.",
   });
 
+  /* Flags are rebuilt from scratch every run; nothing is accumulated. */
+  const flagsFor = (w: { wallet: string; score: number | null; weightUsed: number }): string[] => {
+    const f: string[] = [];
+    // Only a SCORED wallet can be low-weight: an unscored one already reads as
+    // unscored, and flagging it adds nothing.
+    if (w.score !== null && w.weightUsed < LOW_WEIGHT_THRESHOLD) f.push(FLAG_LOW_WEIGHT);
+    // Applied regardless of scored status: it is a fact about the wallet.
+    if (inflated.has(w.wallet)) f.push(FLAG_INFLATED_PNL);
+    return f;
+  };
+  const flagged = result.wallets.map((w) => ({ w, f: flagsFor(w) }));
+  const withLow = flagged.filter((x) => x.f.includes(FLAG_LOW_WEIGHT));
+  const withInf = flagged.filter((x) => x.f.includes(FLAG_INFLATED_PNL));
+  log.info('score-quality flags', {
+    low_weight_threshold: LOW_WEIGHT_THRESHOLD,
+    inflated_position_floor: INFLATED_POSITION_FLOOR,
+    wallets_negative_in_sql_numeric: inflated.size,
+    'low-weight': withLow.length,
+    'inflated-pnl': withInf.length,
+    both: flagged.filter((x) => x.f.length === 2).length,
+    neither: flagged.filter((x) => x.f.length === 0).length,
+    'inflated-pnl_scored': withInf.filter((x) => x.w.score !== null).length,
+    'inflated-pnl_unscored': withInf.filter((x) => x.w.score === null).length,
+    total: flagged.length,
+  });
+
   const ranked = scored.sort((a, b) => b.score! - a.score!).slice(0, top);
   for (const [i, w] of ranked.entries()) {
     const f = facts.get(w.wallet)!;
@@ -262,19 +336,24 @@ async function main(): Promise<void> {
 
   const stored = await withTransaction(app.pool, async (c) => {
     let n = 0;
-    for (const w of result.wallets) {
+    for (const { w, f } of flagged) {
       const res = await c.query(
         `insert into wallet_scores
-           (chain, token, tag, wallet, score, weight_used, metrics, computed_at)
-         values ($1,$2,$3,$4,$5,$6,$7::jsonb, now())
+           (chain, token, tag, wallet, score, weight_used, metrics, flags, computed_at)
+         values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::text[], now())
          on conflict (chain, token, tag, wallet) do update
            set score = excluded.score,
                weight_used = excluded.weight_used,
                metrics = excluded.metrics,
+               -- REPLACED, never appended. A flag whose condition no longer
+               -- holds has to disappear, or inflated-pnl would outlive the
+               -- transfer collection that resolves it.
+               flags = excluded.flags,
                computed_at = now()`,
         [
           chain, token, tag, w.wallet, w.score, w.weightUsed,
           JSON.stringify({ raw: w.raw, normalised: w.normalised, weights: WEIGHTS }),
+          f,
         ],
       );
       n += res.rowCount ?? 0;

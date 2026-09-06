@@ -47,4 +47,23 @@ create table if not exists wallet_scores (
 
 create index if not exists wallet_scores_rank_idx
   on wallet_scores (chain, token, tag, score desc nulls last);
+
+/*
+ * SCORE-QUALITY FLAGS. Deliberately here and NOT in wallet_tags: those are
+ * cohort membership, these are statements about how much the score can be
+ * trusted, and mixing them would force every tag query to know which kind it
+ * was reading.
+ *
+ * An array because a wallet can carry several. DERIVED ON EVERY SCORING RUN,
+ * never accumulated: the writer replaces the whole array, so a flag whose
+ * condition no longer holds disappears by itself. That is what makes the
+ * inflated-pnl flag self-clearing once transfer rows are collected.
+ */
+alter table wallet_scores add column if not exists flags text[] not null default '{}';
+create index if not exists wallet_scores_flags_idx on wallet_scores using gin (flags);
 `;
+
+/** A wallet's score rests on too little of the weight to be comparable. */
+export const FLAG_LOW_WEIGHT = 'low-weight';
+/** The wallet sold more than it bought, so its PnL counts sales it never paid for. */
+export const FLAG_INFLATED_PNL = 'inflated-pnl';
