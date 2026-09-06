@@ -11,6 +11,16 @@ this project has actually shipped, each one kept because it recurred after being
 fixed once. Read it before trusting a clean run, and before writing any code
 that reads a value, deletes a row, or reports success.
 
+## Definitions and findings
+
+`docs/DEFINITIONS.md` states what each term means — buyer, seller, pool, router,
+wallet versus contract, cohort member, in scope, transfer versus trade, and what
+a null means per field. Each entry carries its evidence, the transactions that
+demonstrate it, and what would falsify it. Two entries are marked wrong today.
+
+`docs/TOKEN-FINDINGS.md` is one section per token: what that token actually
+taught us. Every token appends to it before being called done.
+
 ## Token intake
 
 Two standing procedures, one per chain. Read the one for the chain you are
@@ -61,6 +71,29 @@ data source.
 **Helius, Solana**: batch ceiling between 28 and 32 sub-calls; no usage API, so
 credit figures must come from the dashboard rather than from arithmetic against
 constants in this repository.
+
+## Proving a definition before changing one
+
+**No definition changes on a claim.** Any proposed change to what a term means —
+buyer, seller, pool, router, wallet, cohort member — must first be proven on
+**individual decoded transactions, with hashes the user can open**, including
+counter-examples. An aggregate query is a hypothesis, not evidence.
+
+This is not a general preference; it is the response to two specific incidents.
+Twice an aggregate pointed at a large, expensive conclusion, and both times
+decoding twenty transactions settled it in minutes and settled it the other way:
+
+- A count of "34,744 missing buyers" came from a query that filtered pool
+  addresses out of the *sender* side of a flow and not the *recipient* side. The
+  first five transactions decoded had the PoolManager itself as the supposed
+  buyer.
+- The same count relied on "was in a transaction containing a swap" standing in
+  for "bought". Once the recipient side was corrected, only 2 of 40 sampled
+  recipients had given up any value at all.
+
+`docs/DEFINITIONS.md` holds the current definitions, each with its evidence, the
+transactions that demonstrate it, and what would falsify it. Read it before
+changing behaviour that depends on one, and update it in the same change.
 
 ## Secrets
 

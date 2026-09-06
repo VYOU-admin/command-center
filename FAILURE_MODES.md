@@ -419,3 +419,45 @@ them up.
 "Negative position" without one counts float residue as evidence of off-market
 acquisition. State the floor, say what it excludes, and reuse the floor the
 pipeline already applies elsewhere rather than inventing a second one.
+
+## 25. A query that filters one side of a relationship but not the other
+
+An analysis asked which wallets received a token from something other than a
+pool. It excluded pool addresses from the **sender** side of the join and forgot
+the **recipient** side. In a routed *sell* the router sends the token *to* the
+pool, so 22,904 of one router's 150,027 sends had the PoolManager as their
+recipient — and every one of them counted as "a wallet receiving tokens from a
+non-pool address".
+
+The result was a claim that a cohort was missing 34,744 buyers. The first five
+transactions decoded had `0x8366a39c…`, the v4 PoolManager, as the supposed
+buyer. Nothing in the aggregate looked wrong: the number was large, plausible,
+and pointed at a conclusion that was already half expected.
+
+**Any address list — pools, routers, the zero address, the token itself — must
+be applied to every side of a flow query.** A filter on one side reads as
+complete and is not. Write the exclusion once and join it to both ends, rather
+than repeating a `not in` clause and trusting yourself to repeat it everywhere.
+
+A second, quieter form of the same error: sampling. The sample was drawn with
+`order by block_number` and even spacing, which took every record from one
+behavioural cluster at the front of the range. Spread a sample across the whole
+population and classify what each record *is* before counting it.
+
+## 26. "Was present in a transaction containing X" is not "did X"
+
+The same analysis used "the wallet was in a transaction that contained a swap"
+as a proxy for "the wallet bought". A transaction contains many transfers, most
+of them intermediate hops between contracts, and presence in one says nothing
+about who gave up value.
+
+Tested against the thing it stood for, the proxy failed almost completely: of 40
+recipients sampled across the whole population, **2 had given up any value in
+that transaction and 38 had not**. The 38 were funded by a shared address that
+paid on their behalf, so the proxy was not merely loose — it was measuring a
+different event.
+
+**State the mechanism a number depends on, then test that mechanism on records
+that can be inspected one at a time.** Presence, co-occurrence, and "appears
+alongside" are all proxies. Name what the proxy is standing in for, and check a
+sample of individual cases before the count is allowed to justify anything.
