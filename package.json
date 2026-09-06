@@ -15,6 +15,7 @@
     "run-once": "npm run build && node dist/cli/run-once.js",
     "catch-up": "npm run build && node dist/cli/catch-up.js",
     "intake": "npm run build && node dist/cli/intake.js",
+    "score": "npm run build && node dist/cli/score.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },

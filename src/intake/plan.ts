@@ -281,21 +281,6 @@ create table if not exists token_intake_state (
   updated_at timestamptz not null default now(),
   primary key (chain, token, phase)
 );
-
-create table if not exists token_events (
-  id         bigserial primary key,
-  chain      text        not null,
-  token      text        not null,
-  kind       text        not null,
-  event_at   timestamptz not null,
-  block_number bigint,
-  label      text,
-  note       text,
-  created_at timestamptz not null default now()
-);
-
-create unique index if not exists token_events_unique_idx
-  on token_events (chain, token, kind, event_at);
 `;
 
 export interface PhaseRecord {
