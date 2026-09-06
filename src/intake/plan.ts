@@ -30,6 +30,7 @@ export const PHASES = [
   'sweep',
   'conventions',
   'cohort',
+  'tags',
   'timestamps',
   'prices',
   'dryrun',
@@ -76,7 +77,20 @@ export interface IntakeConfig {
   rpcKeyVar: string;
   requestTimeoutMs: number;
   minLogSpanBlocks: number;
+  /**
+   * Starting span for a DENSE filter -- swaps and transfers. Measured on this
+   * account: 100,000 blocks succeeds, 250,000 is refused with "Log response
+   * size exceeded". The limit is response SIZE, so it belongs to the filter and
+   * not to the endpoint.
+   */
   maxLogSpanBlocks: number;
+  /**
+   * Starting span for a SPARSE filter -- pool creation events filtered to one
+   * token. Measured on AI: Initialize filtered to the token returned 4,615 logs
+   * across 40,000,000 blocks in ONE call. Carrying the dense constant here cost
+   * ~1,864 calls where 8 sufficed, a 230x overshoot.
+   */
+  sparseLogSpanBlocks: number;
   /** Target logs per request; the sweeper sizes spans to hit this. */
   targetLogsPerRequest: number;
 
@@ -85,6 +99,13 @@ export interface IntakeConfig {
   pricingAssets: string[];
   usdAsset: string;
   nativeAssets: string[];
+  /** Second-hop assets: priced from their OWN pools against a pricing asset. */
+  bridgeAssets: string[];
+
+  /** Minimum distinct recipients before an address is even probed. */
+  routerMinRecipients: number;
+  /** Share of an address's sends that must sit inside a swap transaction. */
+  routerMinSwapShare: number;
 
   bucketBlocks: number;
   bucketOrigin: number;
@@ -113,6 +134,7 @@ const DEFAULT_CEILINGS: Record<Phase, number> = {
   sweep: 4_000_000,
   conventions: 50_000,
   cohort: 600_000,
+  tags: 0,
   timestamps: 2_000_000,
   prices: 0,
   dryrun: 0,
@@ -231,6 +253,7 @@ export async function loadIntakeConfig(path: string): Promise<IntakeConfig> {
     requestTimeoutMs: num(rpc, 'request_timeout_ms', 120_000),
     minLogSpanBlocks: num(rpc, 'min_log_span_blocks', 25),
     maxLogSpanBlocks: num(rpc, 'max_log_span_blocks', 100_000),
+    sparseLogSpanBlocks: num(rpc, 'sparse_log_span_blocks', 40_000_000),
     targetLogsPerRequest: num(rpc, 'target_logs_per_request', 6_000),
 
     v3Factory: String(req(venues['v3_factory'], 'venues.v3_factory')),
@@ -239,6 +262,15 @@ export async function loadIntakeConfig(path: string): Promise<IntakeConfig> {
     pricingAssets: strList(pricing, 'assets'),
     usdAsset: String(req(pricing['usd_asset'], 'pricing.usd_asset')),
     nativeAssets: strList(pricing, 'native_assets'),
+    bridgeAssets: (() => {
+      const v = pricing['bridge_assets'];
+      if (v === undefined || v === null) return [];
+      if (!Array.isArray(v)) throw new Error('pricing.bridge_assets must be a list');
+      return v.map((x) => String(x).trim());
+    })(),
+    routerMinRecipients: num(obj(raw, 'routers'), 'min_recipients', 50),
+    routerMinSwapShare: num(obj(raw, 'routers'), 'min_swap_share', 0.5),
+
     bucketBlocks: num(pricing, 'bucket_blocks', 10_000),
     bucketOrigin: num(pricing, 'bucket_origin', 0),
     tickFenceMultiple: num(pricing, 'tick_fence_multiple', 100),

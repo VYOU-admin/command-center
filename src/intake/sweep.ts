@@ -69,6 +69,12 @@ export async function adaptiveSweep(
   from: number,
   to: number,
   onBatch: (logs: LogEntry[], rangeFrom: number, rangeTo: number) => Promise<void>,
+  /*
+   * The STARTING span, chosen by the caller from the filter's density. A sparse
+   * filter takes 40,000,000 blocks and a dense one does not; one constant for
+   * both is how pool enumeration ended up making 230x the calls it needed.
+   */
+  startSpan: number = cfg.maxLogSpanBlocks,
 ): Promise<SweepStats> {
   const stats: SweepStats = {
     requests: 0,
@@ -81,8 +87,9 @@ export async function adaptiveSweep(
   };
 
   let cursor = from;
-  let span = Math.min(cfg.maxLogSpanBlocks, to - from + 1);
-  let cap = cfg.maxLogSpanBlocks;
+  const ceiling = Math.max(startSpan, cfg.maxLogSpanBlocks);
+  let span = Math.min(startSpan, to - from + 1);
+  let cap = startSpan;
 
   while (cursor <= to) {
     const end = Math.min(cursor + span - 1, to);
@@ -137,8 +144,8 @@ export async function adaptiveSweep(
      */
     const density = logs.length / (end - cursor + 2);
     const wanted =
-      density > 0 ? Math.floor(cfg.targetLogsPerRequest / density) : cfg.maxLogSpanBlocks;
-    cap = Math.min(cfg.maxLogSpanBlocks, Math.max(cap, Math.floor(cap * 1.25) + 1));
+      density > 0 ? Math.floor(cfg.targetLogsPerRequest / density) : ceiling;
+    cap = Math.min(ceiling, Math.max(cap, Math.floor(cap * 1.25) + 1));
     span = Math.max(cfg.minLogSpanBlocks, Math.min(wanted, cap));
   }
 

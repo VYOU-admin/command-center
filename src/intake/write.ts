@@ -13,8 +13,12 @@ import type { IntakeConfig } from './plan.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
 import type { PoolRow } from '../adapters/token-updates/pools.js';
 import type { SwapLog, TransferLog } from '../adapters/token-updates/decode.js';
-import { buildRows, type RowStats, type WalletRow } from '../adapters/token-updates/rows.js';
 import {
+  buildRows, buildTransferRows, tradeLegs,
+  type RowStats, type WalletRow,
+} from '../adapters/token-updates/rows.js';
+import {
+  counterUsdResolver,
   derivePrices,
   loadNativeReference,
   persistPrices,
@@ -35,27 +39,39 @@ export interface TimestampPlan {
 }
 
 /**
- * Which blocks need a timestamp, derived from the swaps that will produce rows
- * for cohort wallets -- not from every swap block.
+ * THE ONE DERIVATION of which blocks need a timestamp.
+ *
+ * Both the plan and the fetch call this. They used to be two separate queries
+ * that were supposed to agree and did not: the plan scoped its count to
+ * transactions involving cohort wallets and the fetch selected every block in
+ * `token_swap_logs`, so the plan printed a small number and the fetch would
+ * have done a much larger job. That is FAILURE_MODES 17 and 18 -- a work set
+ * derived from the wrong population -- reappearing inside the code written to
+ * prevent them. On PONS the same distinction was 144,073 blocks against
+ * 1,379,236, and roughly 7,000,000 compute units.
+ *
+ * There is now one SQL text. A future edit cannot move one copy and leave the
+ * other behind, because there is no other copy.
  */
+const NEEDED_BLOCKS_SQL = `
+  select distinct s.block_number
+    from token_swap_logs s
+    join pool_meta m
+      on m.chain = $1 and m.token = $2 and m.venue = s.venue and m.pool = s.pool
+   where s.chain = $1 and s.token = $2
+     and exists (
+       select 1 from token_transfer_logs t
+        where t.chain = s.chain and t.token = s.token and t.tx_hash = s.tx_hash
+          and (t.to_addr in (select wallet from wallet_tags where mint = $2)
+            or t.from_addr in (select wallet from wallet_tags where mint = $2))
+     )`;
+
 export async function planTimestamps(
   client: PoolClient,
   cfg: IntakeConfig,
 ): Promise<TimestampPlan> {
   const res = await client.query<{ needed: number; stored: number }>(
-    `with needed as (
-       select distinct s.block_number
-         from token_swap_logs s
-         join pool_meta m
-           on m.chain = $1 and m.token = $2 and m.venue = s.venue and m.pool = s.pool
-        where s.chain = $1 and s.token = $2
-          and exists (
-            select 1 from token_transfer_logs t
-             where t.chain = s.chain and t.token = s.token and t.tx_hash = s.tx_hash
-               and (t.to_addr in (select wallet from wallet_tags where mint = $2)
-                 or t.from_addr in (select wallet from wallet_tags where mint = $2))
-          )
-     )
+    `with needed as (${NEEDED_BLOCKS_SQL})
      select count(*)::int as needed,
             count(b.block_number)::int as stored
        from needed n
@@ -77,7 +93,8 @@ export async function planTimestamps(
 
 /**
  * Fetch the missing timestamps, stopping at the phase ceiling and saying where
- * it stopped rather than running to completion regardless.
+ * it stopped. Uses NEEDED_BLOCKS_SQL, the same derivation planTimestamps
+ * counted, and asserts the two agree before spending anything.
  */
 export async function fetchTimestamps(
   client: PoolClient,
@@ -86,22 +103,29 @@ export async function fetchTimestamps(
   ceilingCu: number,
   onProgress?: (done: number, total: number) => void,
 ): Promise<{ fetched: number; remaining: number; stoppedAtCeiling: boolean }> {
+  const plan = await planTimestamps(client, cfg);
   const missing = await client.query<{ block_number: number }>(
-    `with needed as (
-       select distinct s.block_number
-         from token_swap_logs s
-         join pool_meta m
-           on m.chain = $1 and m.token = $2 and m.venue = s.venue and m.pool = s.pool
-        where s.chain = $1 and s.token = $2
-     )
+    `with needed as (${NEEDED_BLOCKS_SQL})
      select n.block_number from needed n
        left join block_times b on b.chain = $1 and b.block_number = n.block_number
       where b.block_number is null
       order by n.block_number`,
     [cfg.chain, cfg.token],
   );
-
   const blocks = missing.rows.map((r) => Number(r.block_number));
+
+  /*
+   * The plan is what was reported and possibly approved; the fetch is what is
+   * about to be paid for. If they disagree, the job stops rather than spending
+   * against a number nobody saw.
+   */
+  if (blocks.length !== plan.toFetch) {
+    throw new Error(
+      `the timestamp plan and the fetch disagree: plan said ${plan.toFetch} blocks, ` +
+        `the fetch found ${blocks.length}. Refusing to spend against an unreported figure.`,
+    );
+  }
+
   const startCu = rpc.cuSpent;
   let fetched = 0;
   for (const block of blocks) {
@@ -126,6 +150,62 @@ export async function fetchTimestamps(
 export interface Slice {
   swaps: { swap: SwapLog; pool: PoolRow }[];
   transfers: TransferLog[];
+}
+
+/**
+ * Swaps and transfers for a range, WITHOUT timestamps.
+ *
+ * The cohort phase runs before the timestamp phase, so it cannot require
+ * block_times. It only needs to know who traded, and a trade leg does not
+ * depend on the clock. Rows do, and `loadSlice` below refuses to build one
+ * without a timestamp.
+ */
+export async function loadLegsInput(
+  client: PoolClient,
+  cfg: IntakeConfig,
+  pools: Map<string, PoolRow>,
+  fromBlock: number,
+  toBlock: number,
+): Promise<Slice> {
+  const swapRows = await client.query<{
+    venue: string; pool: string; block_number: number; log_index: number;
+    tx_hash: string; amount0: string; amount1: string;
+  }>(
+    `select venue, pool, block_number, log_index, tx_hash, amount0::text, amount1::text
+       from token_swap_logs
+      where chain = $1 and token = $2 and block_number between $3 and $4`,
+    [cfg.chain, cfg.token, fromBlock, toBlock],
+  );
+  const swaps: Slice['swaps'] = [];
+  for (const r of swapRows.rows) {
+    const venue = r.venue === 'v4' ? 'v4' : 'v3';
+    const pool = pools.get(`${venue}:${r.pool.toLowerCase()}`);
+    if (!pool) continue;
+    swaps.push({
+      pool,
+      swap: {
+        venue, pool: r.pool.toLowerCase(), txHash: r.tx_hash.toLowerCase(),
+        block: Number(r.block_number), logIndex: Number(r.log_index),
+        timestamp: 0, // deliberately absent; legs do not use it
+        amount0: BigInt(r.amount0), amount1: BigInt(r.amount1),
+      },
+    });
+  }
+  const transferRows = await client.query<{
+    block_number: number; log_index: number; tx_hash: string;
+    from_addr: string; to_addr: string; amount: string;
+  }>(
+    `select block_number, log_index, tx_hash, from_addr, to_addr, amount::text
+       from token_transfer_logs
+      where chain = $1 and token = $2 and block_number between $3 and $4`,
+    [cfg.chain, cfg.token, fromBlock, toBlock],
+  );
+  const transfers: TransferLog[] = transferRows.rows.map((r) => ({
+    from: r.from_addr.toLowerCase(), to: r.to_addr.toLowerCase(),
+    amount: BigInt(r.amount), txHash: r.tx_hash.toLowerCase(),
+    block: Number(r.block_number), logIndex: Number(r.log_index), timestamp: 0,
+  }));
+  return { swaps, transfers };
 }
 
 /**
@@ -233,6 +313,46 @@ export async function derivePricesForLife(
   return { series, buckets };
 }
 
+/** Store a bridge series, and read one back for the pricing resolver. */
+export async function persistBridgeUsd(
+  client: PoolClient,
+  cfg: IntakeConfig,
+  bridge: string,
+  series: Map<number, { price: number; ticks: number }>,
+): Promise<{ inserted: number; alreadyPresent: number }> {
+  let inserted = 0;
+  for (const [bucket, v] of series) {
+    const res = await client.query(
+      `insert into bridge_usd_prices (chain, bridge, bucket_block, usd, ticks)
+       values ($1,$2,$3,$4,$5) on conflict do nothing`,
+      [cfg.chain, bridge.toLowerCase(), bucket, v.price, v.ticks],
+    );
+    inserted += res.rowCount ?? 0;
+  }
+  return { inserted, alreadyPresent: series.size - inserted };
+}
+
+export async function loadBridgeUsd(
+  client: PoolClient,
+  cfg: IntakeConfig,
+): Promise<Map<string, Map<number, { price: number }>>> {
+  const out = new Map<string, Map<number, { price: number }>>();
+  if (cfg.bridgeAssets.length === 0) return out;
+  const res = await client.query<{ bridge: string; bucket_block: number; usd: string }>(
+    `select bridge, bucket_block, usd::text from bridge_usd_prices
+      where chain = $1 and bridge = any($2::text[])`,
+    [cfg.chain, cfg.bridgeAssets.map((a) => a.toLowerCase())],
+  );
+  for (const r of res.rows) {
+    const price = Number(r.usd);
+    if (!Number.isFinite(price) || price <= 0) continue;
+    let m = out.get(r.bridge);
+    if (!m) { m = new Map(); out.set(r.bridge, m); }
+    m.set(Number(r.bucket_block), { price });
+  }
+  return out;
+}
+
 export async function persistAllPrices(
   client: PoolClient,
   cfg: IntakeConfig,
@@ -272,6 +392,10 @@ export interface WritePlan {
   };
   groupsWithoutTransfers: number;
   groupsWithMultiplePools: number;
+  /** Movements that changed a position without being a trade. */
+  transfersWritten: number;
+  transfersSkippedAsTrades: number;
+  transfersBelowFloor: number;
 }
 
 function emptyPlan(): WritePlan {
@@ -290,6 +414,9 @@ function emptyPlan(): WritePlan {
     excluded: { infrastructure: 0, isAPool: 0, roundTrippers: 0, outsideCohort: 0 },
     groupsWithoutTransfers: 0,
     groupsWithMultiplePools: 0,
+    transfersWritten: 0,
+    transfersSkippedAsTrades: 0,
+    transfersBelowFloor: 0,
   };
 }
 
@@ -329,6 +456,7 @@ export async function planOrWrite(
   firstBlock: number,
   lastBlock: number,
   commit: boolean,
+  bridgeUsd: Map<string, Map<number, { price: number }>> = new Map(),
   sliceBlocks = 500_000,
 ): Promise<{ plan: WritePlan; stored: number }> {
   const plan = emptyPlan();
@@ -353,28 +481,40 @@ export async function planOrWrite(
       }
     }
 
+    const resolver = counterUsdResolver(cfg, nativeUsd, bridgeUsd);
+    const { legs } = tradeLegs(
+      slice.swaps, slice.transfers, cfg, resolver, exclusions, knownPools,
+    );
+    const { rows: tRows, skippedBecauseTraded, skippedBelowFloor } = buildTransferRows(
+      slice.transfers, legs, cfg, tokenDecimals, exclusions, knownPools, cohort,
+    );
+    plan.transfersWritten += tRows.length;
+    plan.transfersSkippedAsTrades += skippedBecauseTraded;
+    plan.transfersBelowFloor += skippedBelowFloor;
+
     const { rows, stats } = buildRows(
       slice.swaps,
       slice.transfers,
       cfg,
       tokenDecimals,
-      nativeUsd,
+      counterUsdResolver(cfg, nativeUsd, bridgeUsd),
       exclusions,
       knownPools,
       cohort,
     );
-    fold(plan, rows, stats, wallets);
+    fold(plan, rows.concat(tRows), stats, wallets);
 
     if (commit) {
-      for (const r of rows) {
+      for (const r of rows.concat(tRows)) {
         const res = await client.query(
           `insert into wallet_transactions
              (chain, token, wallet, side, counterparty, tx_hash, pool,
               block_time, block_number, token_amount, usd_amount, price_usd)
-           values ($1, $2, $3, $4, null, $5, $6, $7, $8, $9, $10, $11)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            on conflict do nothing`,
           [
-            cfg.chain, cfg.token, r.wallet, r.side, r.txHash, r.pool,
+            cfg.chain, cfg.token, r.wallet, r.side, r.counterparty ?? null,
+            r.txHash, r.pool,
             r.blockTime, r.blockNumber, r.tokenAmount, r.usdAmount, r.priceUsd,
           ],
         );

@@ -62,6 +62,22 @@ create table if not exists pons_usd_prices (
   primary key (chain, bucket_block)
 );
 
+/*
+ * A bridge asset's own USD price per bucket -- the SECOND HOP.
+ *
+ * Derived from the bridge's pools against a recognised pricing asset, never
+ * from pools where the bridge is itself the pricing side of some third token.
+ * Keyed by bridge so several can coexist.
+ */
+create table if not exists bridge_usd_prices (
+  chain        text    not null,
+  bridge       text    not null,
+  bucket_block bigint  not null,
+  usd          numeric not null,
+  ticks        integer not null,
+  primary key (chain, bridge, bucket_block)
+);
+
 /* Native (ETH) price in USD per block bucket, derived from the token itself. */
 create table if not exists native_usd_prices (
   chain        text    not null,

@@ -14,12 +14,12 @@ import {
   decodeInitializeV4,
   decodePoolCreatedV3,
   classifyCode,
+  addressFromTopic,
   decodeString,
-  decodeTransfer,
   decodeUint8,
   normalizeAddress,
 } from '../adapters/token-updates/decode.js';
-import { RpcError, hexBlock, type RpcClient } from '../adapters/token-updates/rpc.js';
+import { RpcError, type LogEntry, type RpcClient } from '../adapters/token-updates/rpc.js';
 import type { PoolRow } from '../adapters/token-updates/pools.js';
 import { formatUnits } from '../adapters/token-updates/units.js';
 
@@ -143,6 +143,8 @@ export interface DiscoveryReport {
   v4FromInitialize: number;
   v3FromFactory: number;
   v3FromFlowProbe: number;
+  /** Transfers streamed through the probe. Never held in memory at once. */
+  transfersScanned: number;
   flowAddressesTested: number;
   flowNotContracts: number;
   flowReverted: number;
@@ -163,53 +165,75 @@ export interface DiscoveryReport {
  * A DexScreener listing is never used here. It caps at 30 pairs and knew 30 of
  * 91 v3 pools and 14 of 792 v4 pools for PONS.
  */
+export type LogStream = (
+  filter: object,
+  from: number,
+  to: number,
+  onBatch: (logs: LogEntry[]) => void,
+  startSpan?: number,
+) => Promise<void>;
+
 export async function discoverPools(
   rpc: RpcClient,
   cfg: IntakeConfig,
   firstBlock: number,
   head: number,
-  sweepSpan: (filter: object, from: number, to: number) => Promise<
-    { address: string; topics: string[]; data: string; blockNumber: string;
-      transactionHash: string; logIndex: string; blockTimestamp?: string }[]
-  >,
+  /*
+   * STREAMS, never returns an array. The flow probe reads every transfer the
+   * token has ever emitted -- 5.76M log objects for PONS -- and collecting them
+   * into one array to look at two address fields would exhaust memory long
+   * before it produced a pool list. Only the two address SETS are kept.
+   */
+  sweepStream: LogStream,
+  /** Block the contract probe runs at. Never `latest`. */
+  probeBlock: number,
 ): Promise<DiscoveryReport> {
   const token = normalizeAddress(cfg.token);
   const tokenTopic = addressTopic(token);
   const found = new Map<string, PoolCandidate>();
   const key = (v: string, p: string): string => `${v}:${p}`;
 
-  /* v4 -- Initialize, filtered by the token in each currency position. */
+  /*
+   * v4 -- Initialize, filtered by the token in each currency position.
+   * SPARSE filter: one token's pool creations. Starts at sparseLogSpanBlocks.
+   */
   let v4FromInitialize = 0;
   for (const topics of [
     [TOPICS.initializeV4, null, tokenTopic],
     [TOPICS.initializeV4, null, null, tokenTopic],
   ]) {
-    const logs = await sweepSpan(
-      { address: cfg.v4PoolManager, topics },
-      firstBlock,
-      head,
+    await sweepStream(
+      { address: cfg.v4PoolManager, topics }, firstBlock, head,
+      (logs) => {
+        for (const log of logs) {
+          const p = decodeInitializeV4(log);
+          if (found.has(key('v4', p.pool))) continue;
+          found.set(key('v4', p.pool), { ...p, via: 'initialize' });
+          v4FromInitialize += 1;
+        }
+      },
+      cfg.sparseLogSpanBlocks,
     );
-    for (const log of logs) {
-      const p = decodeInitializeV4(log);
-      if (found.has(key('v4', p.pool))) continue;
-      found.set(key('v4', p.pool), { ...p, via: 'initialize' });
-      v4FromInitialize += 1;
-    }
   }
 
-  /* v3 -- the factory's PoolCreated. */
+  /* v3 -- the factory's PoolCreated. Also sparse. */
   let v3FromFactory = 0;
   for (const topics of [
     [TOPICS.poolCreatedV3, tokenTopic],
     [TOPICS.poolCreatedV3, null, tokenTopic],
   ]) {
-    const logs = await sweepSpan({ address: cfg.v3Factory, topics }, firstBlock, head);
-    for (const log of logs) {
-      const p = decodePoolCreatedV3(log);
-      if (found.has(key('v3', p.pool))) continue;
-      found.set(key('v3', p.pool), { ...p, via: 'pool-created' });
-      v3FromFactory += 1;
-    }
+    await sweepStream(
+      { address: cfg.v3Factory, topics }, firstBlock, head,
+      (logs) => {
+        for (const log of logs) {
+          const p = decodePoolCreatedV3(log);
+          if (found.has(key('v3', p.pool))) continue;
+          found.set(key('v3', p.pool), { ...p, via: 'pool-created' });
+          v3FromFactory += 1;
+        }
+      },
+      cfg.sparseLogSpanBlocks,
+    );
   }
 
   /*
@@ -219,18 +243,21 @@ export async function discoverPools(
    * but so does a router, so flow alone does not identify one. Each candidate is
    * then tested on-chain.
    */
-  const transferLogs = await sweepSpan(
-    { address: cfg.token, topics: [TOPICS.transfer] },
-    firstBlock,
-    head,
-  );
   const received = new Set<string>();
   const sent = new Set<string>();
-  for (const log of transferLogs) {
-    const t = decodeTransfer(log);
-    received.add(t.to);
-    sent.add(t.from);
-  }
+  let transfersSeen = 0;
+  // DENSE filter: every transfer of the token. Default span, and only the two
+  // address sets survive each batch.
+  await sweepStream(
+    { address: cfg.token, topics: [TOPICS.transfer] }, firstBlock, head,
+    (logs) => {
+      transfersSeen += logs.length;
+      for (const log of logs) {
+        received.add(addressFromTopic(log.topics[1]!));
+        sent.add(addressFromTopic(log.topics[2]!));
+      }
+    },
+  );
   const twoWay = [...received].filter(
     (a) => sent.has(a) && a !== token && !found.has(key('v3', a)),
   );
@@ -247,8 +274,11 @@ export async function discoverPools(
      * account can be one, so both are rejected here -- a delegated account
      * would otherwise be probed with token0()/token1() and cost two calls to
      * reach the same answer.
+     *
+     * Probed at a FIXED BLOCK, never `latest`: a pool that self-destructed
+     * afterwards would read as never having been one.
      */
-    const codeAt = await rpc.getCode(address, 'latest');
+    const codeAt = await rpc.getCode(address, probeBlock);
     if (classifyCode(codeAt) !== 'contract') {
       flowNotContracts += 1;
       continue;
@@ -310,6 +340,7 @@ export async function discoverPools(
     v4FromInitialize,
     v3FromFactory,
     v3FromFlowProbe,
+    transfersScanned: transfersSeen,
     flowAddressesTested: twoWay.length,
     flowNotContracts,
     flowReverted,

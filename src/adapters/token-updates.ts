@@ -47,6 +47,7 @@ import {
 import { loadPools, persistPools, poolKey, scanForPools, type PoolRow } from './token-updates/pools.js';
 import {
   bucketOf,
+  counterUsdResolver,
   derivePrices,
   loadNativeForRange,
   loadNativeReference,
@@ -282,7 +283,7 @@ const adapter: SourceAdapter<WalletRow> = {
       transfers,
       cfg,
       tokenDecimals,
-      pricingMap,
+      counterUsdResolver(cfg, pricingMap),
       exclusions,
       knownPools,
       cohort,

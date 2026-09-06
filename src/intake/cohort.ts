@@ -23,9 +23,12 @@
  */
 
 import type { IntakeConfig, IntakeWindow } from './plan.js';
-import { classifyCode, normalizeAddress } from '../adapters/token-updates/decode.js';
+import { classifyCode } from '../adapters/token-updates/decode.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
 import type { ExclusionEntry } from '../adapters/token-updates/exclusions.js';
+import type { PoolRow } from '../adapters/token-updates/pools.js';
+import { tradeLegs } from '../adapters/token-updates/rows.js';
+import { loadLegsInput } from './write.js';
 import type { PoolClient } from '../store/db.js';
 
 export interface CohortReport {
@@ -46,122 +49,47 @@ export interface CohortReport {
   unusedExclusions: string[];
 }
 
-/**
- * Candidate buyers for one window, straight from the stored transfer and swap
- * logs. Both venues at once: the counterparty is the v3 pool address or the v4
- * PoolManager, and both are in `counterparties`.
- */
-async function candidateBuyers(
-  client: PoolClient,
-  cfg: IntakeConfig,
-  counterparties: string[],
-  startBlock: number,
-  endBlock: number,
-): Promise<{ wallet: string; roundTripper: boolean }[]> {
-  const res = await client.query<{ wallet: string; got: string; round_tripper: boolean }>(
-    `with moves as (
-       select t.tx_hash,
-              t.to_addr   as wallet,
-              t.amount    as amount,
-              true        as received
-         from token_transfer_logs t
-        where t.chain = $1 and t.token = $2
-          and t.block_number between $3 and $4
-          and t.from_addr = any($5::text[])
-          and t.to_addr <> all($5::text[])
-       union all
-       select t.tx_hash, t.from_addr, t.amount, false
-         from token_transfer_logs t
-        where t.chain = $1 and t.token = $2
-          and t.block_number between $3 and $4
-          and t.to_addr = any($5::text[])
-          and t.from_addr <> all($5::text[])
-     ),
-     /*
-      * ROUND-TRIPPING IS DECIDED PER TRANSACTION, NOT PER WINDOW.
-      *
-      * A wallet that both receives from and sends to a pool INSIDE ONE
-      * TRANSACTION is a fee recipient or an arbitrage hop. A wallet that buys
-      * in March and sells in May is a trader, and aggregating across the whole
-      * window cannot tell them apart. Measured on PONS: the window-level test
-      * flags 10,389 wallets and would drop 8,220 of the 13,095 genuine cohort
-      * members; the per-transaction test flags 512 and drops 3.
-      */
-     per_tx as (
-       select tx_hash, wallet,
-              bool_or(received) and bool_or(not received) as both_ways,
-              sum(case when received then amount else 0 end) as got
-         from moves
-        group by tx_hash, wallet
-     )
-     select wallet,
-            sum(got)::text        as got,
-            bool_or(both_ways)    as round_tripper
-       from per_tx
-      group by wallet`,
-    [cfg.chain, cfg.token, startBlock, endBlock, counterparties],
-  );
-
-  return res.rows
-    .filter((r) => BigInt(r.got) > 0n)
-    .map((r) => ({
-      wallet: normalizeAddress(r.wallet),
-      roundTripper: r.round_tripper,
-    }));
-}
-
 export async function buildCohort(
   client: PoolClient,
   rpc: RpcClient,
   cfg: IntakeConfig,
   window: IntakeWindow,
-  poolAddresses: string[],
+  pools: Map<string, PoolRow>,
   exclusions: ExclusionEntry[],
-  roundTripperPolicy: 'exclude' | 'keep' = 'exclude',
 ): Promise<CohortReport> {
   const startBlock = window.startBlock!;
   const endBlock = window.endBlock!;
 
-  // The v4 PoolManager is a counterparty even when the pool being tracked is
-  // v3, because routers hop through it. It is in the exclusion list as a
-  // wallet and in the counterparty list as a venue -- those are different roles.
-  const counterparties = [...new Set([...poolAddresses, cfg.v4PoolManager.toLowerCase()])];
+  /*
+   * ONE IMPLEMENTATION OF WHO TRADED. The cohort is exactly the set of wallets
+   * `tradeLegs` produces buy legs for inside the window -- the same function the
+   * row writer uses. It therefore requires a Swap on an in-scope pool, applies
+   * the infrastructure list, and detects round-tripping per transaction, all
+   * because the row writer does, not because this file repeats the rules.
+   */
+  const slice = await loadLegsInput(client, cfg, pools, startBlock, endBlock);
+  const excludedSet = new Set(exclusions.map((e) => e.address));
+  const knownPools = new Set([...pools.values()].map((p) => p.pool));
+  knownPools.add(cfg.v4PoolManager.toLowerCase());
 
-  const candidates = await candidateBuyers(
-    client,
-    cfg,
-    counterparties,
-    startBlock,
-    endBlock,
+  const { legs, stats } = tradeLegs(
+    // The cohort does not need prices: membership is who traded, not for how
+    // much. A resolver that always returns null keeps every leg's USD null.
+    slice.swaps, slice.transfers, cfg, () => null, excludedSet, knownPools,
   );
 
-  const excluded = new Map(exclusions.map((e) => [e.address, e.label]));
+  const buyers = new Set<string>();
+  for (const leg of legs) if (leg.side === 'buy') buyers.add(leg.wallet);
+  const survivors = [...buyers].sort();
+
   const usedExclusions = new Set<string>();
-  const poolSet = new Set(counterparties);
-
-  let excludedByInfrastructure = 0;
-  let excludedAsRoundTrippers = 0;
-  let excludedAsPools = 0;
-  const survivors: string[] = [];
-
-  for (const c of candidates) {
-    // APPLIED AT THE CANDIDATE STAGE, before the code check and before cohort
-    // selection, so an excluded address never becomes a row at all.
-    if (excluded.has(c.wallet)) {
-      excludedByInfrastructure += 1;
-      usedExclusions.add(c.wallet);
-      continue;
-    }
-    if (poolSet.has(c.wallet)) {
-      excludedAsPools += 1;
-      continue;
-    }
-    if (c.roundTripper && roundTripperPolicy === 'exclude') {
-      excludedAsRoundTrippers += 1;
-      continue;
-    }
-    survivors.push(c.wallet);
+  for (const t of slice.transfers) {
+    if (excludedSet.has(t.from)) usedExclusions.add(t.from);
+    if (excludedSet.has(t.to)) usedExclusions.add(t.to);
   }
+  const excludedByInfrastructure = stats.walletsExcludedInfrastructure;
+  const excludedAsRoundTrippers = stats.roundTrippers;
+  const excludedAsPools = stats.walletsExcludedIsPool;
 
   /*
    * The code check, at the window's END block. This needs an archival endpoint:
@@ -189,7 +117,7 @@ export async function buildCohort(
     window: window.label,
     startBlock,
     endBlock,
-    rawBuyers: candidates.length,
+    rawBuyers: stats.candidateWallets,
     excludedByInfrastructure,
     excludedAsRoundTrippers,
     excludedAsPools,

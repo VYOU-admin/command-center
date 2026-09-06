@@ -36,17 +36,36 @@ import { abs, formatUnits, toNumber } from './units.js';
 export interface RowConfig {
   usdAsset: string;
   nativeAssets: string[];
+  /**
+   * Assets that are neither dollars nor the native asset, but whose own USD
+   * price is derivable ON CHAIN from their pools against a pricing asset.
+   * Pricing through one is the SECOND HOP: token -> bridge -> USD.
+   */
+  bridgeAssets: string[];
   v4PoolManager: string;
   bucketBlocks: number;
   bucketOrigin: number;
   floors: Floors;
 }
 
+/**
+ * What one whole unit of a counter asset is worth in USD at a block, or null.
+ *
+ * ONE RESOLVER, so the pricing route is a lookup rather than a chain of
+ * branches. USDG returns 1, WETH and native ETH return the derived native
+ * price, a bridge asset returns its own derived price, and anything else
+ * returns null -- which becomes a null usd_amount, never a zero.
+ */
+export type CounterUsdResolver = (counter: string, block: number) => number | null;
+
 export interface WalletRow {
   wallet: string;
-  side: 'buy' | 'sell';
+  side: 'buy' | 'sell' | 'transfer_in' | 'transfer_out';
   txHash: string;
-  pool: string;
+  /** Null for a transfer: there is no pool. */
+  pool: string | null;
+  /** Set only for a transfer, where it is the other side of the movement. */
+  counterparty?: string | null;
   blockTime: Date;
   blockNumber: number;
   tokenAmount: string;
@@ -72,6 +91,32 @@ export interface RowStats {
   nullUsdBecauseNoBucketPrice: number;
 }
 
+/**
+ * A single trade leg: one wallet, one direction, in one (transaction, pool)
+ * group. THIS IS THE ONE IMPLEMENTATION of what counts as a trade.
+ *
+ * The cohort builder and the row writer both call `tradeLegs`. They used to
+ * disagree: the row writer grouped by swaps and required one, while the cohort
+ * builder read transfers alone and never joined the swap table, so a transfer
+ * out of the PoolManager with no swap -- liquidity removal, for instance --
+ * qualified a wallet for the cohort but produced no row. Two implementations of
+ * one rule is a bug waiting to happen; this is the fix.
+ */
+export interface TradeLeg {
+  wallet: string;
+  side: 'buy' | 'sell';
+  /** Raw token units the wallet netted in this group. */
+  raw: bigint;
+  txHash: string;
+  pool: string;
+  counterparty: string;
+  block: number;
+  timestamp: number;
+  /** Total raw token moved by ALL candidates in the group, for allocation. */
+  groupTotalRaw: bigint;
+  groupUsd: number | null;
+}
+
 interface Group {
   txHash: string;
   counterparty: string;
@@ -84,18 +129,18 @@ interface Group {
   usdIncomplete: boolean;
 }
 
-export function buildRows(
+/**
+ * Derive every trade leg in a slice. Pure, and shared by the cohort builder and
+ * the row writer so that "who traded" has exactly one definition.
+ */
+export function tradeLegs(
   swaps: { swap: SwapLog; pool: PoolRow }[],
   transfers: TransferLog[],
   cfg: RowConfig,
-  tokenDecimals: number,
-  nativeUsd: Map<number, { price: number }>,
+  counterUsd: CounterUsdResolver,
   exclusions: Set<string>,
   knownPools: Set<string>,
-  cohort: Set<string>,
-): { rows: WalletRow[]; stats: RowStats } {
-  const usdAsset = cfg.usdAsset.toLowerCase();
-  const nativeAssets = new Set(cfg.nativeAssets.map((a) => a.toLowerCase()));
+): { legs: TradeLeg[]; stats: RowStats } {
   const poolManager = cfg.v4PoolManager.toLowerCase();
 
   const stats: RowStats = {
@@ -122,9 +167,6 @@ export function buildRows(
     const tokenRaw = abs(pool.tokenSide === 0 ? swap.amount0 : swap.amount1);
     const counterRaw = abs(pool.tokenSide === 0 ? swap.amount1 : swap.amount0);
 
-    // Floors 1 and 2, at raw-unit resolution, per swap. The paid-side floor
-    // catches what the token-side floor does not: a leg where the wallet
-    // received real tokens and gave up float residue.
     if (tokenRaw < BigInt(Math.trunc(cfg.floors.tokenRawUnits))) {
       stats.swapsBelowTokenRawFloor += 1;
       continue;
@@ -137,26 +179,16 @@ export function buildRows(
     const counterparty = swap.venue === 'v3' ? pool.pool : poolManager;
     const key = `${swap.txHash}:${counterparty}`;
 
-    let usd: number | null = null;
     const counterAmount = toNumber(counterRaw, pool.counterDec);
-    if (pool.counter === usdAsset) {
-      usd = counterAmount;
-    } else if (nativeAssets.has(pool.counter)) {
-      const price = nativeUsd.get(bucketOf(swap.block, cfg.bucketBlocks, cfg.bucketOrigin));
-      usd = price ? counterAmount * price.price : null;
-    }
+    const rate = counterUsd(pool.counter, swap.block);
+    const usd = rate === null ? null : counterAmount * rate;
 
     const existing = groups.get(key);
     if (!existing) {
       groups.set(key, {
-        txHash: swap.txHash,
-        counterparty,
-        pools: new Set([pool.pool]),
-        block: swap.block,
-        timestamp: swap.timestamp,
-        tokenRaw,
-        usd,
-        usdIncomplete: usd === null,
+        txHash: swap.txHash, counterparty, pools: new Set([pool.pool]),
+        block: swap.block, timestamp: swap.timestamp, tokenRaw,
+        usd, usdIncomplete: usd === null,
       });
     } else {
       existing.pools.add(pool.pool);
@@ -175,20 +207,11 @@ export function buildRows(
     else byTx.set(t.txHash, [t]);
   }
 
-  /* ---- 3. attribute each group to wallets --------------------------------- */
-  const rows: WalletRow[] = [];
+  /* ---- 3. one leg per wallet per group ------------------------------------ */
+  const legs: TradeLeg[] = [];
   for (const group of groups.values()) {
     stats.groups += 1;
     if (group.pools.size > 1) stats.groupsWithMultiplePools += 1;
-
-    /*
-     * One row per (tx, wallet, side, pool) is what the unique key allows, and
-     * the historical rows carry one specific pool. When a transaction touched
-     * several v4 pools the flow through the PoolManager cannot be split between
-     * them without inventing a split, so the pool recorded is the lowest id in
-     * the group. Deterministic on purpose: a re-run picks the same one and
-     * collides with the existing row instead of duplicating it.
-     */
     const representativePool = [...group.pools].sort()[0]!;
 
     const txTransfers = byTx.get(group.txHash) ?? [];
@@ -206,90 +229,150 @@ export function buildRows(
       continue;
     }
 
-    interface Candidate {
-      wallet: string;
-      side: 'buy' | 'sell';
-      raw: bigint;
-    }
-    const candidates: Candidate[] = [];
+    const candidates: { wallet: string; side: 'buy' | 'sell'; raw: bigint }[] = [];
     for (const wallet of new Set([...received.keys(), ...sent.keys()])) {
-      if (exclusions.has(wallet)) {
-        stats.walletsExcludedInfrastructure += 1;
-        continue;
-      }
-      if (knownPools.has(wallet)) {
-        stats.walletsExcludedIsPool += 1;
-        continue;
-      }
+      if (exclusions.has(wallet)) { stats.walletsExcludedInfrastructure += 1; continue; }
+      if (knownPools.has(wallet)) { stats.walletsExcludedIsPool += 1; continue; }
       const gotRaw = received.get(wallet) ?? 0n;
       const gaveRaw = sent.get(wallet) ?? 0n;
-      if (gotRaw > 0n && gaveRaw > 0n) {
-        // Both directions against the same pool in one transaction: a fee
-        // recipient or arbitrage hop, not a trade to attribute.
-        stats.roundTrippers += 1;
-        continue;
-      }
+      // Both directions against the same pool in one TRANSACTION: a fee
+      // recipient or arbitrage hop, not a trade to attribute.
+      if (gotRaw > 0n && gaveRaw > 0n) { stats.roundTrippers += 1; continue; }
       candidates.push({
-        wallet,
-        side: gotRaw > 0n ? 'buy' : 'sell',
-        raw: gotRaw > 0n ? gotRaw : gaveRaw,
+        wallet, side: gotRaw > 0n ? 'buy' : 'sell', raw: gotRaw > 0n ? gotRaw : gaveRaw,
       });
     }
     stats.candidateWallets += candidates.length;
 
-    /*
-     * The denominator spans EVERY candidate, including wallets outside the
-     * cohort. Allocating only across cohort wallets would hand them dollars
-     * that belonged to someone else in the same transaction.
-     */
     const totalRaw = candidates.reduce((sum, c) => sum + c.raw, 0n);
     if (totalRaw === 0n) continue;
 
     for (const c of candidates) {
-      /*
-       * Cohort membership is checked BEFORE the floors so the floor counts
-       * describe rows that would otherwise have been written. Counting floors
-       * over every wallet on the chain would drown the number that matters.
-       */
-      if (!cohort.has(c.wallet)) {
-        stats.rowsOutsideCohort += 1;
-        continue;
-      }
-
-      const tokenAmount = formatUnits(c.raw, tokenDecimals);
-      if (Number(tokenAmount) < cfg.floors.tokenAmount) {
-        stats.rowsBelowTokenAmountFloor += 1;
-        continue;
-      }
-
-      const share = Number(c.raw) / Number(totalRaw);
-      const usd =
-        group.usd === null || group.usdIncomplete ? null : group.usd * share;
-
-      // A null-USD row is unpriced, not small. The USD floor must not touch it.
-      if (usd !== null && usd < cfg.floors.usd) {
-        stats.rowsBelowUsdFloor += 1;
-        continue;
-      }
-      if (usd === null) {
-        stats.rowsWithNullUsd += 1;
-        if (group.usdIncomplete) stats.nullUsdBecauseNoBucketPrice += 1;
-      }
-
-      const amountNumber = Number(tokenAmount);
-      rows.push({
-        wallet: c.wallet,
-        side: c.side,
-        txHash: group.txHash,
-        pool: representativePool,
-        blockTime: new Date(group.timestamp * 1000),
-        blockNumber: group.block,
-        tokenAmount,
-        usdAmount: usd,
-        priceUsd: usd !== null && amountNumber > 0 ? usd / amountNumber : null,
+      legs.push({
+        wallet: c.wallet, side: c.side, raw: c.raw,
+        txHash: group.txHash, pool: representativePool, counterparty: group.counterparty,
+        block: group.block, timestamp: group.timestamp,
+        groupTotalRaw: totalRaw,
+        groupUsd: group.usd === null || group.usdIncomplete ? null : group.usd,
       });
     }
   }
+  return { legs, stats };
+}
 
+export function buildRows(
+  swaps: { swap: SwapLog; pool: PoolRow }[],
+  transfers: TransferLog[],
+  cfg: RowConfig,
+  tokenDecimals: number,
+  counterUsd: CounterUsdResolver,
+  exclusions: Set<string>,
+  knownPools: Set<string>,
+  /** Null accepts every wallet -- used by the cohort builder, which is deciding
+   *  membership rather than filtering by it. */
+  cohort: Set<string> | null,
+): { rows: WalletRow[]; stats: RowStats } {
+  const { legs, stats } = tradeLegs(swaps, transfers, cfg, counterUsd, exclusions, knownPools);
+  const rows: WalletRow[] = [];
+
+  for (const leg of legs) {
+    if (cohort !== null && !cohort.has(leg.wallet)) {
+      stats.rowsOutsideCohort += 1;
+      continue;
+    }
+    const tokenAmount = formatUnits(leg.raw, tokenDecimals);
+    if (Number(tokenAmount) < cfg.floors.tokenAmount) {
+      stats.rowsBelowTokenAmountFloor += 1;
+      continue;
+    }
+    const share = Number(leg.raw) / Number(leg.groupTotalRaw);
+    const usd = leg.groupUsd === null ? null : leg.groupUsd * share;
+    // A null-USD row is unpriced, not small. The USD floor must not touch it.
+    if (usd !== null && usd < cfg.floors.usd) {
+      stats.rowsBelowUsdFloor += 1;
+      continue;
+    }
+    if (usd === null) {
+      stats.rowsWithNullUsd += 1;
+      stats.nullUsdBecauseNoBucketPrice += 1;
+    }
+    const amountNumber = Number(tokenAmount);
+    rows.push({
+      wallet: leg.wallet, side: leg.side, txHash: leg.txHash, pool: leg.pool,
+      counterparty: null,
+      blockTime: new Date(leg.timestamp * 1000), blockNumber: leg.block,
+      tokenAmount, usdAmount: usd,
+      priceUsd: usd !== null && amountNumber > 0 ? usd / amountNumber : null,
+    });
+  }
   return { rows, stats };
+}
+
+/**
+ * TRANSFERS THAT ARE NOT TRADES.
+ *
+ * A cohort wallet can gain or lose the token without a swap -- someone sends it
+ * some, it moves funds between its own addresses, it is paid a referral. Those
+ * movements change a position and must be recorded, or the position is wrong:
+ * 2,682 PONS cohort wallets show a NEGATIVE position, having sold more than
+ * they bought, purely because acquisition off the market was never written.
+ * That is what the inflated-pnl flag exists to mark, and it is a symptom of
+ * this gap rather than a fact about those wallets.
+ *
+ * A transfer becomes a row only when it is NOT part of a trade for that wallet
+ * in that transaction. Otherwise the same movement is counted twice, once as a
+ * buy and once as a transfer_in, and every position doubles.
+ *
+ * A transfer row carries a NULL usd_amount, always. It is an acquisition or a
+ * disposal at an unknown cost, and that is exactly what null means -- pricing
+ * it at the market rate would invent a basis the wallet never paid.
+ */
+export function buildTransferRows(
+  transfers: TransferLog[],
+  legs: TradeLeg[],
+  cfg: RowConfig,
+  tokenDecimals: number,
+  exclusions: Set<string>,
+  knownPools: Set<string>,
+  cohort: Set<string> | null,
+): { rows: WalletRow[]; skippedBecauseTraded: number; skippedBelowFloor: number } {
+  const traded = new Set(legs.map((l) => `${l.txHash}:${l.wallet}`));
+  const rows: WalletRow[] = [];
+  let skippedBecauseTraded = 0;
+  let skippedBelowFloor = 0;
+
+  for (const t of transfers) {
+    const sides: readonly (readonly [string, 'transfer_in' | 'transfer_out'])[] = [
+      [t.to, 'transfer_in'],
+      [t.from, 'transfer_out'],
+    ];
+    for (const [wallet, side] of sides) {
+      if (exclusions.has(wallet) || knownPools.has(wallet)) continue;
+      if (cohort !== null && !cohort.has(wallet)) continue;
+      if (traded.has(`${t.txHash}:${wallet}`)) {
+        skippedBecauseTraded += 1;
+        continue;
+      }
+      const amount = formatUnits(t.amount, tokenDecimals);
+      if (Number(amount) < cfg.floors.tokenAmount) {
+        skippedBelowFloor += 1;
+        continue;
+      }
+      rows.push({
+        wallet,
+        side,
+        txHash: t.txHash,
+        // A transfer has no pool. The unique key treats nulls as not distinct,
+        // so the counterparty is what separates two transfers in one tx.
+        pool: null,
+        counterparty: side === 'transfer_in' ? t.from : t.to,
+        blockTime: new Date(t.timestamp * 1000),
+        blockNumber: t.block,
+        tokenAmount: amount,
+        usdAmount: null,
+        priceUsd: null,
+      });
+    }
+  }
+  return { rows, skippedBecauseTraded, skippedBelowFloor };
 }

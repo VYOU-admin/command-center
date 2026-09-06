@@ -51,10 +51,15 @@ import { buildCohort, writeTags } from '../intake/cohort.js';
 import {
   derivePricesForLife,
   fetchTimestamps,
+  loadBridgeUsd,
+  loadLegsInput,
   persistAllPrices,
+  persistBridgeUsd,
   planOrWrite,
   planTimestamps,
 } from '../intake/write.js';
+import { deriveBridgeUsd } from '../adapters/token-updates/prices.js';
+import { detectRouters, compareToList } from '../intake/routers.js';
 
 const INFRASTRUCTURE_PATH = 'config/infrastructure.yaml';
 
@@ -237,14 +242,20 @@ async function main(): Promise<void> {
     /* ---- 3. pools ------------------------------------------- STOP ------ */
     await run('pools', async (rpc, c) => {
       if (!head) head = await rpc.blockNumber();
-      const sweepSpan = async (filter: object, from: number, to: number) => {
-        const collected: Parameters<typeof decodeTransfer>[0][] = [];
-        await adaptiveSweep(rpc, cfg, filter, from, to, async (logs) => {
-          collected.push(...logs);
-        });
-        return collected;
+      const sweepStream = async (
+        filter: object, from: number, to: number,
+        onBatch: (logs: Parameters<typeof decodeSwap>[0][]) => void,
+        startSpan?: number,
+      ) => {
+        await adaptiveSweep(
+          rpc, cfg, filter, from, to,
+          async (logs) => { onBatch(logs); },
+          startSpan,
+        );
       };
-      const found = await discoverPools(rpc, cfg, firstBlock || 1, head, sweepSpan);
+      const found = await discoverPools(
+        rpc, cfg, firstBlock || 1, head, sweepStream, head,
+      );
       await c.query(
         `insert into token_intake_state (chain, token, phase, status, detail)
          values ($1, $2, 'pools:candidates', 'complete', $3::jsonb)
@@ -257,6 +268,7 @@ async function main(): Promise<void> {
           v4_from_initialize: found.v4FromInitialize,
           v3_from_factory: found.v3FromFactory,
           v3_from_flow_probe: found.v3FromFlowProbe,
+          transfers_scanned: found.transfersScanned,
           flow_addresses_tested: found.flowAddressesTested,
           flow_not_contracts: found.flowNotContracts,
           flow_reverted_not_a_pool: found.flowReverted,
@@ -278,8 +290,36 @@ async function main(): Promise<void> {
       }
       const scope = await scopePools(rpc, cfg, candidates);
       await persistPools(c, cfg.chain, cfg.token, scope.inScope);
+
+      /*
+       * WHO IS A ROUTER, FROM BEHAVIOUR. Reported here rather than taken from
+       * config/infrastructure.yaml, which is a list somebody noticed. Both
+       * directions are reported: a router the list misses gets a trade
+       * attributed to it instead of to the buyer, and a list entry behaviour
+       * does not support is a claim nobody checked.
+       */
+      const v3Addrs = scope.inScope.filter((p) => p.venue === 'v3').map((p) => p.pool);
+      const w0 = windows[0]!;
+      const detected = await detectRouters(
+        c, rpc, cfg, v3Addrs, w0.startBlock ?? firstBlock, w0.endBlock ?? head, head,
+      );
+      const versus = compareToList(detected.candidates, exclusions.map((e) => e.address));
+
       return {
         report: {
+          routers: {
+            probed: detected.probed,
+            identified: detected.candidates.filter((x) => x.isRouter).length,
+            rejected: detected.candidates.filter((x) => !x.isRouter).length,
+            top: detected.candidates.slice(0, 10).map((x) => ({
+              address: x.address, recipients: x.recipients, sends: x.sends,
+              swap_share: Number((100 * x.swapShare).toFixed(1)),
+              kind: x.kind, router: x.isRouter, reason: x.reason,
+            })),
+            in_behaviour_not_in_config: versus.onlyBehavioural,
+            in_config_not_in_behaviour: versus.onlyConfigured,
+            in_both: versus.both,
+          },
           in_scope: scope.inScope.length,
           rejected: scope.rejected.length,
           counters: scope.counters.map((x) => ({
@@ -476,10 +516,9 @@ async function main(): Promise<void> {
     /* ---- 7. cohort ------------------------------------------ STOP ------ */
     await run('cohort', async (rpc, c) => {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
-      const addresses = [...pools.values()].filter((p) => p.venue === 'v3').map((p) => p.pool);
       const reports = [];
       for (const w of windows) {
-        const r = await buildCohort(c, rpc, cfg, w, addresses, exclusions);
+        const r = await buildCohort(c, rpc, cfg, w, pools, exclusions);
         reports.push({ ...r, cohort: r.cohort.length, sample: r.cohort.slice(0, 3) });
         await c.query(
           `insert into token_intake_state (chain, token, phase, status, detail)
@@ -491,18 +530,27 @@ async function main(): Promise<void> {
       return { report: { windows: reports } };
     });
 
-    /* ---- 7b. write the tags (only reached after the cohort STOP) --------- */
-    await run('timestamps', async (rpc, c) => {
+    /* ---- 7b. tags -- its own phase, so the log names what it writes ----- */
+    await run('tags', async (_rpc, c) => {
+      const written: Record<string, number> = {};
       for (const w of windows) {
         const stored = await c.query<{ detail: unknown }>(
           `select detail from token_intake_state where chain=$1 and token=$2 and phase=$3`,
           [cfg.chain, cfg.token, `cohort:${w.label}`],
         );
         const cohort = (stored.rows[0]?.detail ?? []) as string[];
-        if (Array.isArray(cohort) && cohort.length > 0) {
-          await writeTags(c, cfg, w, cohort);
+        if (!Array.isArray(cohort) || cohort.length === 0) {
+          throw new Error(
+            `no stored cohort for window "${w.label}"; the cohort phase did not complete`,
+          );
         }
+        written[w.label] = await writeTags(c, cfg, w, cohort);
       }
+      return { report: { tags_written: written } };
+    });
+
+    /* ---- 8. timestamps -------------------------------------------------- */
+    await run('timestamps', async (rpc, c) => {
       const plan = await planTimestamps(c, cfg);
       log.info('timestamp work set, derived from the rows to be written', { ...plan });
       const result = await fetchTimestamps(c, rpc, cfg, cfg.ceilings.timestamps);
@@ -516,6 +564,31 @@ async function main(): Promise<void> {
         (await c.query<{ decimals: number }>(`select decimals from tokens where mint=$1`, [cfg.token]))
           .rows[0]?.decimals;
       if (typeof decimals !== 'number') throw new Error('token decimals unknown');
+      /*
+       * THE SECOND HOP. Each bridge asset gets its own USD series first, from
+       * swaps stored under ITS address, so the token's bridge-quoted pools can
+       * be priced. Gaps stay gaps: a bucket with no bridge trade prices nothing.
+       */
+      const bridgeReport: Record<string, unknown> = {};
+      for (const bridge of cfg.bridgeAssets) {
+        const bridgePools = await loadPools(c, cfg.chain, bridge);
+        if (bridgePools.size === 0) {
+          bridgeReport[bridge] = 'NO IN-SCOPE POOLS STORED -- nothing derivable';
+          continue;
+        }
+        const slice = await loadLegsInput(
+          c, { ...cfg, token: bridge }, bridgePools, firstBlock, head,
+        );
+        const bdec = (await c.query<{ decimals: number }>(
+          `select decimals from tokens where mint=$1`, [bridge])).rows[0]?.decimals ?? 18;
+        const d = deriveBridgeUsd(slice.swaps, cfg, bdec, cfg.bucketOrigin);
+        const written = await persistBridgeUsd(c, cfg, bridge, d.series);
+        bridgeReport[bridge] = {
+          buckets_with_ticks: d.buckets, buckets_priced: d.series.size,
+          ticks_discarded_by_fence: d.discarded, ...written,
+        };
+      }
+
       const { series } = await derivePricesForLife(c, cfg, pools, decimals, firstBlock, head);
       const written = await persistAllPrices(c, cfg, series);
       const totals = series.reduce(
@@ -532,7 +605,7 @@ async function main(): Promise<void> {
         { usdTicks: 0, usdDiscarded: 0, natTicks: 0, natDiscarded: 0, derived: 0,
           nativeDiscarded: 0, noUsdSide: 0, noNativeSide: 0 },
       );
-      return { report: { ...totals, written } };
+      return { report: { ...totals, written, bridges: bridgeReport } };
     });
 
     /* ---- 9. dry run ----------------------------------------- STOP ------ */
@@ -544,8 +617,9 @@ async function main(): Promise<void> {
       const cohortRows = await c.query<{ wallet: string }>(
         `select distinct wallet from wallet_tags where mint=$1`, [cfg.token]);
       const cohort = new Set(cohortRows.rows.map((r) => r.wallet.toLowerCase()));
+      const bridgeUsd = await loadBridgeUsd(c, cfg);
       const { plan } = await planOrWrite(
-        c, cfg, pools, decimals, cohort, excludedAddresses, firstBlock, head, false,
+        c, cfg, pools, decimals, cohort, excludedAddresses, firstBlock, head, false, bridgeUsd,
       );
       return { report: { DRY_RUN: true, cohort: cohort.size, ...plan } };
     });
@@ -559,8 +633,9 @@ async function main(): Promise<void> {
       const cohortRows = await c.query<{ wallet: string }>(
         `select distinct wallet from wallet_tags where mint=$1`, [cfg.token]);
       const cohort = new Set(cohortRows.rows.map((r) => r.wallet.toLowerCase()));
+      const bridgeUsd = await loadBridgeUsd(c, cfg);
       const { plan, stored } = await planOrWrite(
-        c, cfg, pools, decimals, cohort, excludedAddresses, firstBlock, head, true,
+        c, cfg, pools, decimals, cohort, excludedAddresses, firstBlock, head, true, bridgeUsd,
       );
       return { report: { ...plan, rows_stored: stored } };
     });

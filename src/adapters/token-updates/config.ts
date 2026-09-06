@@ -51,6 +51,8 @@ export interface UpdateConfig {
   usdAsset: string;
   /** Counter assets denominated in the native asset. */
   nativeAssets: string[];
+  /** Second-hop assets. The hourly job does not derive these; it reads them. */
+  bridgeAssets: string[];
 
   bucketBlocks: number;
   /**
@@ -144,6 +146,9 @@ export function parseConfig(
     pricingAssets: requireStringArray(pricing, 'assets', monitorId),
     usdAsset: requireString(pricing, 'usd_asset', monitorId),
     nativeAssets: requireStringArray(pricing, 'native_assets', monitorId),
+    bridgeAssets: Array.isArray(pricing['bridge_assets'])
+      ? (pricing['bridge_assets'] as unknown[]).map((x) => String(x).trim())
+      : [],
     bucketBlocks: configNumber(pricing, 'bucket_blocks', monitorId, 10_000),
     bucketOrigin: configNumber(pricing, 'bucket_origin', monitorId, 0),
     tickFenceMultiple: configNumber(pricing, 'tick_fence_multiple', monitorId, 100),

@@ -26,6 +26,7 @@ export interface PriceConfig {
   chain: string;
   usdAsset: string;
   nativeAssets: string[];
+  bridgeAssets: string[];
   bucketBlocks: number;
   bucketOrigin: number;
   tickFenceMultiple: number;
@@ -66,6 +67,43 @@ export interface PriceSeries {
  * produces boundaries 3,150 blocks away from every stored one -- lookups match
  * nothing and writes land between the existing rows rather than on them.
  */
+/**
+ * Build the counter-asset price resolver.
+ *
+ * THE SECOND HOP LIVES HERE. A token whose main market is against another
+ * token -- AI against NVDA, 56% of its swaps -- has no direct USD route, but
+ * the bridge asset does have one of its own, derived from ITS pools against a
+ * recognised pricing asset. Priced through it, the token's main market becomes
+ * usable without any off-chain feed.
+ *
+ * THE SCOPE RULE APPLIES RECURSIVELY. A bridge series must be derived only from
+ * pools where the bridge is paired WITH a pricing asset. Pools where the bridge
+ * is itself the pricing side of some third token are excluded -- including them
+ * would price the bridge against the thing it is pricing.
+ */
+export function counterUsdResolver(
+  cfg: {
+    usdAsset: string; nativeAssets: string[]; bridgeAssets: string[];
+    bucketBlocks: number; bucketOrigin: number;
+  },
+  nativeUsd: Map<number, { price: number }>,
+  bridgeUsd: Map<string, Map<number, { price: number }>> = new Map(),
+): (counter: string, block: number) => number | null {
+  const usdAsset = cfg.usdAsset.toLowerCase();
+  const native = new Set(cfg.nativeAssets.map((a) => a.toLowerCase()));
+  return (counter, block) => {
+    const c = counter.toLowerCase();
+    // A dollar stablecoin is a dollar. Its decimals are handled by the caller.
+    if (c === usdAsset) return 1;
+    const bucket = bucketOf(block, cfg.bucketBlocks, cfg.bucketOrigin);
+    if (native.has(c)) return nativeUsd.get(bucket)?.price ?? null;
+    const series = bridgeUsd.get(c);
+    if (series) return series.get(bucket)?.price ?? null;
+    // Not a pricing asset and not a bridge: unpriceable, which is a null.
+    return null;
+  };
+}
+
 export const bucketOf = (block: number, size: number, origin = 0): number =>
   origin + Math.floor((block - origin) / size) * size;
 
@@ -235,6 +273,44 @@ export async function loadNativeForRange(
     if (Number.isFinite(price) && price > 0) out.set(Number(r.block_number), { price });
   }
   return out;
+}
+
+/**
+ * Derive a bridge asset's own USD series, per bucket, from swaps on ITS pools
+ * against a recognised pricing asset. Same bucketed-median machinery, one level
+ * deeper, and the same fences.
+ */
+export function deriveBridgeUsd(
+  swaps: { swap: SwapLog; pool: PoolRow }[],
+  cfg: PriceConfig,
+  bridgeDecimals: number,
+  minCompleteBucket: number,
+): { series: Map<number, { price: number; ticks: number }>; discarded: number; buckets: number } {
+  const usdAsset = cfg.usdAsset.toLowerCase();
+  const ticks = new Map<number, number[]>();
+  for (const { swap, pool } of swaps) {
+    // Only the USD-quoted side gives dollars directly. A bridge priced from a
+    // native-quoted pool would need the native series and compound a third time.
+    if (pool.counter !== usdAsset) continue;
+    const bucket = bucketOf(swap.block, cfg.bucketBlocks, cfg.bucketOrigin);
+    if (bucket < minCompleteBucket) continue;
+    const rawBridge = pool.tokenSide === 0 ? swap.amount0 : swap.amount1;
+    const rawUsd = pool.tokenSide === 0 ? swap.amount1 : swap.amount0;
+    const bridgeAmt = toNumber(abs(rawBridge), bridgeDecimals);
+    const usdAmt = toNumber(abs(rawUsd), pool.counterDec);
+    if (bridgeAmt <= 0 || usdAmt <= 0) continue;
+    const tick = usdAmt / bridgeAmt;
+    if (!Number.isFinite(tick) || tick <= 0) continue;
+    push(ticks, bucket, tick);
+  }
+  const series = new Map<number, { price: number; ticks: number }>();
+  let discarded = 0;
+  for (const [bucket, list] of ticks) {
+    const m = fencedMedian(list, cfg.tickFenceMultiple);
+    discarded += m.discarded;
+    if (m.value !== null) series.set(bucket, { price: m.value, ticks: m.kept });
+  }
+  return { series, discarded, buckets: ticks.size };
 }
 
 /** The last stored native prices, as a fencing reference for a new batch. */
