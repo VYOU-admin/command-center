@@ -164,6 +164,26 @@ async function main(): Promise<void> {
     ...distribution(scored.map((w) => w.score!)),
   });
 
+  /*
+   * 3.4: how many wallets are null on ANY metric, and on which. The per-metric
+   * counts below say how often each metric was uncomputable; this says how much
+   * of the cohort is scored on less than the full weight.
+   */
+  const anyNull = result.wallets.filter((w) =>
+    METRIC_ORDER.some((m) => w.normalised[m] === null),
+  );
+  const weightBuckets: Record<string, number> = {};
+  for (const w of result.wallets) {
+    const k = w.weightUsed.toFixed(3);
+    weightBuckets[k] = (weightBuckets[k] ?? 0) + 1;
+  }
+  log.info('wallets scored on less than the full weight', {
+    cohort: cohort.length,
+    wallets_with_at_least_one_null_metric: anyNull.length,
+    wallets_on_full_weight: cohort.length - anyNull.length,
+    weight_used_distribution: weightBuckets,
+  });
+
   for (const s of result.summaries) {
     log.info('metric', {
       metric: s.metric,
