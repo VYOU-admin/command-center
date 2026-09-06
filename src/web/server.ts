@@ -113,6 +113,47 @@ export function createWebServer(opts: WebServerOptions): Server {
       return;
     }
 
+    /*
+     * One wallet's transactions, fetched when its row is expanded.
+     *
+     * The page used to carry every transaction inline, which reached 69.3 MB.
+     * It now carries per-wallet aggregates and asks for the detail only when a
+     * reader opens a row, so the payload scales with wallets rather than trades.
+     */
+    if (path === '/api/token-txs') {
+      const mint = (url.searchParams.get('mint') ?? '').trim();
+      const wallet = (url.searchParams.get('wallet') ?? '').trim();
+      if (!mint || !wallet) { sendJson(res, 400, { error: 'mint and wallet are required' }); return; }
+      // NOTHING HERE CHANGES CASE. Both are matched exactly as stored.
+      const r = await pool.query(
+        `select tx_hash, pool, block_time, block_number, token_amount, usd_amount,
+                price_usd, side, counterparty,
+                (select tw.tag from token_windows tw
+                  where tw.mint = w.token and w.block_time >= tw.window_start
+                    and w.block_time <= tw.window_end
+                  order by tw.window_start limit 1) as window_tag
+           from wallet_transactions w
+          where w.token = $1 and w.wallet = $2
+          order by w.block_time, w.tx_hash`,
+        [mint, wallet]);
+      sendJson(res, 200, {
+        mint, wallet, count: r.rowCount,
+        txs: (r.rows as Record<string, unknown>[]).map((x) => ({
+          signature: String(x.tx_hash),
+          pool: x.pool === null ? null : String(x.pool),
+          blockTime: (x.block_time as Date).toISOString(),
+          blockNumber: x.block_number === null ? null : String(x.block_number),
+          tokenAmount: Number(x.token_amount),
+          usdAmount: x.usd_amount === null ? null : Number(x.usd_amount),
+          priceUsd: x.price_usd === null ? null : Number(x.price_usd),
+          windowTag: x.window_tag === null ? null : String(x.window_tag),
+          side: asSide(x.side),
+          counterparty: x.counterparty === null ? null : String(x.counterparty),
+        })),
+      });
+      return;
+    }
+
     // Read-only otherwise.
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       sendJson(res, 405, { error: 'method not allowed' });
@@ -210,84 +251,96 @@ export function createWebServer(opts: WebServerOptions): Server {
     if (path === '/tokens') {
       // Three flat reads, grouped in memory. The dataset is one row per
       // purchase for the tokens tracked so far, which is small enough to hand
-      // to the browser whole -- and doing so is what lets the collapsed row's
-      // totals be summed from exactly the rows the expanded view renders.
-      const [toks, buys, tags, wins, prices] = await Promise.all([
+      // Aggregates, not rows: the table shows per-wallet totals, and a wallet's
+      // individual transactions are fetched on demand when its row expands.
+      const [toks, aggs, legend, tags, wins, prices] = await Promise.all([
         pool.query(`select mint, chain, ticker, name, decimals, charted_pair
                       from tokens order by chain, ticker`),
         /*
-         * Every event, from wallet_transactions. There is no window_tag column
-         * any more -- cohort membership lives in wallet_tags, and which window a
-         * transaction fell in is derived here from its own block_time against
-         * the commissioned bounds. That derivation was checked against all
-         * 11,992 migrated rows and reproduced every stored tag exactly, with no
-         * row outside a window and none inside two.
+         * WALLET AGGREGATES, NOT RAW ROWS.
          *
-         * NOTHING HERE TOUCHES ADDRESS CASE. The rows are returned as the chain
-         * gave them: base58 for Solana, hex for EVM.
+         * Sending every transaction produced a 69.3 MB page at 191,728 rows.
+         * These are the figures the table renders; a wallet's transactions come
+         * from /api/token-txs when its row is expanded.
+         *
+         * usd and tokPriced deliberately sum only rows that HAVE a usd amount:
+         * an unpriced row must leave both sides of the average-cost division,
+         * or real dollars get divided by tokens those dollars did not buy.
          */
-        pool.query(`select w.token as mint, w.wallet, w.tx_hash as signature, w.pool,
-                           w.block_time, w.block_number, w.token_amount,
-                           w.usd_amount, w.price_usd, w.side, w.counterparty,
-                           (select tw.tag from token_windows tw
-                             where tw.mint = w.token
-                               and w.block_time >= tw.window_start
-                               and w.block_time <= tw.window_end
-                             order by tw.window_start limit 1) as window_tag
+        pool.query(`select token as mint, wallet,
+                           count(*)::int                                              as n,
+                           sum(token_amount)                                          as tok,
+                           coalesce(sum(usd_amount), 0)                               as usd,
+                           count(*) filter (where usd_amount is not null)::int        as priced,
+                           count(*) filter (where usd_amount is null)::int            as unpriced,
+                           coalesce(sum(token_amount) filter (where usd_amount is not null), 0) as tok_priced,
+                           min(block_time)                                            as first_at,
+                           max(block_time)                                            as last_at
+                      from wallet_transactions
+                     group by token, wallet
+                     order by token, wallet`),
+        /*
+         * Legend counts, per commissioned window, computed here rather than in
+         * the browser now that the browser no longer has the rows. Membership is
+         * by block_time inside the window's own bounds.
+         */
+        pool.query(`select w.token as mint, tw.tag,
+                           count(distinct w.wallet)::int as wallets,
+                           count(*)::int                 as buys
                       from wallet_transactions w
-                     order by w.token, w.wallet, w.block_time`),
+                      join token_windows tw
+                        on tw.mint = w.token
+                       and w.block_time >= tw.window_start
+                       and w.block_time <= tw.window_end
+                     group by 1,2`),
         pool.query(`select mint, wallet, tag, source from wallet_tags
                      order by mint, wallet, tag`),
-        // The windows as COMMISSIONED. Not derived from the purchases: the
-        // first and last buy inside a window are not the window.
+        // The windows as COMMISSIONED. Not derived from the transactions: the
+        // first and last trade inside a window are not the window.
         pool.query(`select mint, tag, window_start, window_end, label
                       from token_windows order by mint, window_start`),
         /*
-         * THE LATEST PRICE PER TOKEN, READ ONCE FOR THE WHOLE RENDER.
-         *
-         * distinct on takes the newest row per mint in a single pass. The
-         * header and every Change cell are then computed from this one value,
-         * so the percentage in a row always reconciles against the price
-         * printed above the table -- reading the price separately per consumer
-         * is the paired-baseline defect in FAILURE_MODES section 8.
-         *
-         * A token with no row here is unpriced, and stays null all the way to
-         * the page. Nothing substitutes a zero.
+         * The latest price per token, read once for the whole render, so the
+         * header and every Change cell derive from one value.
          */
         pool.query(`select distinct on (mint) mint, price_usd, pool, source, observed_at
                       from token_prices order by mint, observed_at desc`),
       ]);
 
       const byToken = new Map<string, Map<string, WalletRow>>();
+      const blankAgg = () => ({ n: 0, tok: 0, usd: 0, priced: 0, unpriced: 0,
+                                tokPriced: 0, first: null, last: null });
       const ensure = (mint: string, wallet: string): WalletRow => {
         let m = byToken.get(mint);
         if (!m) { m = new Map(); byToken.set(mint, m); }
         let w = m.get(wallet);
-        if (!w) { w = { wallet, tags: [], purchases: [] }; m.set(wallet, w); }
+        if (!w) { w = { wallet, tags: [], a: blankAgg() }; m.set(wallet, w); }
         return w;
       };
       for (const r of tags.rows as Record<string, unknown>[]) {
         ensure(String(r.mint), String(r.wallet)).tags.push(
           { tag: String(r.tag), source: String(r.source) });
       }
-      for (const r of buys.rows as Record<string, unknown>[]) {
-        ensure(String(r.mint), String(r.wallet)).purchases.push({
-          signature: String(r.signature),
-          pool: String(r.pool),
-          blockTime: (r.block_time as Date).toISOString(),
-          tokenAmount: Number(r.token_amount),
-          // NULL STAYS NULL. Number(null) is 0, which would render a measured
-          // zero where there was no measurement at all.
-          usdAmount: r.usd_amount === null ? null : Number(r.usd_amount),
-          priceUsd: r.price_usd === null ? null : Number(r.price_usd),
-          // A transaction outside every commissioned window has no tag. That is
-          // a real state on a token collected over its whole life, not a defect,
-          // and it must not be rendered as belonging to some window.
-          windowTag: r.window_tag === null ? null : String(r.window_tag),
-          side: asSide(r.side),
-          counterparty: r.counterparty === null ? null : String(r.counterparty),
-          blockNumber: r.block_number === null ? null : String(r.block_number),
-        });
+      for (const r of aggs.rows as Record<string, unknown>[]) {
+        const w = ensure(String(r.mint), String(r.wallet));
+        w.a = {
+          n: Number(r.n),
+          tok: Number(r.tok),
+          usd: Number(r.usd),
+          priced: Number(r.priced),
+          unpriced: Number(r.unpriced),
+          tokPriced: Number(r.tok_priced),
+          first: r.first_at === null ? null : (r.first_at as Date).toISOString(),
+          last: r.last_at === null ? null : (r.last_at as Date).toISOString(),
+        };
+      }
+
+      const legendByMint = new Map<string, { tag: string; wallets: number; buys: number }[]>();
+      for (const r of legend.rows as Record<string, unknown>[]) {
+        const m = String(r.mint);
+        const list = legendByMint.get(m) ?? [];
+        list.push({ tag: String(r.tag), wallets: Number(r.wallets), buys: Number(r.buys) });
+        legendByMint.set(m, list);
       }
 
       const winsByMint = new Map<string, WindowRow[]>();
@@ -324,6 +377,7 @@ export function createWebServer(opts: WebServerOptions): Server {
           chartedPair: r.charted_pair === null ? null : String(r.charted_pair),
           price: priceByMint.get(mint) ?? null,
           windows: winsByMint.get(mint) ?? [],
+          legend: legendByMint.get(mint) ?? [],
           wallets: [...(byToken.get(mint)?.values() ?? [])],
         };
         const chain = String(r.chain);
@@ -337,7 +391,8 @@ export function createWebServer(opts: WebServerOptions): Server {
       return;
     }
 
-    sendJson(res, 404, { error: 'not found', routes: ['/', '/tokens', '/health', '/api/monitors'] });
+    sendJson(res, 404, { error: 'not found',
+      routes: ['/', '/tokens', '/health', '/api/monitors', '/api/token-txs'] });
   };
 
   return createServer((req, res) => {

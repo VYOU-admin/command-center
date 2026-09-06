@@ -37,10 +37,35 @@ export interface PurchaseRow {
   counterparty: string | null;
 }
 
+/**
+ * WALLET AGGREGATES, COMPUTED IN SQL -- the page no longer carries raw rows.
+ *
+ * Embedding every transaction inline was fine at 12,000 rows and produced a
+ * 69.3 MB page at 191,728. The browser had to parse all of it to render the
+ * first hundred wallets. These aggregates are what the table actually shows;
+ * a wallet's individual transactions are fetched from /api/token-txs when its
+ * row is expanded, so the payload scales with wallets rather than trades.
+ *
+ * The totals are therefore computed by the database rather than summed from the
+ * rows the expansion renders. That trade is deliberate and worth naming: the
+ * previous arrangement guaranteed the two agreed because they came from one
+ * array. The expansion now shows a count so the two can still be compared.
+ */
+export interface WalletAgg {
+  n: number;
+  tok: number;
+  usd: number;
+  priced: number;
+  unpriced: number;
+  tokPriced: number;
+  first: string | null;
+  last: string | null;
+}
+
 export interface WalletRow {
   wallet: string;
   tags: { tag: string; source: string }[];
-  purchases: PurchaseRow[];
+  a: WalletAgg;
 }
 
 export interface WindowRow {
@@ -74,6 +99,8 @@ export interface TokenGroup {
   price: TokenPrice | null;
   /** The windows as commissioned, ordered by start. Never derived from purchases. */
   windows: WindowRow[];
+  /** Per-window wallet and transaction counts, computed in SQL for the legend. */
+  legend: { tag: string; wallets: number; buys: number }[];
   wallets: WalletRow[];
 }
 
@@ -155,6 +182,10 @@ export function renderTokensPage(args: {
     font-family:ui-monospace,Menlo,monospace}
   .addr{font-family:ui-monospace,Menlo,monospace;font-size:12px}
   .unk{color:var(--warn);font-style:italic}
+  .pager{display:flex;gap:8px;align-items:center;padding:10px 2px;flex-wrap:wrap}
+  .pager button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px}
+  .pager button[disabled]{opacity:.4;cursor:default}
   .up{color:#3fb950;font-variant-numeric:tabular-nums}
   .down{color:#f85149;font-variant-numeric:tabular-nums}
   .part{color:var(--faint);font-size:11px}
@@ -215,7 +246,37 @@ function fmtUsd(v){
   if (v > 0 && v < 0.005) return '&lt;$0.01';
   return '$' + fmtNum(v, 2);
 }
-const SOLSCAN_ACCT = 'https://solscan.io/account/';
+/*
+ * EXPLORER AND CHART LINKS ARE PER CHAIN, NOT GLOBAL.
+ *
+ * Every link here used to be hardcoded to Solana. On an EVM chain that produces
+ * a Solscan URL for a hex address, which resolves to nothing and reports no
+ * error -- a dead link that looks like a working one, which is the same shape of
+ * failure as a filter that matches nothing.
+ *
+ * A chain absent from this table gets NO link rather than a guessed one. An
+ * address rendered as plain text is honest; an address linked to the wrong
+ * explorer is not.
+ */
+var EXPLORERS = {
+  solana: {
+    account: 'https://solscan.io/account/',
+    tx:      'https://solscan.io/tx/',
+    chart:   'https://dexscreener.com/solana/'
+  },
+  robinhood: {
+    account: 'https://robinhoodchain.blockscout.com/address/',
+    tx:      'https://robinhoodchain.blockscout.com/tx/',
+    chart:   'https://dexscreener.com/robinhood/'
+  }
+};
+function explorer(chain){ return EXPLORERS[chain] || null; }
+/** Link when the chain is known, plain text when it is not. Never a wrong link. */
+function extLink(chain, kind, value, text){
+  const e = explorer(chain);
+  if (!e || !e[kind]) return text;
+  return '<a href="' + e[kind] + value + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+}
 function shortAddr(a){ return a.length <= 14 ? a : a.slice(0,6) + '…' + a.slice(-6); }
 function fmtTime(iso){ return iso.replace('T',' ').slice(0,19) + 'Z'; }
 
@@ -228,26 +289,12 @@ function toast(msg, isErr){
 
 // AGGREGATES ARE SUMS OVER THE SAME ARRAY THE DETAIL ROWS RENDER FROM.
 function agg(w){
-  let tok = 0, usd = 0, priced = 0, unpriced = 0, first = null, last = null;
-  // TOKENS ON PRICED ROWS ONLY, tracked apart from the total. Average cost
-  // divides these two, and an unpriced row must leave BOTH sides -- counting
-  // its tokens while its USD is absent would divide real dollars by more
-  // tokens than those dollars bought, understating every such wallet's cost
-  // basis. That is the paired-baseline rule in FAILURE_MODES section 8.
-  let tokPriced = 0;
-  for (const p of w.purchases){
-    tok += p.tokenAmount;
-    if (p.usdAmount === null || p.usdAmount === undefined) { unpriced++; }
-    else { usd += p.usdAmount; priced++; tokPriced += p.tokenAmount; }
-    if (first === null || p.blockTime < first) first = p.blockTime;
-    if (last === null || p.blockTime > last) last = p.blockTime;
-  }
-  // Null, never 0. A wallet with no priced row has an UNKNOWN cost basis, and
-  // rendering that as $0.00 would claim it bought for nothing.
-  const avg = (priced > 0 && tokPriced > 0) ? (usd / tokPriced) : null;
-  return {n: w.purchases.length, tok: tok, usd: usd, priced: priced,
-          unpriced: unpriced, first: first, last: last,
-          tokPriced: tokPriced, avg: avg};
+  // Precomputed in SQL. avg is null, never 0: a wallet with no priced row has
+  // an UNKNOWN cost basis, and $0.00 would claim it bought for nothing.
+  const a = w.a;
+  const avg = (a.priced > 0 && a.tokPriced > 0) ? (a.usd / a.tokPriced) : null;
+  return {n: a.n, tok: a.tok, usd: a.usd, priced: a.priced, unpriced: a.unpriced,
+          tokPriced: a.tokPriced, first: a.first, last: a.last, avg: avg};
 }
 
 // Percent change from what the wallet paid on average to what the token is
@@ -259,7 +306,10 @@ function changePct(avg, price){
   return (price - avg) / avg * 100;
 }
 
-let state = {chain: 0, token: 0, sort: 'usd', dir: -1, open: {}, f: {}};
+let state = {chain: 0, token: 0, sort: 'usd', dir: -1, open: {}, f: {}, page: 0};
+
+/** The chain of whatever is on screen, for link building. */
+function chainOf(){ const c = DATA[state.chain]; return c ? c.chain : ''; }
 
 function currentToken(){
   const c = DATA[state.chain];
@@ -280,7 +330,7 @@ function renderChainTabs(){
   }).join('');
   Array.from($('chainTabs').children).forEach(function(el){
     el.onclick = function(){
-      state.chain = +el.dataset.i; state.token = 0; state.open = {}; state.f = {}; renderAll(); };
+      state.chain = +el.dataset.i; state.token = 0; state.open = {}; state.f = {}; state.page = 0; TXCACHE = {}; renderAll(); };
   });
 }
 function renderTokenTabs(){
@@ -302,24 +352,16 @@ function renderTokenTabs(){
 function renderHeader(){
   const t = currentToken();
   const chain = DATA[state.chain].chain;
-  const ds = 'https://dexscreener.com/solana/' + (t.chartedPair || t.mint);
+  const e = explorer(chain);
+  const ds = e && e.chart ? e.chart + (t.chartedPair || t.mint) : null;
 
   // THE LEGEND COUNTS ARE COMPUTED FROM THE SAME ARRAY THE TABLE RENDERS FROM.
   // Reading them from a stored aggregate instead would let the legend and the
   // filtered table disagree while both looked authoritative.
+  // COUNTED IN SQL, not from the rows in the browser -- the browser no longer
+  // holds them. Membership is by block_time inside each window's own bounds.
   const perTag = {};
-  for (const w of t.wallets){
-    const seen = {};
-    for (const p of w.purchases){
-      // A transaction outside every commissioned window has no tag. On a token
-      // collected over its whole life that is normal and must not become a
-      // "null" bucket in the legend.
-      if (p.windowTag === null || p.windowTag === undefined) continue;
-      if (!perTag[p.windowTag]) perTag[p.windowTag] = {buys: 0, wallets: 0};
-      perTag[p.windowTag].buys++;
-      if (!seen[p.windowTag]){ seen[p.windowTag] = 1; perTag[p.windowTag].wallets++; }
-    }
-  }
+  for (const L of (t.legend || [])) perTag[L.tag] = {buys: L.buys, wallets: L.wallets};
   const wins = t.windows || [];
   const rows = wins.map(function(w){
     const c = perTag[w.tag] || {buys: 0, wallets: 0};
@@ -347,7 +389,9 @@ function renderHeader(){
         + '<dt>chain</dt><dd>' + chain + '</dd>'
         + '<dt>pair</dt><dd>' + (t.chartedPair || '—') + '</dd>'
         + '<dt>mint</dt><dd id="mintVal">' + t.mint + copyBtn(t.mint, 'mint') + '</dd>'
-        + '<dt>chart</dt><dd><a href="' + ds + '" target="_blank" rel="noopener noreferrer">DexScreener</a></dd>'
+        + '<dt>chart</dt><dd>' + (ds
+            ? '<a href="' + ds + '" target="_blank" rel="noopener noreferrer">DexScreener</a>'
+            : '<span class="unk">no chart link for chain ' + chain + '</span>') + '</dd>'
         + '<dt>price</dt><dd>' + priceCell(t) + '</dd>'
       + '</dl>'
     + '</div>'
@@ -544,115 +588,137 @@ function tagCell(w){
   }).join('') + '<span class="addtag" data-act="add" data-w="' + w.wallet + '">+</span>';
 }
 
+/*
+ * PAGINATION. 100 wallets per page.
+ *
+ * FILTERING AND SORTING RUN OVER THE WHOLE SET, NOT THE PAGE. rows() applies
+ * every filter and the sort to all wallets and returns the full ordered list;
+ * only the slice below is turned into DOM. A filter that searched just the
+ * visible page would be worse than no filter -- it would answer a different
+ * question than the one asked, and look like it had answered.
+ */
+var PAGE_SIZE = 100;
+
 function renderTable(){
-  const list = rows();
+  const list = rows();                 // full filtered + sorted set
   const t = currentToken();
   const totalBuys = list.reduce(function(s, r){ return s + r.a.n; }, 0);
-  $('count').textContent = list.length + ' of ' + t.wallets.length + ' wallets · '
-    + totalBuys + ' purchases shown';
+  const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  if (state.page >= pages) state.page = pages - 1;
+  if (state.page < 0) state.page = 0;
+  const from = state.page * PAGE_SIZE;
+  const slice = list.slice(from, from + PAGE_SIZE);
+  // The counts describe the FILTERED SET, not the page.
+  $('count').textContent = list.length + ' of ' + t.wallets.length + ' wallets \u00b7 '
+    + totalBuys + ' transactions' + (pages > 1
+      ? '  \u00b7  showing ' + (list.length ? from + 1 : 0) + '\u2013'
+        + Math.min(from + PAGE_SIZE, list.length) + ' (page ' + (state.page + 1) + ' of ' + pages + ')'
+      : '');
   const body = $('body');
-  if (list.length === 0){ body.innerHTML = '<tr><td colspan="10" class="empty">No wallets match these filters.</td></tr>'; return; }
+  if (list.length === 0){ body.innerHTML = '<tr><td colspan="10" class="empty">No wallets match these filters.</td></tr>'; renderPager(pages); return; }
   let html = '';
-  for (const r of list){
+  for (const r of slice){
     const w = r.w, a = r.a;
     const isOpen = !!state.open[w.wallet];
     html += '<tr class="w" data-w="' + w.wallet + '">'
-      + '<td><span class="caret">' + (isOpen ? '▾' : '▸') + '</span></td>'
+      + '<td><span class="caret">' + (isOpen ? '\u25be' : '\u25b8') + '</span></td>'
       + '<td>' + tagCell(w) + '</td>'
-      + '<td class="addr"><a href="' + SOLSCAN_ACCT + w.wallet
-        + '" target="_blank" rel="noopener noreferrer">' + shortAddr(w.wallet) + '</a>'
+      + '<td class="addr">' + extLink(chainOf(), 'account', w.wallet, shortAddr(w.wallet))
         + copyBtn(w.wallet, 'wallet') + '</td>'
       + '<td class="num">' + a.n + '</td>'
       + '<td class="num">' + fmtNum(a.tok, 4) + '</td>'
       + '<td class="num">' + usdCell(a) + '</td>'
       + '<td class="num">' + avgCell(a) + '</td>'
       + '<td class="num">' + chgCell(a) + '</td>'
-      + '<td class="num">' + (a.first ? fmtTime(a.first) : '—') + '</td>'
-      + '<td class="num">' + (a.last ? fmtTime(a.last) : '—') + '</td>'
+      + '<td class="num">' + (a.first ? fmtTime(a.first) : '\u2014') + '</td>'
+      + '<td class="num">' + (a.last ? fmtTime(a.last) : '\u2014') + '</td>'
       + '</tr>';
     if (isOpen){
-      const ps = w.purchases.slice().sort(function(x, y){ return x.blockTime < y.blockTime ? -1 : 1; });
-      let sumTok = 0, sumUsd = 0, nUnp = 0;
-      let inner = '<table><thead><tr><th>time</th><th>window</th><th class="num">tokens</th>'
-        + '<th class="num">usd</th><th class="num">price</th><th>pool</th><th>signature</th></tr></thead><tbody>';
-      for (const p of ps){
-        sumTok += p.tokenAmount;
-        if (p.usdAmount === null || p.usdAmount === undefined) nUnp++; else sumUsd += p.usdAmount;
-        inner += '<tr><td class="num">' + fmtTime(p.blockTime) + '</td>'
-          + '<td>' + (p.windowTag ? '<span class="chip">' + p.windowTag + '</span>'
-              : '<span class="lab">outside windows</span>') + '</td>'
-          + '<td class="num">' + fmtNum(p.tokenAmount, 6) + '</td>'
-          + '<td class="num">' + (p.usdAmount === null || p.usdAmount === undefined
-              ? '<span class="unk">unknown</span>' : fmtUsd(p.usdAmount)) + '</td>'
-          + '<td class="num">' + (p.priceUsd === null || p.priceUsd === undefined
-              ? '<span class="unk">unknown</span>' : '$' + fmtNum(p.priceUsd, 8)) + '</td>'
-          + '<td class="addr">' + shortAddr(p.pool) + '</td>'
-          + '<td class="addr"><a href="https://solscan.io/tx/' + p.signature
-          + '" target="_blank" rel="noopener">' + shortAddr(p.signature) + '</a></td></tr>';
-      }
-      inner += '</tbody></table>';
-      // RECONCILIATION, SHOWN NOT ASSERTED: the collapsed row's figures are
-      // re-summed here from the rows actually rendered above.
-      const okTok = Math.abs(sumTok - a.tok) < 1e-9;
-      const okUsd = Math.abs(sumUsd - a.usd) < 1e-6;
-      const okN = ps.length === a.n;
-      const good = okTok && okUsd && okN;
-      // "$0.00 priced" for a wallet where NOTHING was priced renders a measured
-      // zero where there is no measurement — the same defect as a $0.00 cell,
-      // just in the summary line instead of the table.
-      const pricedTxt = (ps.length - nUnp) === 0
-        ? 'none priced'
-        : fmtUsd(sumUsd) + ' priced';
-      const rec = '<div class="rec' + (good ? '' : ' bad') + '">'
-        + (good
-          ? 'reconciles: ' + ps.length + ' purchases, ' + fmtNum(sumTok, 4) + ' tokens, '
-            + pricedTxt + (nUnp ? ', ' + nUnp + ' unpriced' : '')
-          : 'MISMATCH between the summary row and these purchases')
-        + '</div>';
-      html += '<tr class="exp"><td colspan="8">' + rec + inner + '</td></tr>';
+      const cached = TXCACHE[w.wallet];
+      html += '<tr class="exp"><td colspan="10">' + (cached ? renderTxs(w, cached)
+        : '<span class="lab">loading transactions\u2026</span>') + '</td></tr>';
     }
   }
   body.innerHTML = html;
+  renderPager(pages);
   Array.from(body.querySelectorAll('tr.w')).forEach(function(tr){
     tr.onclick = function(ev){
-      // clicking a tag control, a copy button or a link must not toggle the row
-      if (ev.target.closest && ev.target.closest('[data-act],[data-copy],a')) return;
-      const w = tr.dataset.w;
-      state.open[w] = !state.open[w];
+      if (ev.target.closest('[data-copy]') || ev.target.closest('a') || ev.target.closest('[data-act]')) return;
+      const wal = tr.dataset.w;
+      state.open[wal] = !state.open[wal];
+      if (state.open[wal] && !TXCACHE[wal]) loadTxs(wal);
       renderTable();
-    };
-  });
-  Array.from(body.querySelectorAll('[data-act]')).forEach(function(el){
-    el.onclick = function(ev){
-      ev.stopPropagation();
-      if (el.dataset.act === 'del') editTag(el.dataset.w, el.dataset.t, 'remove');
-      else {
-        const v = prompt('Tag for ' + shortAddr(el.dataset.w));
-        if (v && v.trim()) editTag(el.dataset.w, v.trim(), 'add');
-      }
     };
   });
 }
 
-function editTag(wallet, tag, action){
+var TXCACHE = {};
+function loadTxs(wallet){
   const t = currentToken();
-  fetch('/api/token-wallet-tag', {
-    method: 'POST',
-    headers: {'content-type': 'application/json'},
-    body: JSON.stringify({mint: t.mint, wallet: wallet, tag: tag, action: action})
-  }).then(function(r){ return r.json().then(function(j){ return {ok: r.ok, j: j}; }); })
-    .then(function(res){
-      if (!res.ok){ toast(res.j.error || 'write failed', true); return; }
-      const wr = t.wallets.filter(function(x){ return x.wallet === wallet; })[0];
-      if (wr){
-        if (action === 'remove') wr.tags = wr.tags.filter(function(x){ return x.tag !== tag; });
-        else if (!wr.tags.some(function(x){ return x.tag === tag; })) wr.tags.push({tag: tag, source: 'manual'});
-        else wr.tags = wr.tags.map(function(x){ return x.tag === tag ? {tag: tag, source: 'manual'} : x; });
-      }
-      renderFilters(); renderTable();
-      toast(action === 'add' ? 'tag added' : 'tag removed');
-    })
-    .catch(function(e){ toast(String(e), true); });
+  fetch('/api/token-txs?mint=' + encodeURIComponent(t.mint) + '&wallet=' + encodeURIComponent(wallet))
+    .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(j){ TXCACHE[wallet] = j.txs; renderTable(); })
+    // A failed fetch says so. It never renders as "this wallet has no
+    // transactions", which is a different and much stronger claim.
+    .catch(function(e){ TXCACHE[wallet] = {error: String(e.message)}; renderTable(); });
+}
+
+function renderTxs(w, txs){
+  if (txs && txs.error) return '<span class="unk">could not load transactions: ' + txs.error + '</span>';
+  if (!txs.length) return '<span class="lab">no transactions stored for this wallet</span>';
+  let sumTok = 0, sumUsd = 0, nUnp = 0;
+  let inner = '<table><thead><tr><th>time</th><th>side</th><th>window</th><th class="num">tokens</th>'
+    + '<th class="num">usd</th><th class="num">price</th><th>pool</th><th>counterparty</th><th>tx</th></tr></thead><tbody>';
+  for (const p of txs){
+    sumTok += p.tokenAmount;
+    if (p.usdAmount === null || p.usdAmount === undefined) nUnp++; else sumUsd += p.usdAmount;
+    inner += '<tr><td class="num">' + fmtTime(p.blockTime) + '</td>'
+      + '<td><span class="chip">' + p.side + '</span></td>'
+      + '<td>' + (p.windowTag ? '<span class="chip">' + p.windowTag + '</span>'
+          : '<span class="lab">outside windows</span>') + '</td>'
+      + '<td class="num">' + fmtNum(p.tokenAmount, 6) + '</td>'
+      + '<td class="num">' + (p.usdAmount === null || p.usdAmount === undefined
+          ? '<span class="unk">unknown</span>' : fmtUsd(p.usdAmount)) + '</td>'
+      + '<td class="num">' + (p.priceUsd === null || p.priceUsd === undefined
+          ? '<span class="unk">unknown</span>' : '$' + fmtNum(p.priceUsd, 8)) + '</td>'
+      + '<td class="addr">' + (p.pool ? shortAddr(p.pool) : '\u2014') + '</td>'
+      + '<td class="addr">' + (p.counterparty
+          ? extLink(chainOf(), 'account', p.counterparty, shortAddr(p.counterparty))
+            + copyBtn(p.counterparty, 'counterparty')
+          : '\u2014') + '</td>'
+      + '<td class="addr">' + extLink(chainOf(), 'tx', p.signature, shortAddr(p.signature)) + '</td></tr>';
+  }
+  inner += '</tbody></table>';
+  // RECONCILIATION, SHOWN NOT ASSERTED. The collapsed row's totals come from
+  // SQL and these rows come from the API, so the two are independent and worth
+  // comparing rather than assuming they agree.
+  const a = agg(w);
+  const okN = txs.length === a.n, okT = Math.abs(sumTok - a.tok) < 1e-6;
+  inner += '<div class="mini">' + txs.length + ' transactions, ' + fmtNum(sumTok, 4) + ' tokens, '
+    + fmtUsd(sumUsd) + (nUnp ? ' (' + nUnp + ' unpriced)' : '')
+    + '  \u00b7  collapsed row says ' + a.n + ' / ' + fmtNum(a.tok, 4)
+    + '  \u00b7  ' + (okN && okT ? 'reconciles' : '<span class="unk">DOES NOT RECONCILE</span>') + '</div>';
+  return inner;
+}
+
+function renderPager(pages){
+  let el = $('pager');
+  if (!el){
+    el = document.createElement('div');
+    el.id = 'pager'; el.className = 'pager';
+    const tbl = $('body').closest('table');
+    tbl.parentNode.insertBefore(el, tbl.nextSibling);
+  }
+  if (pages <= 1){ el.innerHTML = ''; return; }
+  const p = state.page;
+  el.innerHTML = '<button data-p="0"' + (p === 0 ? ' disabled' : '') + '>\u00ab first</button>'
+    + '<button data-p="' + (p - 1) + '"' + (p === 0 ? ' disabled' : '') + '>\u2039 prev</button>'
+    + '<span class="lab">page ' + (p + 1) + ' of ' + pages + '</span>'
+    + '<button data-p="' + (p + 1) + '"' + (p >= pages - 1 ? ' disabled' : '') + '>next \u203a</button>'
+    + '<button data-p="' + (pages - 1) + '"' + (p >= pages - 1 ? ' disabled' : '') + '>last \u00bb</button>';
+  Array.from(el.querySelectorAll('button')).forEach(function(b){
+    b.onclick = function(){ state.page = +b.dataset.p; renderTable(); };
+  });
 }
 
 function renderAll(){ renderChainTabs(); renderTokenTabs(); renderHeader(); renderFilters(); renderHead(); renderTable(); }
