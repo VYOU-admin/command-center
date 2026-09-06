@@ -182,18 +182,37 @@ async function main(): Promise<void> {
     });
   }
 
-  /* Transfer exposure, reported beside every PnL figure. */
+  /*
+   * Transfer exposure, reported beside every PnL figure.
+   *
+   * A count of zero here means no transfer rows were COLLECTED, not that no
+   * transfers happened. NEGATIVE POSITIONS ARE THE EVIDENCE: a wallet that sold
+   * more than it bought must have acquired the difference some other way, and
+   * with transfers uncollected that acquisition is invisible while its proceeds
+   * are not. Those wallets' PnL is overstated by the value of tokens they never
+   * paid for, and the count below is the honest measure of how much of the
+   * cohort that touches.
+   */
   const withTransfers = [...facts.values()].filter((f) => f.transferInShare > 0);
+  const negative = [...facts.values()].filter((f) => f.position < -1e-9);
   log.info('transfer exposure of the PnL figures', {
+    transfer_rows_collected: trades.filter(
+      (t) => t.side === 'transfer_in' || t.side === 'transfer_out',
+    ).length,
     wallets_with_any_transfer_in: withTransfers.length,
-    share_of_cohort: (withTransfers.length / cohort.length).toFixed(4),
     max_transfer_in_share: withTransfers.length
       ? Math.max(...withTransfers.map((f) => f.transferInShare))
       : 0,
+    wallets_with_a_negative_position: negative.length,
+    share_of_cohort_with_negative_position: (negative.length / cohort.length).toFixed(4),
+    most_negative_position: negative.length
+      ? Math.min(...negative.map((f) => f.position))
+      : 0,
     note:
-      'transfer_in is a zero-cost acquisition and inflates PnL; transfer_out ' +
-      'removes basis without realising a loss. A count of zero here means no ' +
-      'transfer rows were COLLECTED, not that no transfers happened.',
+      'A negative position means the wallet sold more than it bought, so it ' +
+      'acquired the difference off-market. With no transfer rows collected that ' +
+      'acquisition is invisible while its proceeds are counted, which overstates ' +
+      "those wallets' PnL.",
   });
 
   const ranked = scored.sort((a, b) => b.score! - a.score!).slice(0, top);
