@@ -30,6 +30,7 @@ export interface SchedulerOptions {
   discord: DiscordSink;
   tickMs: number;
   platform: PlatformInfo;
+  configVars: ReadonlyMap<string, string>;
 }
 
 export class Scheduler {
@@ -137,6 +138,7 @@ export class Scheduler {
         signal: controller.signal,
         db: this.opts.pool,
         platform: this.opts.platform,
+        configVars: this.opts.configVars,
         queueAlert: (alert, channel) => pendingAlerts.push({ alert, channel }),
       };
 

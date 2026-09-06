@@ -62,6 +62,13 @@ export interface AdapterContext {
    */
   platform: PlatformInfo;
   /**
+   * Allow-listed secrets from the environment, for adapters that call a paid
+   * endpoint. Deliberately NOT interpolated into monitor YAML: the registry
+   * persists a monitor's options into monitors.config, which is how an API key
+   * once ended up sitting in the database in plaintext.
+   */
+  configVars: ReadonlyMap<string, string>;
+  /**
    * Queue a Discord alert. Deliberately queued rather than sent: alerts are
    * raised inside the persist transaction but must not perform network I/O
    * while holding it open, so the scheduler flushes them after the commit.

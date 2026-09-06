@@ -1,0 +1,134 @@
+# Hourly incremental update of PONS cohort wallet rows.
+#
+# WHAT IT DOES. Advances one token's `wallet_transactions` rows from a cursor
+# toward the chain head, a bounded slice at a time. Everything it needs is in
+# Postgres, so a container replacement costs nothing but the time since the last
+# commit.
+#
+# WHY ALCHEMY AND NOT THE FREE PUBLIC RPC. Two measured reasons, both decisive:
+#
+#   1. The public RPC returns `blockTimestamp: "0x0"` on EVERY log -- checked
+#      across 708 of them. It is present and well-formed and entirely wrong, so
+#      trusting it stamps every row 1970-01-01 with nothing raised. Alchemy
+#      populates the field correctly: 5,758 logs, 0 missing, 0 zero, 0
+#      non-monotonic, and an exact match against eth_getBlockByNumber on every
+#      block spot-checked. That single difference removes ~50 block fetches per
+#      run and is the bulk of the cost.
+#   2. The public RPC caps a query at 10,000 logs and needs 4,000ms between
+#      calls to avoid refusals, which turns an hour of blocks into a
+#      30-60 second sequential job. Alchemy answers the same hour in 8 calls.
+#
+# MEASURED COST. 430 CU on a typical hour, 714 on a busy one -- about $0.14 to
+# $0.23 a month for this token at $0.45 per million CU.
+#
+# THE CURSOR IS SEEDED, NOT STARTED AT THE HEAD. wallet_transactions ended at
+# block 54,935,280 and the chain head is far past it. Seeding at the head would
+# skip that backlog permanently and silently.
+
+id: token-updates
+name: PONS Cohort Updates
+source: token-updates
+
+# DISABLED UNTIL THE BACKLOG RUN IS REVIEWED. The adapter and its tables deploy
+# with the service, but the scheduler must not start running this hourly before
+# the backlog numbers have been checked. Step 3 flips this to true.
+enabled: false
+
+schedule: 1h
+
+alerts:
+  channel: system
+  # Red after three consecutive failures, as designed. Every failure alert goes
+  # to the system channel regardless of this block.
+  discord_on_consecutive_failures: 3
+
+options:
+  chain: robinhood
+  # Checksummed exactly as the chain returns it and as `tokens.mint` and
+  # `wallet_tags.mint` store it. Lowercasing it here would match no cohort.
+  token: "0x39dBED3a2bd333467115dE45665cC57F813C4571"
+
+  # Cohort only. The 396 PONS-P1-T hop wallets are deliberately NOT here: they
+  # are a separate, un-approved collection.
+  cohort_tags:
+    - PONS-P1
+
+  # The highest block already covered by wallet_transactions. The first runs
+  # work through the ~875,000-block backlog between here and the head.
+  seed_cursor_block: 54935280
+
+  rpc:
+    url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+    # Read from the process environment, never interpolated into this file --
+    # monitor options are persisted into monitors.config, and a key in YAML is
+    # a key in the database.
+    key_var: ALCHEMY_API_KEY
+    request_timeout_ms: 60000
+
+    # Blocks left unread behind the head so a tip reorg cannot strand rows for
+    # blocks that later change. ~20 seconds at 0.1s blocks. This chain's actual
+    # reorg depth has not been measured; the figure is a margin, not a finding.
+    lag_blocks: 200
+
+    # One hour is 35,622 blocks, measured. 40,000 leaves headroom so a late run
+    # catches up rather than falling permanently behind, and during the backlog
+    # each run takes a full slice.
+    max_blocks_per_run: 40000
+
+    # HARD CEILING PER RUN. A typical run spends 430 CU and a busy one 714, so
+    # this is roughly 7x headroom -- enough for heavy result-cap splitting, and
+    # far below anything that could quietly drain the month. The run stops and
+    # fails when it is reached, and says where it stopped.
+    cu_ceiling: 5000
+
+    # Starting span for a getLogs request. 36,000 blocks of PONS transfers is
+    # refused by Alchemy ("Log response size exceeded"); 18,000 returns 7,113
+    # logs and succeeds. The span halves from here on a size refusal.
+    log_span_blocks: 18000
+    # Below this, a size refusal is a livelock rather than something to retry.
+    min_log_span_blocks: 25
+
+  venues:
+    # Read from a pool's own factory() rather than recalled.
+    v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+    v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+  pricing:
+    # A pool is in scope only when the counter side is a recognised pricing
+    # asset. Everything else prices this token against another memecoin, or
+    # against a tokenised equity through an oracle nobody has verified.
+    assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+      - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+      - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+    usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    native_assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+      - "0x0000000000000000000000000000000000000000"
+
+    # 10,000 blocks is about 17 minutes here. The cursor always lands on one of
+    # these boundaries so no row is priced from a partially-seen bucket.
+    bucket_blocks: 10000
+    # A tick outside this multiple of its bucket's median is discarded.
+    tick_fence_multiple: 100
+    # A derived native price outside this multiple of the reference median is
+    # discarded. Across PONS's whole life this caught zero, which is the signal
+    # the derivation is sound.
+    native_fence_multiple: 10
+
+  floors:
+    # Raw integer units, applied per swap.
+    token_raw_units: 1
+    paid_raw_units: 1
+    # Whole tokens. THIS IS THE ONE THAT IS EASY TO OMIT: a USD-only floor let
+    # through a row of 1.7e-6 tokens carrying $980,393.99 of allocated USD.
+    token_amount: 0.001
+    # Applies ONLY to rows that have a USD value. A null-USD row is unpriced,
+    # not small, and is never dropped by this.
+    usd: 0.01
+
+  tables:
+    # Named for the first token loaded. Renaming them is a migration, not a
+    # config change, so the names are configured rather than assumed.
+    token_usd: pons_usd_prices
+    native_usd: native_usd_prices

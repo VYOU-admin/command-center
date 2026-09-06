@@ -332,3 +332,27 @@ of them would have been guessed correctly.
 Report the alternatives as measurements with their limits — throughput, span,
 availability — so the choice between paying and waiting is made on numbers. Free
 and slow is often the right answer for work that runs unattended.
+
+## 22. A field that is correct on one endpoint and silently zero on another
+
+`eth_getLogs` returns a `blockTimestamp` on every log on Robinhood Chain. On
+Alchemy it is the real block time: measured across 5,758 logs, **0 missing, 0
+equal to `0x0`, 0 non-monotonic**, and an exact match against
+`eth_getBlockByNumber` on every block spot-checked. On the **public RPC the same
+field is `0x0` on every log** — 708 of 708 in the sample, against a true
+`0x6a9d1a6c` for the same block.
+
+`0x0` is a well-formed hex timestamp. Nothing errors, nothing is absent, and the
+value parses cleanly to 1970-01-01. A job that read timestamps from logs and was
+pointed at the free endpoint — as a fallback, a cost saving, or a copied snippet
+— would stamp every row with the epoch and report success.
+
+This is the endpoint-specific form of the standing rule that an error path must
+never emit a plausible value. The defence is not to prefer one endpoint but to
+**refuse the value**: a timestamp that is absent or zero is a failed read and
+must throw, naming the endpoint as the likely cause. Two endpoints answering the
+same JSON-RPC method are not interchangeable just because both return HTTP 200
+and a well-formed body.
+
+The same shape should be assumed for any optional enrichment field — effective
+gas price, log `removed`, trace data — whenever an endpoint is swapped.
