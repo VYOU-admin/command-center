@@ -143,19 +143,39 @@ if (noInf) {
 }
 
 /* ---- sorting by the new column actually reorders ----------------------- */
+/*
+ * score is now the DEFAULT sort, so clicking its header toggles to ascending
+ * rather than setting descending. An earlier version of this check compared the
+ * top two rendered strings and passed because both rounded to the same 4dp --
+ * it verified nothing. This reads the underlying numbers, requires the column
+ * to be monotonic in one direction, and requires a second click to reverse it.
+ */
+const scoresNow = () =>
+  Array.from(doc.querySelectorAll('tr.w'))
+    .map((tr) => Number.parseFloat(tr.children[scoreIdx].textContent.trim()))
+    .filter((x) => Number.isFinite(x));
+
 const th = Array.from(doc.querySelectorAll('#head th')).find((x) => x.dataset.k === 'score');
 if (!th) fail('the score header cell has no data-k');
 else {
+  const before = scoresNow();
+  const desc = before.every((v, i) => i === 0 || before[i - 1] >= v);
+  console.log(`default order        ${desc ? 'descending' : 'NOT descending'} (${before[0]} .. ${before[before.length - 1]})`);
+  if (!desc) fail('the default score order is not descending');
+
   th.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 300));
-  const after = doc.querySelectorAll('tr.w');
-  const first = after[0] ? after[0].children[scoreIdx].textContent.trim() : '';
-  const second = after[1] ? after[1].children[scoreIdx].textContent.trim() : '';
-  const a = Number.parseFloat(first), b = Number.parseFloat(second);
-  console.log(`after sorting by score  top two = ${JSON.stringify([first, second])}`);
-  if (Number.isFinite(a) && Number.isFinite(b) && a < b) {
-    fail('sorting by score did not put the highest first');
-  }
+  await new Promise((r) => setTimeout(r, 400));
+  const asc = scoresNow();
+  const isAsc = asc.every((v, i) => i === 0 || asc[i - 1] <= v);
+  console.log(`after one click      ${isAsc ? 'ascending' : 'NOT ascending'} (${asc[0]} .. ${asc[asc.length - 1]})`);
+  if (!isAsc) fail('clicking the score header did not sort ascending');
+  if (asc[0] > before[0]) fail('the ascending top is above the descending top');
+
+  th.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 400));
+  const back = scoresNow();
+  console.log(`after second click   top = ${back[0]}`);
+  if (back[0] !== before[0]) fail('a second click did not restore descending order');
 }
 
 /* ---- expanding a row loads and renders the metric breakdown ------------ */

@@ -372,6 +372,84 @@ At this scale the page must not embed transaction rows: 191,728 rows produced a
 69.3 MB page. Wallet totals are computed in SQL and a wallet's transactions come
 from `/api/token-txs` on expansion — 4.22 MB, 0.33 s to parse and run.
 
+## Scoring and score-quality flags
+
+Scoring runs after the intake, over the cohort the window selected, and is
+`npm run score -- <chain> <token> --tag <TAG>`. It reads the database only. Two
+flags are **derived on every run** and stored in `wallet_scores.flags`, an array
+so a wallet can carry both. They are deliberately NOT in `wallet_tags`: those
+are cohort membership, these are statements about how far a score can be
+trusted, and mixing them forces every tag query to know which kind it is reading.
+
+### low-weight
+
+A wallet whose score rests on **less than 0.8 of the total weight**. Nulls drop
+out of the weighted sum and the remaining weights are renormalised, so a wallet
+missing most of its metrics is otherwise directly comparable to one missing
+none — and on PONS the **top-ranked wallet of 12,382 rested on 0.175 of the
+weight**, its 22 buys all unpriced and its rank coming from hold time alone.
+
+The threshold was chosen against the distribution rather than picked:
+
+```
+weight_used   wallets      what is missing
+1.000          12,296      nothing
+0.875              67      earliness only
+0.825              18      earliness and buy-size trend
+0.175               1      six of the eight metrics
+0.000             713      unscored entirely
+```
+
+It is bimodal, so 0.5 and 0.8 make the identical cut of 1 wallet; 0.9 would
+catch 86. **Re-derive this table for each token before accepting 0.8** — a token
+with a smoother distribution needs a different number, and the point of the
+flag is comparability, not the constant.
+
+### inflated-pnl
+
+A wallet whose **position is below -0.001 tokens**: it sold more than it bought,
+so it acquired the difference off-market and its PnL counts the sale but not the
+purchase. On PONS this is 2,088 wallets, 1,839 of them scored and 249 unscored
+sell-only wallets. It is applied whether or not the wallet is scored, because it
+is a fact about the wallet rather than about its score.
+
+**The floor is not zero, and it is not optional.** 589 PONS wallets are negative
+by less than a millionth of a token, the smallest by 3e-18 — one wei — which is
+rounding residue from proportional allocation, not a purchase. `-0.001` is the
+same materiality floor the row writer already applies to a token amount.
+
+**Compute the position in SQL, in `numeric`.** See FAILURE_MODES: the same count
+in JavaScript doubles gave 2,098 where numeric gives 2,682.
+
+### The flags clear themselves
+
+The array is REPLACED on every scoring run, never appended to, and the position
+sums include the transfer sides. Once transfer rows are collected for a token, a
+wallet that acquired off-market is no longer negative and the flag is simply not
+re-applied. Nothing has to be cleared by hand; the one-statement
+`array_remove(flags, 'inflated-pnl')` exists only for clearing it before a
+re-score.
+
+### Two things to watch on the next token
+
+**Pre-pump share may carry almost no information.** On PONS metric 5 is **zero
+for more than 75% of the cohort, with a maximum of exactly 1/3** — meaning no
+wallet bought inside the 48 hours before more than one of the three pump points.
+A maximum that lands exactly on 1/n_pumps is the signature of that. Check it per
+token before assuming the metric is doing work: if it repeats, the 5% weight is
+being spent on a metric that separates almost nobody, and it is a question about
+the metric rather than about the token.
+
+**86 scored PONS wallets have no buy row inside the window they were selected
+by** — 67 missing earliness only, 18 missing earliness and buy-size trend, 1
+missing six metrics. They are in the cohort because they RECEIVED the token from
+a pool inside the window, which is what cohort selection measures, but none of
+their buy rows land in it. This is an **open question about cohort construction,
+not a data-quality problem**: the transfer that qualified them is real. Either
+the swap behind it was on an out-of-scope pool, or it reached them through a
+path the row writer attributes elsewhere. Resolve it on a token where the
+numbers are small enough to trace individually.
+
 ## Failure modes seen
 
 ### DexScreener's listing read as the complete pool set

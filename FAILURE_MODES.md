@@ -387,3 +387,35 @@ pass. Zero results is a question, not an answer.
 (`ALCHEMY_API_KEY` is now a service variable as well, because the hourly
 `token-updates` monitor runs inside the container and cannot see a per-command
 variable. The lesson stands for the next secret.)
+
+## 24. The same count in floats and in numeric, differing by 28%
+
+A wallet's position is `bought - sold`, over token amounts carrying 18 decimals.
+Counted in JavaScript doubles it gave **2,101 wallets with a negative position**;
+counted in Postgres `numeric` it gave **2,682**. Reproducing the double-precision
+sum inside Postgres returned 2,098, which confirms the arithmetic rather than the
+query as the cause. The first figure had already been reported as fact.
+
+A double holds about 16 significant digits. A wallet that bought and sold
+7,000,000.123456789012345678 tokens nets to exactly zero in `numeric` and to
+something near ±1e-9 in a double, and the sign it lands on is arbitrary. 587
+wallets sat in that gap.
+
+The same rounding runs the other way. Of the 2,682 exact negatives, **589 are
+negative by less than a millionth of a token and the smallest by 3e-18 — one
+wei** — which is allocation residue, not an off-market purchase. A threshold of
+`< 0` would have flagged all of them; the materiality floor of `-0.001`, the
+same one the row writer already applies to a token amount, leaves 2,088.
+
+Two rules follow:
+
+**Compute counts and thresholds in SQL, in `numeric`.** Not in the application,
+and never in double precision, whenever the quantity carries more significant
+digits than a double holds. `sum(x) filter (where ...)` in Postgres is exact for
+`numeric` and it is also faster than pulling 182,202 rows into a process to add
+them up.
+
+**A materiality floor is part of the definition, not a refinement of it.**
+"Negative position" without one counts float residue as evidence of off-market
+acquisition. State the floor, say what it excludes, and reuse the floor the
+pipeline already applies elsewhere rather than inventing a second one.
