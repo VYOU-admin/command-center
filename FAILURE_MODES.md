@@ -356,3 +356,34 @@ and a well-formed body.
 
 The same shape should be assumed for any optional enrichment field — effective
 gas price, log `removed`, trace data — whenever an endpoint is swapped.
+
+## 23. A secret reported as wiped when it was never looked for correctly
+
+A probe on the Railway host printed `ALCHEMY_API_KEY MISSING`, and that was
+reported as the key having been destroyed by a redeploy. It had not. The key was
+in the project's local `.env` the whole time, and every earlier command had
+carried it explicitly:
+
+```
+set -a; . ./.env; set +a
+railway ssh -- "ALCHEMY_API_KEY=$ALCHEMY_API_KEY node /app/script.mjs"
+```
+
+The tool shell does not keep state between invocations, so the `set -a` line has
+to be repeated every time. One command omitted it, the remote process got an
+empty value, and the probe faithfully reported the truth about *that command's
+environment* — which said nothing at all about the project. The wrong conclusion
+was then stated to the user as fact.
+
+**An absent value is evidence about the lookup, not only about the thing looked
+for.** Before reporting that something is gone, check where it is supposed to
+live: `railway variables` for a service variable, the `.env` file for a local
+one, the transcript for how it was previously supplied. All three were available
+and none had been consulted.
+
+This is the same shape as a filter that matches nothing being read as a clean
+pass. Zero results is a question, not an answer.
+
+(`ALCHEMY_API_KEY` is now a service variable as well, because the hourly
+`token-updates` monitor runs inside the container and cannot see a per-command
+variable. The lesson stands for the next secret.)

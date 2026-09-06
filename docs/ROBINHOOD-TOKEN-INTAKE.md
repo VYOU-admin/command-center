@@ -35,6 +35,13 @@ explorer                 https://robinhoodchain.blockscout.com/
 DexScreener slug         robinhood
 ```
 
+**The Alchemy key is a Railway service variable**, and also lives in the local
+`.env`. It was originally passed per command over `railway ssh` to avoid a
+redeploy; that was abandoned when the incremental job had to run on a schedule
+inside the container, where a per-command variable cannot be seen. Do not
+re-derive the per-command pattern, and do not read a missing-key error as
+evidence the variable was wiped — check `railway variables` first.
+
 **The public RPC serves logs but not historical state.** `eth_getCode` at any
 past block returns `{"code":-32000,"message":"metadata is not found"}`. Alchemy
 is archival and answers the same call. Any step needing historical state must

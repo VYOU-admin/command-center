@@ -62,6 +62,30 @@ data source.
 credit figures must come from the dashboard rather than from arithmetic against
 constants in this repository.
 
+## Secrets
+
+`ALCHEMY_API_KEY` is a **Railway service variable**. It is also in the local
+`.env`, and the two must stay in agreement.
+
+It was deliberately kept off the service for the whole PONS intake and passed
+per command instead (`set -a; . ./.env; set +a` locally, then
+`railway ssh -- "ALCHEMY_API_KEY=$ALCHEMY_API_KEY node ..."`), so that reading
+the chain never required a redeploy. That stopped working once the work had to
+run on a schedule: the `token-updates` monitor runs inside the container, and a
+per-command variable is invisible to it. The variable was set deliberately, with
+the redeploy it causes accepted.
+
+Two consequences:
+
+- **Do not conclude the key was wiped** because a probe reports it missing.
+  Check `railway variables` first. A remote command that did not source `.env`
+  produces an empty value that looks identical to a wiped one — that mistake has
+  already been made once here and led to a wrong report.
+- **Never interpolate a key into monitor YAML.** The registry persists a
+  monitor's options into `monitors.config`, so a key in YAML becomes a key in
+  the database. Adapters read allow-listed secrets through
+  `AdapterContext.configVars` instead.
+
 ## archive/
 
 Do not read anything under archive/ unless I explicitly ask for it by

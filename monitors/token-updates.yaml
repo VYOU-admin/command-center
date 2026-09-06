@@ -29,10 +29,7 @@ id: token-updates
 name: PONS Cohort Updates
 source: token-updates
 
-# DISABLED UNTIL THE BACKLOG RUN IS REVIEWED. The adapter and its tables deploy
-# with the service, but the scheduler must not start running this hourly before
-# the backlog numbers have been checked. Step 3 flips this to true.
-enabled: false
+enabled: true
 
 schedule: 1h
 
@@ -61,7 +58,10 @@ options:
     url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
     # Read from the process environment, never interpolated into this file --
     # monitor options are persisted into monitors.config, and a key in YAML is
-    # a key in the database.
+    # a key in the database. ALCHEMY_API_KEY is a Railway service variable: it
+    # was kept off the service and passed per command for the whole intake, but
+    # a scheduled run happens inside the container and cannot see a per-command
+    # variable.
     key_var: ALCHEMY_API_KEY
     request_timeout_ms: 60000
 
