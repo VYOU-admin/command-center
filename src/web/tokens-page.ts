@@ -60,6 +60,10 @@ export interface WalletAgg {
   tokPriced: number;
   first: string | null;
   last: string | null;
+  /** Null when every metric was null for this wallet. Never 0. */
+  score: number | null;
+  /** The fraction of the total weight that actually contributed to `score`. */
+  wu: number;
 }
 
 export interface WalletRow {
@@ -67,6 +71,13 @@ export interface WalletRow {
   tags: { tag: string; source: string }[];
   a: WalletAgg;
 }
+
+/**
+ * Only the score and the weight it rests on travel with the page. The
+ * per-metric breakdown arrives with the transactions when a row is expanded --
+ * sixteen numbers per wallet across 13,095 wallets is megabytes, and that is
+ * the mistake that produced a 69.3 MB page once already.
+ */
 
 export interface WindowRow {
   tag: string;
@@ -294,7 +305,11 @@ function agg(w){
   const a = w.a;
   const avg = (a.priced > 0 && a.tokPriced > 0) ? (a.usd / a.tokPriced) : null;
   return {n: a.n, tok: a.tok, usd: a.usd, priced: a.priced, unpriced: a.unpriced,
-          tokPriced: a.tokPriced, first: a.first, last: a.last, avg: avg};
+          tokPriced: a.tokPriced, first: a.first, last: a.last, avg: avg,
+          // Null, never 0. A wallet whose every metric was null has no score;
+          // zero would rank it below a wallet that genuinely did nothing.
+          score: (a.score === undefined ? null : a.score),
+          wu: (a.wu === undefined ? 0 : a.wu)};
 }
 
 // Percent change from what the wallet paid on average to what the token is
@@ -477,6 +492,7 @@ function renderFilters(){
 const COLS = [
   {k:'tags',  t:'tags',      sort:false},
   {k:'wallet',t:'wallet',    sort:true},
+  {k:'score', t:'score',     sort:true, num:true},
   {k:'n',     t:'buys',      sort:true, num:true},
   {k:'tok',   t:'tokens',    sort:true, num:true},
   {k:'usd',   t:'usd',       sort:true, num:true},
@@ -567,6 +583,24 @@ function avgCell(a){
   return s;
 }
 
+/*
+ * The score, and the weight it actually rests on.
+ *
+ * A wallet scored on part of the weight is NOT comparable to one scored on all
+ * of it -- the top-scoring PONS wallet rests on 0.175 of the weight, because 22
+ * of its 22 buys are unpriced and every money metric is null. Showing the bare
+ * number would hide that completely, so the partial weight is printed beside it
+ * whenever it is not the full 1.0.
+ */
+function scoreCell(a){
+  if (a.score === null || a.score === undefined) return '<span class="unk">unscored</span>';
+  let s = fmtNum(a.score, 4);
+  if (a.wu > 0 && a.wu < 0.999){
+    s += ' <span class="part">on ' + Math.round(a.wu * 100) + '% of weight</span>';
+  }
+  return s;
+}
+
 function chgCell(a){
   if (a.chg === null || a.chg === undefined) return '<span class="unk">unknown</span>';
   const cls = a.chg >= 0 ? 'up' : 'down';
@@ -615,7 +649,7 @@ function renderTable(){
         + Math.min(from + PAGE_SIZE, list.length) + ' (page ' + (state.page + 1) + ' of ' + pages + ')'
       : '');
   const body = $('body');
-  if (list.length === 0){ body.innerHTML = '<tr><td colspan="10" class="empty">No wallets match these filters.</td></tr>'; renderPager(pages); return; }
+  if (list.length === 0){ body.innerHTML = '<tr><td colspan="11" class="empty">No wallets match these filters.</td></tr>'; renderPager(pages); return; }
   let html = '';
   for (const r of slice){
     const w = r.w, a = r.a;
@@ -625,6 +659,7 @@ function renderTable(){
       + '<td>' + tagCell(w) + '</td>'
       + '<td class="addr">' + extLink(chainOf(), 'account', w.wallet, shortAddr(w.wallet))
         + copyBtn(w.wallet, 'wallet') + '</td>'
+      + '<td class="num">' + scoreCell(a) + '</td>'
       + '<td class="num">' + a.n + '</td>'
       + '<td class="num">' + fmtNum(a.tok, 4) + '</td>'
       + '<td class="num">' + usdCell(a) + '</td>'
@@ -635,7 +670,7 @@ function renderTable(){
       + '</tr>';
     if (isOpen){
       const cached = TXCACHE[w.wallet];
-      html += '<tr class="exp"><td colspan="10">' + (cached ? renderTxs(w, cached)
+      html += '<tr class="exp"><td colspan="11">' + (cached ? renderTxs(w, cached)
         : '<span class="lab">loading transactions\u2026</span>') + '</td></tr>';
     }
   }
@@ -657,17 +692,63 @@ function loadTxs(wallet){
   const t = currentToken();
   fetch('/api/token-txs?mint=' + encodeURIComponent(t.mint) + '&wallet=' + encodeURIComponent(wallet))
     .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-    .then(function(j){ TXCACHE[wallet] = j.txs; renderTable(); })
+    .then(function(j){ TXCACHE[wallet] = {txs: j.txs, score: j.score}; renderTable(); })
     // A failed fetch says so. It never renders as "this wallet has no
     // transactions", which is a different and much stronger claim.
     .catch(function(e){ TXCACHE[wallet] = {error: String(e.message)}; renderTable(); });
 }
 
-function renderTxs(w, txs){
-  if (txs && txs.error) return '<span class="unk">could not load transactions: ' + txs.error + '</span>';
-  if (!txs.length) return '<span class="lab">no transactions stored for this wallet</span>';
+const METRIC_LABELS = [
+  ['pnlUsd',       'PnL USD',        '30%'],
+  ['pnlPct',       'PnL percent',    '20%'],
+  ['buyCount',     'number of buys', '5%'],
+  ['earliness',    'earliness',      '12.5%'],
+  ['holdTime',     'hold time',      '12.5%'],
+  ['prePumpShare', 'pre-pump share', '5%'],
+  ['buySizeTrend', 'buy-size trend', '5%'],
+  ['totalUsdIn',   'total USD in',   '10%']
+];
+
+/*
+ * The per-metric breakdown, shown with BOTH the raw value and the normalised
+ * one. The normalised column is what the weighted sum actually used; the raw
+ * column is what it came from. A score is not auditable from one without the
+ * other -- min-max means a raw PnL of $265 against a cohort maximum of $109M
+ * normalises to 0.004, and only seeing both makes that legible.
+ */
+function renderScore(sc){
+  if (!sc) return '<div class="mini">no score stored for this wallet</div>';
+  let h = '<div class="mini">score '
+    + (sc.score === null ? '<span class="unk">unscored</span>' : fmtNum(sc.score, 6))
+    + ' \u00b7 computed on ' + Math.round((sc.weightUsed || 0) * 100) + '% of the total weight'
+    + (sc.weightUsed < 0.999
+        ? ' <span class="part">the remaining metrics were null and were dropped, not scored as zero</span>'
+        : '')
+    + '</div>';
+  const m = sc.metrics || {};
+  const raw = m.raw || {}, nrm = m.normalised || {};
+  h += '<table><thead><tr><th>metric</th><th class="num">weight</th>'
+    + '<th class="num">raw</th><th class="num">normalised</th></tr></thead><tbody>';
+  for (const row of METRIC_LABELS){
+    const k = row[0];
+    const rv = raw[k], nv = nrm[k];
+    h += '<tr><td>' + row[1] + '</td><td class="num">' + row[2] + '</td>'
+      + '<td class="num">' + (rv === null || rv === undefined
+          ? '<span class="unk">null</span>' : fmtNum(rv, 6)) + '</td>'
+      + '<td class="num">' + (nv === null || nv === undefined
+          ? '<span class="unk">dropped</span>' : fmtNum(nv, 6)) + '</td></tr>';
+  }
+  h += '</tbody></table>';
+  return h;
+}
+
+function renderTxs(w, cached){
+  if (cached && cached.error) return '<span class="unk">could not load transactions: ' + cached.error + '</span>';
+  const txs = cached && cached.txs ? cached.txs : [];
+  const head = renderScore(cached ? cached.score : null);
+  if (!txs.length) return head + '<span class="lab">no transactions stored for this wallet</span>';
   let sumTok = 0, sumUsd = 0, nUnp = 0;
-  let inner = '<table><thead><tr><th>time</th><th>side</th><th>window</th><th class="num">tokens</th>'
+  let inner = head + '<table><thead><tr><th>time</th><th>side</th><th>window</th><th class="num">tokens</th>'
     + '<th class="num">usd</th><th class="num">price</th><th>pool</th><th>counterparty</th><th>tx</th></tr></thead><tbody>';
   for (const p of txs){
     sumTok += p.tokenAmount;

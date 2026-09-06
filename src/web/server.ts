@@ -136,8 +136,26 @@ export function createWebServer(opts: WebServerOptions): Server {
           where w.token = $1 and w.wallet = $2
           order by w.block_time, w.tx_hash`,
         [mint, wallet]);
+      /*
+       * The score breakdown rides along with the transactions rather than
+       * having its own endpoint: both are wanted at the same moment, by the
+       * same click, for the same wallet.
+       */
+      const sc = await pool.query(
+        `select score, weight_used, metrics from wallet_scores
+          where token = $1 and wallet = $2`,
+        [mint, wallet]);
+      const scoreRow = sc.rows[0] as Record<string, unknown> | undefined;
+
       sendJson(res, 200, {
         mint, wallet, count: r.rowCount,
+        score: scoreRow
+          ? {
+              score: scoreRow.score === null ? null : Number(scoreRow.score),
+              weightUsed: Number(scoreRow.weight_used),
+              metrics: scoreRow.metrics,
+            }
+          : null,
         txs: (r.rows as Record<string, unknown>[]).map((x) => ({
           signature: String(x.tx_hash),
           pool: x.pool === null ? null : String(x.pool),
@@ -253,7 +271,7 @@ export function createWebServer(opts: WebServerOptions): Server {
       // purchase for the tokens tracked so far, which is small enough to hand
       // Aggregates, not rows: the table shows per-wallet totals, and a wallet's
       // individual transactions are fetched on demand when its row expands.
-      const [toks, aggs, legend, tags, wins, prices] = await Promise.all([
+      const [toks, aggs, legend, tags, wins, prices, scores] = await Promise.all([
         pool.query(`select mint, chain, ticker, name, decimals, charted_pair
                       from tokens order by chain, ticker`),
         /*
@@ -305,11 +323,24 @@ export function createWebServer(opts: WebServerOptions): Server {
          */
         pool.query(`select distinct on (mint) mint, price_usd, pool, source, observed_at
                       from token_prices order by mint, observed_at desc`),
+        /*
+         * SCORE AND WEIGHT ONLY. The per-metric breakdown is deliberately NOT
+         * sent here: sixteen numbers per wallet across 13,095 wallets is several
+         * megabytes, which is the same mistake that once produced a 69.3 MB
+         * page. It arrives with the transactions when a row is expanded.
+         *
+         * weight_used travels with the score because they are not separable: a
+         * wallet scored on part of the weight is not comparable to one scored on
+         * all of it, and a score shown without it invites exactly that comparison.
+         */
+        pool.query(`select token as mint, wallet, score, weight_used
+                      from wallet_scores`),
       ]);
 
       const byToken = new Map<string, Map<string, WalletRow>>();
       const blankAgg = () => ({ n: 0, tok: 0, usd: 0, priced: 0, unpriced: 0,
-                                tokPriced: 0, first: null, last: null });
+                                tokPriced: 0, first: null, last: null,
+                                score: null, wu: 0 });
       const ensure = (mint: string, wallet: string): WalletRow => {
         let m = byToken.get(mint);
         if (!m) { m = new Map(); byToken.set(mint, m); }
@@ -324,6 +355,10 @@ export function createWebServer(opts: WebServerOptions): Server {
       for (const r of aggs.rows as Record<string, unknown>[]) {
         const w = ensure(String(r.mint), String(r.wallet));
         w.a = {
+          // Carried through rather than reset: the score rows are read after
+          // this loop, and a fresh literal here would drop them silently.
+          score: w.a.score,
+          wu: w.a.wu,
           n: Number(r.n),
           tok: Number(r.tok),
           usd: Number(r.usd),
@@ -333,6 +368,14 @@ export function createWebServer(opts: WebServerOptions): Server {
           first: r.first_at === null ? null : (r.first_at as Date).toISOString(),
           last: r.last_at === null ? null : (r.last_at as Date).toISOString(),
         };
+      }
+
+      for (const r of scores.rows as Record<string, unknown>[]) {
+        const w = ensure(String(r.mint), String(r.wallet));
+        // Null is a real answer -- every metric was null for this wallet. It is
+        // not a score of zero, and the page renders it as "unscored".
+        w.a.score = r.score === null ? null : Number(r.score);
+        w.a.wu = Number(r.weight_used);
       }
 
       const legendByMint = new Map<string, { tag: string; wallets: number; buys: number }[]>();
