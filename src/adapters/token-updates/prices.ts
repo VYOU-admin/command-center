@@ -240,34 +240,51 @@ export async function loadNativeReference(
   return res.rows.map((r) => Number(r.eth_usd)).filter((v) => Number.isFinite(v) && v > 0);
 }
 
+/**
+ * Write the derived buckets.
+ *
+ * `do nothing`, NOT `do update`. A bucket already stored was computed by a run
+ * that saw the same whole bucket, so recomputing it gains nothing and rewriting
+ * it silently replaces history that was already reviewed. The intake's native
+ * series already extends past this job's backlog, so an upsert here would have
+ * rewritten roughly 55 existing buckets on the way through -- it rewrote 3
+ * before this was caught. The count left alone is returned so it can be
+ * reported rather than inferred from a row count that did not move.
+ */
 export async function persistPrices(
   client: PoolClient,
   cfg: UpdateConfig,
   series: PriceSeries,
-): Promise<{ tokenUsdRows: number; nativeUsdRows: number }> {
-  let tokenUsdRows = 0;
+): Promise<{
+  tokenUsdInserted: number;
+  tokenUsdAlreadyPresent: number;
+  nativeUsdInserted: number;
+  nativeUsdAlreadyPresent: number;
+}> {
+  let tokenUsdInserted = 0;
   for (const [bucket, v] of series.tokenUsd) {
     const res = await client.query(
       `insert into ${cfg.tokenUsdTable} (chain, bucket_block, pons_usd, ticks)
        values ($1, $2, $3, $4)
-       on conflict (chain, bucket_block) do update
-         set pons_usd = excluded.pons_usd, ticks = excluded.ticks`,
+       on conflict (chain, bucket_block) do nothing`,
       [cfg.chain, bucket, v.price, v.ticks],
     );
-    tokenUsdRows += res.rowCount ?? 0;
+    tokenUsdInserted += res.rowCount ?? 0;
   }
-  let nativeUsdRows = 0;
+  let nativeUsdInserted = 0;
   for (const [bucket, v] of series.nativeUsd) {
     const res = await client.query(
       `insert into ${cfg.nativeUsdTable} (chain, block_number, eth_usd, usd_ticks, eth_ticks)
        values ($1, $2, $3, $4, $5)
-       on conflict (chain, block_number) do update
-         set eth_usd = excluded.eth_usd,
-             usd_ticks = excluded.usd_ticks,
-             eth_ticks = excluded.eth_ticks`,
+       on conflict (chain, block_number) do nothing`,
       [cfg.chain, bucket, v.price, v.usdTicks, v.ethTicks],
     );
-    nativeUsdRows += res.rowCount ?? 0;
+    nativeUsdInserted += res.rowCount ?? 0;
   }
-  return { tokenUsdRows, nativeUsdRows };
+  return {
+    tokenUsdInserted,
+    tokenUsdAlreadyPresent: series.tokenUsd.size - tokenUsdInserted,
+    nativeUsdInserted,
+    nativeUsdAlreadyPresent: series.nativeUsd.size - nativeUsdInserted,
+  };
 }

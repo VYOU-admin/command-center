@@ -329,7 +329,10 @@ const adapter: SourceAdapter<WalletRow> = {
     if (p.idle) return 0;
 
     await persistPools(client, p.newPools);
-    if (p.prices) await persistPrices(client, p.cfg, p.prices);
+    const priceWrites = p.prices
+      ? await persistPrices(client, p.cfg, p.prices)
+      : { tokenUsdInserted: 0, tokenUsdAlreadyPresent: 0,
+          nativeUsdInserted: 0, nativeUsdAlreadyPresent: 0 };
 
     let stored = 0;
     for (const r of rows) {
@@ -373,8 +376,7 @@ const adapter: SourceAdapter<WalletRow> = {
       rows_already_present: rows.length - stored,
       new_pools: p.newPools.length,
       pools_rejected_out_of_scope: p.poolsRejected,
-      price_buckets_token_usd: p.prices ? p.prices.tokenUsd.size : 0,
-      price_buckets_native_usd: p.prices ? p.prices.nativeUsd.size : 0,
+      price_buckets: priceWrites,
       floors: {
         swaps_below_token_raw: p.stats.swapsBelowTokenRawFloor,
         swaps_below_paid_raw: p.stats.swapsBelowPaidRawFloor,
