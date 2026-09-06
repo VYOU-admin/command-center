@@ -64,6 +64,8 @@ export interface WalletAgg {
   score: number | null;
   /** The fraction of the total weight that actually contributed to `score`. */
   wu: number;
+  /** Score-quality flags, e.g. low-weight, inflated-pnl. Empty for most. */
+  fl: string[];
 }
 
 export interface WalletRow {
@@ -203,6 +205,8 @@ export function renderTokensPage(args: {
   .chip{display:inline-block;background:var(--panel2);border:1px solid var(--border);
     border-radius:11px;padding:1px 9px;font-size:11px;margin:1px 3px 1px 0;white-space:nowrap}
   .chip.man{border-color:var(--accent);color:var(--accent)}
+  /* A flagged wallet at the top of the sort has to be obvious, not discovered. */
+  .chip.flag{border-color:var(--warn);color:var(--warn);background:transparent}
   .chip .x{color:var(--faint);margin-left:5px;cursor:pointer}
   .chip .x:hover{color:var(--bad)}
   .addtag{background:transparent;border:1px dashed var(--border);color:var(--faint);
@@ -309,7 +313,8 @@ function agg(w){
           // Null, never 0. A wallet whose every metric was null has no score;
           // zero would rank it below a wallet that genuinely did nothing.
           score: (a.score === undefined ? null : a.score),
-          wu: (a.wu === undefined ? 0 : a.wu)};
+          wu: (a.wu === undefined ? 0 : a.wu),
+          fl: (a.fl === undefined ? [] : a.fl)};
 }
 
 // Percent change from what the wallet paid on average to what the token is
@@ -321,7 +326,9 @@ function changePct(avg, price){
   return (price - avg) / avg * 100;
 }
 
-let state = {chain: 0, token: 0, sort: 'usd', dir: -1, open: {}, f: {}, page: 0};
+// DEFAULT SORT IS SCORE, DESCENDING. Flagged wallets are not excluded from it;
+// they are marked and left in place.
+let state = {chain: 0, token: 0, sort: 'score', dir: -1, open: {}, f: {}, page: 0};
 
 /** The chain of whatever is on screen, for link building. */
 function chainOf(){ const c = DATA[state.chain]; return c ? c.chain : ''; }
@@ -479,7 +486,21 @@ function renderFilters(){
     + '<div class="f"><label>min USD</label><input id="fMinU" type="number" min="0"></div>'
     + '<div class="f"><label>first buy after</label><input id="fAfter" type="datetime-local"></div>'
     + '<div class="f"><label>last buy before</label><input id="fBefore" type="datetime-local"></div>'
+    + '<div class="f"><label>exclude flagged</label><span>'
+    + '<label class="lab"><input type="checkbox" id="fNoLow"> low-weight</label> '
+    + '<label class="lab"><input type="checkbox" id="fNoInf"> inflated-pnl</label>'
+    + '</span></div>'
     + '<div class="f"><label>&nbsp;</label><button class="mini" id="fClear">clear</button></div>';
+  /*
+   * DEFAULT IS MARKED, NOT HIDDEN. Both boxes start unchecked: a flagged wallet
+   * at the top of the sort should be visible and obviously flagged, and whether
+   * to drop it is the reader's decision rather than the page's.
+   */
+  ['fNoLow','fNoInf'].forEach(function(id){
+    const el = $(id);
+    el.checked = !!state.f[id];
+    el.onchange = function(){ state.f[id] = el.checked; state.page = 0; renderTable(); };
+  });
   ['fTag','fW','fMinN','fMinT','fMinU','fAfter','fBefore'].forEach(function(id){
     const el = $(id);
     el.value = state.f[id] || '';
@@ -526,6 +547,8 @@ function rows(){
   const out = [];
   for (const w of t.wallets){
     const a = agg(w);
+    if (f.fNoLow && a.fl && a.fl.indexOf('low-weight') !== -1) continue;
+    if (f.fNoInf && a.fl && a.fl.indexOf('inflated-pnl') !== -1) continue;
     if (f.fTag && !w.tags.some(function(x){ return x.tag === f.fTag; })) continue;
     if (f.fW && w.wallet.toLowerCase().indexOf(f.fW.toLowerCase()) === -1) continue;
     if (f.fMinN && a.n < +f.fMinN) continue;
@@ -592,13 +615,30 @@ function avgCell(a){
  * number would hide that completely, so the partial weight is printed beside it
  * whenever it is not the full 1.0.
  */
+function flagChips(a){
+  if (!a.fl || !a.fl.length) return '';
+  return ' ' + a.fl.map(function(f){
+    return '<span class="chip flag" title="' + FLAG_HELP[f] + '">' + f + '</span>';
+  }).join('');
+}
+
+var FLAG_HELP = {
+  'low-weight': 'this score rests on less than 80% of the total weight, so it is '
+    + 'not comparable to a fully scored wallet',
+  'inflated-pnl': 'this wallet sold more than it bought, so it acquired tokens '
+    + 'off-market and its PnL counts the sale but not the purchase'
+};
+
 function scoreCell(a){
-  if (a.score === null || a.score === undefined) return '<span class="unk">unscored</span>';
+  const chips = flagChips(a);
+  if (a.score === null || a.score === undefined) {
+    return '<span class="unk">unscored</span>' + chips;
+  }
   let s = fmtNum(a.score, 4);
   if (a.wu > 0 && a.wu < 0.999){
     s += ' <span class="part">on ' + Math.round(a.wu * 100) + '% of weight</span>';
   }
-  return s;
+  return s + chips;
 }
 
 function chgCell(a){

@@ -74,6 +74,10 @@ if (rows.length === 0) fail('the table rendered zero wallet rows');
 
 const countText = doc.getElementById('count') ? doc.getElementById('count').textContent : '';
 console.log(`count line           ${countText}`);
+const sortedTh = doc.querySelector('#head th .ar');
+const defaultSortCol = sortedTh ? sortedTh.parentElement.dataset.k : null;
+console.log(`default sort column  ${defaultSortCol}`);
+if (defaultSortCol !== 'score') fail(`default sort is "${defaultSortCol}", expected score`);
 
 /* ---- the score cells carry values ------------------------------------- */
 /*
@@ -100,6 +104,43 @@ for (const tr of rows) {
 console.log(`score cells          ${scored} with a value, ${unscored} unscored, ${partial} showing a partial weight`);
 console.log(`sample score cells   ${JSON.stringify(samples)}`);
 if (scored === 0) fail('every score cell on the first page rendered as unscored');
+
+/* ---- flags render, and are not excluded by default ---------------------- */
+const chips = doc.querySelectorAll('tr.w .chip.flag');
+console.log(`flag chips on page 1 ${chips.length}`);
+const chipText = [...new Set(Array.from(chips).map((c) => c.textContent.trim()))];
+console.log(`distinct flags shown  ${JSON.stringify(chipText)}`);
+
+const noLow = doc.getElementById('fNoLow');
+const noInf = doc.getElementById('fNoInf');
+if (!noLow || !noInf) fail('the exclude-flagged checkboxes are missing');
+else {
+  console.log(`exclude checkboxes    low-weight=${noLow.checked ? 'checked' : 'unchecked'}, `
+    + `inflated-pnl=${noInf.checked ? 'checked' : 'unchecked'}`);
+  if (noLow.checked || noInf.checked) {
+    fail('a flagged-exclusion box defaults to checked; flagged wallets must be marked, not hidden');
+  }
+}
+
+const countOf = () => {
+  const m = /^(\d+) of/.exec(doc.getElementById('count').textContent.trim());
+  return m ? Number(m[1]) : -1;
+};
+const baseline = countOf();
+console.log(`rows before excluding ${baseline}`);
+
+if (noInf) {
+  noInf.checked = true;
+  noInf.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 500));
+  const after = countOf();
+  console.log(`after excluding inflated-pnl  ${after}   (removed ${baseline - after})`);
+  if (after >= baseline) fail('excluding inflated-pnl removed no wallets');
+  noInf.checked = false;
+  noInf.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 500));
+  if (countOf() !== baseline) fail('unchecking the filter did not restore the full set');
+}
 
 /* ---- sorting by the new column actually reorders ----------------------- */
 const th = Array.from(doc.querySelectorAll('#head th')).find((x) => x.dataset.k === 'score');

@@ -333,14 +333,14 @@ export function createWebServer(opts: WebServerOptions): Server {
          * wallet scored on part of the weight is not comparable to one scored on
          * all of it, and a score shown without it invites exactly that comparison.
          */
-        pool.query(`select token as mint, wallet, score, weight_used
+        pool.query(`select token as mint, wallet, score, weight_used, flags
                       from wallet_scores`),
       ]);
 
       const byToken = new Map<string, Map<string, WalletRow>>();
       const blankAgg = () => ({ n: 0, tok: 0, usd: 0, priced: 0, unpriced: 0,
                                 tokPriced: 0, first: null, last: null,
-                                score: null, wu: 0 });
+                                score: null, wu: 0, fl: [] });
       const ensure = (mint: string, wallet: string): WalletRow => {
         let m = byToken.get(mint);
         if (!m) { m = new Map(); byToken.set(mint, m); }
@@ -359,6 +359,7 @@ export function createWebServer(opts: WebServerOptions): Server {
           // this loop, and a fresh literal here would drop them silently.
           score: w.a.score,
           wu: w.a.wu,
+          fl: w.a.fl,
           n: Number(r.n),
           tok: Number(r.tok),
           usd: Number(r.usd),
@@ -376,6 +377,9 @@ export function createWebServer(opts: WebServerOptions): Server {
         // not a score of zero, and the page renders it as "unscored".
         w.a.score = r.score === null ? null : Number(r.score);
         w.a.wu = Number(r.weight_used);
+        // Score-quality flags. Small enough to travel with the page -- an empty
+        // array for most wallets, one or two short strings for the rest.
+        w.a.fl = Array.isArray(r.flags) ? (r.flags as string[]) : [];
       }
 
       const legendByMint = new Map<string, { tag: string; wallets: number; buys: number }[]>();
