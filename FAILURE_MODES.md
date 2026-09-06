@@ -41,6 +41,19 @@ This has appeared as a fabricated event-topic hash that matched zero logs across
 timestamp bug in §3. In each case the run completed, reported success, and
 produced nothing — which is indistinguishable from "there was nothing to find".
 
+Two further instances, both from the first EVM intake. A pricing-quote set held
+only Solana mints, so every pool on a new chain was rejected, no pool was
+eligible, and the token was never priced while the monitor reported success. And
+a cohort query filtered on pool *addresses*, which on Uniswap v4 do not exist —
+the singleton PoolManager is the counterparty — so an entire venue matched
+nothing and 23.5% of the eventual cohort was invisible. **When a query returns
+nothing from a population you expect to be active, suspect the query before
+concluding the population is idle.**
+
+The defensive form is to refuse to run rather than run empty: a filter built from
+a list must assert the list is non-empty before it is used, because an empty
+filter matches nothing and completes cleanly.
+
 ## 3. Never pass a Postgres timestamp through a JS Date and back as a lookup key
 
 JavaScript `Date` holds milliseconds. Postgres `timestamptz` stores
@@ -195,3 +208,127 @@ The check that found it: a derived column's stored range must fall inside the
 range of the inputs it was computed from. Prices spanning `1.2e-14 .. 0.25` could
 not have come from ticks spanning `0.065 .. 0.102`, and that mismatch is the
 whole detection.
+
+## 14. A failed read recorded as absent data
+
+Batched JSON-RPC returns per-item errors *inside* an HTTP 200 response. When the
+request rate is too high, individual sub-calls come back carrying a rate-limit
+error while the batch itself succeeds. Code that checks the HTTP status and then
+skips items lacking a result converts "I could not read this" into "this does not
+exist".
+
+A block-timestamp fetch lost **42% of its blocks** this way and reported the loss
+as a shortfall rather than as a failure. The same shape appeared twice more in
+the same session, in a pool classifier and in a cohort builder, each time in code
+written after the previous one had been fixed.
+
+Inspect every item of a batch response. Retry the ones carrying transport-shaped
+errors, and report anything still failing **with its error text**. A read that
+did not happen is never data.
+
+The sibling rule: distinguish an error from an answer. A reverted `token0()` call
+means "this contract is not a pool", which is a result and must not be retried;
+a rate-limited call means nothing at all and must be. Treating both as failures
+cost five retry rounds over 1,664 settled questions; treating both as answers
+loses real data.
+
+## 15. Rate, size, and result-cap refusals need opposite responses
+
+Three refusals look similar and demand different actions:
+
+- **429 / "compute units per second"** — asked too *often*. Back off in time and
+  hold the request size. Narrowing it means more requests, which is more of
+  exactly what was refused.
+- **"query timed out"** — asked for too many blocks at once. Narrow the span;
+  leave the pacing alone.
+- **"logs matched by query exceeds limit"** — the node answered and refused
+  because the *answer* was too large. Narrow the span, and be able to go
+  arbitrarily small.
+
+Conflating the first two doubled a sweep's cost twice in one session, in
+opposite directions. Conflating the third with a timeout produced a livelock: the
+span floor was 2,000 blocks, the region returned more than 10,000 logs in 2,000
+blocks, and the sweep re-asked the same impossible range every 30 seconds while
+looking healthy. **A floor that cannot go low enough is a livelock, not a safety
+limit** — and a job that cannot satisfy a request must stop and say so rather
+than repeat it.
+
+## 16. A spend cap and a throughput throttle both return 429
+
+They need opposite responses. A per-second throttle lifts in seconds, so backing
+off and continuing is right. A monthly spend cap does not lift by waiting, so
+backing off is an infinite polite retry against a wall, and the job sits there
+making no progress while appearing healthy.
+
+Nothing in the response distinguishes them. **Probe: issue one cheap call.** If
+the endpoint answers, the account is live and this was throughput — back off and
+continue. If the probe also refuses, the account is cut off and stopping is
+correct. Without the probe a hard stop kills recoverable jobs, and without a hard
+stop a capped job runs forever.
+
+## 17. A work set derived from the wrong population
+
+Before spending on an external API, derive what to fetch from **the rows that
+will actually be written**, not from the superset that contains them.
+
+A timestamp fetch was scoped to every distinct block in a swap table — 1,379,236
+blocks — when the rows being written needed 144,073, of which 92,598 were already
+stored. 51,475 were genuinely required. The **9.6× overshoot cost roughly 7
+million compute units**, a large fraction of a monthly budget, and was caught by
+the user watching a dashboard rather than by anything in the job.
+
+State the derivation and the count before the first request. A plan that says
+"1.3 million" when the output needs 51 thousand is obviously wrong to anyone who
+knows the output size, and invisible to anyone who does not.
+
+## 18. A paid job without a ceiling inside it
+
+An account-level cap protects the budget. Only a counter inside the job protects
+against a job whose scope was wrong from the first request — the account cap
+stops it after the money is gone, having spent it on the wrong thing.
+
+Every paid or rate-limited job states its expected call count, sub-call count and
+cost before starting, checks that against the remaining budget, and stops at a
+stated ceiling regardless of progress, reporting where it stopped. The corrected
+timestamp fetch used 51,475 of a 60,000 sub-call ceiling and reported both.
+
+## 19. A guard that checks only what is easy to count
+
+A pre-flight printed `amount0=0 and amount1=0 : 480924` — every row apparently
+zero — and the write committed anyway, because the transaction's guards checked
+only row counts. The alarm turned out to be false (the query had lost its
+`filter` clause and was counting every row), but **a real zero-amount catastrophe
+would have committed identically**.
+
+A guard must cover the property that would make the write wrong, not only the
+one that is easy to count. If a check is worth printing, it is worth aborting on.
+
+## 20. A monitor where one item failing still reports success
+
+A price monitor priced two tokens of three and recorded `success`, because a
+single token failing was designed not to fail the run. The third token went
+unpriced for hours behind a green monitor and an empty column on the dashboard.
+
+Partial success is a legitimate design — one bad source should not stop the
+others storing. But it must be *visible*: alert on the first failure rather than
+the third, log at error level, and fail the run once an item has failed
+repeatedly, so a permanent failure eventually turns the monitor red. "Some of it
+worked" and "all of it worked" must not look the same.
+
+## 21. A paid endpoint chosen before the free ones were tested
+
+Before committing to a metered API, test the free alternatives and report what
+each can and cannot do. The measurement takes minutes; the assumption costs
+whatever the job costs.
+
+A block-timestamp fetch was queued as ~13,000 Alchemy calls without either
+alternative having been tried. Tested afterwards, the **public RPC served the
+same batched `eth_getBlockByNumber` perfectly — 100 blocks per request, HTTP 200,
+448 ms — for free**, needing only slower pacing. The block explorer, by contrast,
+returned HTTP 403 behind a Cloudflare interstitial on every endpoint and was not
+usable at all. Neither fact was known when the paid job was planned, and only one
+of them would have been guessed correctly.
+
+Report the alternatives as measurements with their limits — throughput, span,
+availability — so the choice between paying and waiting is made on numbers. Free
+and slow is often the right answer for work that runs unattended.
