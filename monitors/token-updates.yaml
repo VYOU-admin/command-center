@@ -81,9 +81,11 @@ options:
     # fails when it is reached, and says where it stopped.
     cu_ceiling: 5000
 
-    # Starting span for a getLogs request. 36,000 blocks of PONS transfers is
-    # refused by Alchemy ("Log response size exceeded"); 18,000 returns 7,113
-    # logs and succeeds. The span halves from here on a size refusal.
+    # Starting span for the TRANSFER query, the one stream measured to exceed
+    # the result cap: 36,000 blocks of PONS transfers is refused by Alchemy
+    # ("Log response size exceeded"), 18,000 returns 7,113 logs. Pool
+    # enumeration and both swap queries start at the full range instead, because
+    # each was measured to fit in one request. The span halves on a refusal.
     log_span_blocks: 18000
     # Below this, a size refusal is a livelock rather than something to retry.
     min_log_span_blocks: 25
@@ -109,6 +111,12 @@ options:
     # 10,000 blocks is about 17 minutes here. The cursor always lands on one of
     # these boundaries so no row is priced from a partially-seen bucket.
     bucket_blocks: 10000
+    # BUCKETS ARE NOT ANCHORED AT ZERO. The intake anchored them at this token's
+    # first swap block, so all 4,528 stored buckets satisfy
+    # `bucket_block % 10000 == 3150`. Anchoring at zero would look up 54930000
+    # where the stored bucket is 54933150, match nothing, price every row null,
+    # and write a second series interleaved with the first.
+    bucket_origin: 8963150
     # A tick outside this multiple of its bucket's median is discarded.
     tick_fence_multiple: 100
     # A derived native price outside this multiple of the reference median is

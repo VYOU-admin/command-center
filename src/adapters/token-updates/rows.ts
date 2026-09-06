@@ -128,7 +128,7 @@ export function buildRows(
     if (pool.counter === usdAsset) {
       usd = counterAmount;
     } else if (nativeAssets.has(pool.counter)) {
-      const price = nativeUsd.get(bucketOf(swap.block, cfg.bucketBlocks));
+      const price = nativeUsd.get(bucketOf(swap.block, cfg.bucketBlocks, cfg.bucketOrigin));
       usd = price ? counterAmount * price.price : null;
     }
 

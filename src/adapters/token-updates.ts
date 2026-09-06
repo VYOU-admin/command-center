@@ -141,14 +141,18 @@ const adapter: SourceAdapter<WalletRow> = {
     // Clamp to a bucket boundary so no row is priced from a partially-seen
     // bucket. See prices.ts for why that matters.
     const rawTo = Math.min(cursor + cfg.maxBlocksPerRun, target);
-    const to = Math.floor((rawTo + 1) / cfg.bucketBlocks) * cfg.bucketBlocks - 1;
+    const to =
+      cfg.bucketOrigin +
+      Math.floor((rawTo + 1 - cfg.bucketOrigin) / cfg.bucketBlocks) * cfg.bucketBlocks -
+      1;
 
     if (to < from) {
       ctx.log.info('nothing to do: the head has not advanced a full price bucket yet', {
         cursor,
         head,
         target,
-        next_boundary: Math.floor((cursor + cfg.bucketBlocks) / cfg.bucketBlocks) * cfg.bucketBlocks,
+        next_boundary:
+          bucketOf(cursor, cfg.bucketBlocks, cfg.bucketOrigin) + cfg.bucketBlocks,
       });
       pending.set(ctx.monitorId, {
         cfg, from, to: cursor, head, newPools: [], prices: null, priceError: null,
@@ -173,9 +177,11 @@ const adapter: SourceAdapter<WalletRow> = {
 
     const swaps: { swap: SwapLog; pool: PoolRow }[] = [];
     if (v3Pools.length > 0) {
+      // Measured: 5,834 v3 swap logs across 36,000 blocks came back in ONE
+      // request. The span halves only if a busier hour is refused.
       const logs = await rpc.getLogs(
         { address: v3Pools, topics: [TOPICS.swapV3] },
-        from, to, cfg.logSpanBlocks, cfg.minLogSpanBlocks,
+        from, to, to - from + 1, cfg.minLogSpanBlocks,
       );
       for (const log of logs) {
         const swap = decodeSwap(log, 'v3');
@@ -185,9 +191,11 @@ const adapter: SourceAdapter<WalletRow> = {
     }
     const v3Count = swaps.length;
     if (v4Ids.length > 0) {
+      // Measured: 1,276 v4 swap logs across 36,000 blocks, filtered by 540
+      // pool ids in the topic array, in ONE request.
       const logs = await rpc.getLogs(
         { address: cfg.v4PoolManager, topics: [TOPICS.swapV4, v4Ids] },
-        from, to, cfg.logSpanBlocks, cfg.minLogSpanBlocks,
+        from, to, to - from + 1, cfg.minLogSpanBlocks,
       );
       for (const log of logs) {
         const swap = decodeSwap(log, 'v4');
@@ -198,6 +206,9 @@ const adapter: SourceAdapter<WalletRow> = {
     const v4Count = swaps.length - v3Count;
 
     /* ---- transfers: the attribution source ------------------------------- */
+    // Transfers are the one stream measured to exceed the result cap: 36,000
+    // blocks is refused, 18,000 returns 7,113 logs. It starts at the narrower
+    // span rather than paying for a refusal every run.
     const transferLogs = await rpc.getLogs(
       { address: cfg.token, topics: [TOPICS.transfer] },
       from, to, cfg.logSpanBlocks, cfg.minLogSpanBlocks,
@@ -214,7 +225,8 @@ const adapter: SourceAdapter<WalletRow> = {
      * lookup returns nothing.
      */
     const firstCompleteBucket =
-      Math.ceil(from / cfg.bucketBlocks) * cfg.bucketBlocks;
+      cfg.bucketOrigin +
+      Math.ceil((from - cfg.bucketOrigin) / cfg.bucketBlocks) * cfg.bucketBlocks;
 
     let prices: PriceSeries | null = null;
     let priceError: string | null = null;
@@ -248,7 +260,7 @@ const adapter: SourceAdapter<WalletRow> = {
       try {
         const stored = await loadNativeForRange(
           client2, cfg.nativeUsdTable, cfg.chain,
-          bucketOf(from, cfg.bucketBlocks), firstCompleteBucket - 1,
+          bucketOf(from, cfg.bucketBlocks, cfg.bucketOrigin), firstCompleteBucket - 1,
         );
         for (const [bucket, v] of stored) {
           if (!pricingMap.has(bucket)) {

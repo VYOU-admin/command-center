@@ -47,8 +47,16 @@ export interface PriceSeries {
   };
 }
 
-export const bucketOf = (block: number, size: number): number =>
-  Math.floor(block / size) * size;
+/**
+ * The bucket a block falls in, anchored at `origin`.
+ *
+ * The anchor matters. This token's stored buckets are anchored at its first
+ * swap block, so they all sit at `... 3150`. A function anchored at zero
+ * produces boundaries 3,150 blocks away from every stored one -- lookups match
+ * nothing and writes land between the existing rows rather than on them.
+ */
+export const bucketOf = (block: number, size: number, origin = 0): number =>
+  origin + Math.floor((block - origin) / size) * size;
 
 /**
  * Median of a bucket's ticks, discarding anything outside `fence` times the
@@ -100,7 +108,7 @@ export function derivePrices(
   const buckets = new Set<number>();
 
   for (const { swap, pool } of swaps) {
-    const bucket = bucketOf(swap.block, cfg.bucketBlocks);
+    const bucket = bucketOf(swap.block, cfg.bucketBlocks, cfg.bucketOrigin);
     buckets.add(bucket);
 
     const rawToken = pool.tokenSide === 0 ? swap.amount0 : swap.amount1;

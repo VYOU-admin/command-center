@@ -53,6 +53,14 @@ export interface UpdateConfig {
   nativeAssets: string[];
 
   bucketBlocks: number;
+  /**
+   * Block that bucket boundaries are anchored to. NOT zero for this token: the
+   * intake anchored buckets at the token's first swap block, so every stored
+   * bucket satisfies `block % 10000 == 3150`. Anchoring at zero instead would
+   * look up bucket 54930000 where the stored one is 54933150, find nothing, and
+   * write a second series interleaved with the first.
+   */
+  bucketOrigin: number;
   /** Discard a tick outside this multiple of its bucket's median. */
   tickFenceMultiple: number;
   /** Discard a derived native price outside this multiple of the median. */
@@ -137,6 +145,7 @@ export function parseConfig(
     usdAsset: requireString(pricing, 'usd_asset', monitorId),
     nativeAssets: requireStringArray(pricing, 'native_assets', monitorId),
     bucketBlocks: configNumber(pricing, 'bucket_blocks', monitorId, 10_000),
+    bucketOrigin: configNumber(pricing, 'bucket_origin', monitorId, 0),
     tickFenceMultiple: configNumber(pricing, 'tick_fence_multiple', monitorId, 100),
     nativeFenceMultiple: configNumber(pricing, 'native_fence_multiple', monitorId, 10),
 

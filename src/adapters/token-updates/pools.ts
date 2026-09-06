@@ -106,7 +106,12 @@ export async function scanForPools(
   const tokenAsTopic = addressTopic(token);
   const pricing = new Set(cfg.pricingAssets.map((a) => a.toLowerCase()));
 
-  const span = cfg.logSpanBlocks;
+  /*
+   * Creation events are rare -- 2 v4 and 0 v3 for this token across a measured
+   * hour, against 5 PoolCreated chain-wide -- so the whole range goes in one
+   * request and only narrows if the endpoint ever refuses it.
+   */
+  const span = to - from + 1;
   const min = cfg.minLogSpanBlocks;
 
   const found: NewPool[] = [];
