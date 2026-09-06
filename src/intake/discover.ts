@@ -13,6 +13,7 @@ import {
   addressTopic,
   decodeInitializeV4,
   decodePoolCreatedV3,
+  classifyCode,
   decodeString,
   decodeTransfer,
   decodeUint8,
@@ -241,8 +242,14 @@ export async function discoverPools(
     // A pool is a contract. eth_getCode has no legitimate error, so anything
     // other than a result is a failed read and must throw rather than be
     // recorded as "no contract here".
+    /*
+     * A POOL IS A DEPLOYED CONTRACT. Neither an EOA nor an EIP-7702 delegated
+     * account can be one, so both are rejected here -- a delegated account
+     * would otherwise be probed with token0()/token1() and cost two calls to
+     * reach the same answer.
+     */
     const codeAt = await rpc.getCode(address, 'latest');
-    if (codeAt === '0x') {
+    if (classifyCode(codeAt) !== 'contract') {
       flowNotContracts += 1;
       continue;
     }

@@ -1,5 +1,44 @@
 # command-center
 
+## Read every document before you run anything
+
+**Standing rule. It applies to every run and is never waived.**
+
+Before starting any work on any token, read all of:
+
+```
+docs/DEFINITIONS.md
+docs/ROBINHOOD-TOKEN-INTAKE.md
+docs/SOLANA-TOKEN-INTAKE.md
+docs/TOKEN-FINDINGS.md
+FAILURE_MODES.md
+CLAUDE.md
+```
+
+Then **report that you have read them, and name what in them applies to the
+token in front of you.** Not a summary of the files — the specific entries that
+bear on this token: which failure modes it is exposed to, which definitions are
+in question for it, what an earlier token already learned that applies here.
+
+**Never write collection code to a scratchpad.** Every script that does real
+work goes in the repository, committed, *before* it runs. The PONS intake was
+carried out by scratchpad scripts; a container recycle destroyed them, and the
+13,095-wallet cohort can no longer be reproduced from any code that exists. A
+throwaway query for a one-off count is fine. Anything that sweeps, decides
+membership, or writes a row is not.
+
+**No definition changes on a claim.** Any proposed change to what a term means
+must first be proven on individual decoded transactions, with hashes the user
+can open, counter-examples included. An aggregate query is a hypothesis. Twice
+an aggregate pointed at a large conclusion and decoding twenty transactions
+settled it the other way in minutes.
+
+**If a rule in the docs contradicts what you are about to do, stop and say so.**
+Do not silently pick one. The docs are wrong sometimes — two definitions were
+marked wrong the day they were written — but the contradiction is the finding,
+and it belongs to the user, not to a quiet decision made mid-task.
+
+
 A monitoring spine on Node 22 / Postgres / Railway. Monitors are YAML configs
 paired with adapters under `src/adapters/`; the scheduler runs them, the Discord
 sink alerts, the dashboard shows their state.

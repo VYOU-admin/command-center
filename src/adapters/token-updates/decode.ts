@@ -174,6 +174,37 @@ export function decodePoolCreatedV3(log: LogEntry): NewPool {
   };
 }
 
+/**
+ * What an address IS, from its code.
+ *
+ * An EIP-7702 delegated account has exactly 23 bytes: 0xef0100 followed by a
+ * 20-byte delegate address. THAT IS A WALLET -- a user account that delegated
+ * its execution -- not a deployed contract. Any other non-empty code is a
+ * deployed contract.
+ *
+ * Treating the two alike wrongly excluded 2,001 wallets from the PONS cohort,
+ * measured at its window-end block: of 3,275 addresses the code check dropped,
+ * 2,001 were delegated accounts and only 463 were real contracts. Verified on
+ * chain -- delegated accounts read 23 bytes with an 0xef0100 prefix, while the
+ * PoolManager reads 24,009 bytes, a router 4,720 and the token 5,274.
+ */
+export type AccountKind = 'eoa' | 'delegated' | 'contract';
+
+export function classifyCode(code: string): AccountKind {
+  if (code === '0x') return 'eoa';
+  const bytes = (code.length - 2) / 2;
+  if (bytes === 23 && code.toLowerCase().startsWith('0xef0100')) return 'delegated';
+  return 'contract';
+}
+
+/** A wallet is anything that is not a deployed contract. */
+export const isWallet = (code: string): boolean => classifyCode(code) !== 'contract';
+
+/** The address an EIP-7702 account delegates to, or null if it is not one. */
+export function delegateTarget(code: string): string | null {
+  return classifyCode(code) === 'delegated' ? '0x' + code.slice(10).toLowerCase() : null;
+}
+
 /** ABI-decode a uint8 return, e.g. decimals(). `0x` is unknown, not zero. */
 export function decodeUint8(result: string): number {
   if (!result || result === '0x') {

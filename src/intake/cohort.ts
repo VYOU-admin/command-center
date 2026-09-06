@@ -10,6 +10,10 @@
  * bought exclusively on v4. When a venue's pools are invisible to the obvious
  * query, that is not evidence they were inactive.
  *
+ * A DELEGATED ACCOUNT IS A WALLET, NOT A CONTRACT. Exactly 23 bytes of
+ * 0xef0100 + a delegate address is an EIP-7702 user account. Only other
+ * non-empty code is a deployed contract. See docs/DEFINITIONS.md section 5.
+ *
  * THE CONTRACT CHECK RUNS AT THE WINDOW'S END BLOCK, NOT AT `latest`. An
  * address that was an ordinary wallet when it bought is a buyer whatever it
  * became afterwards. Checking at `latest` cost 581 wallets on PONS -- 4.6% of
@@ -19,7 +23,7 @@
  */
 
 import type { IntakeConfig, IntakeWindow } from './plan.js';
-import { normalizeAddress } from '../adapters/token-updates/decode.js';
+import { classifyCode, normalizeAddress } from '../adapters/token-updates/decode.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
 import type { ExclusionEntry } from '../adapters/token-updates/exclusions.js';
 import type { PoolClient } from '../store/db.js';
@@ -35,6 +39,7 @@ export interface CohortReport {
   excludedAsPools: number;
   codeChecked: number;
   excludedAsContracts: number;
+  /** Delegated accounts KEPT in the cohort, reported for visibility. */
   delegatedEip7702: number;
   cohort: string[];
   /** Exclusion-list entries that matched nothing, reported rather than dropped. */
@@ -53,7 +58,7 @@ async function candidateBuyers(
   startBlock: number,
   endBlock: number,
 ): Promise<{ wallet: string; roundTripper: boolean }[]> {
-  const res = await client.query<{ wallet: string; got: string; gave: string }>(
+  const res = await client.query<{ wallet: string; got: string; round_tripper: boolean }>(
     `with moves as (
        select t.tx_hash,
               t.to_addr   as wallet,
@@ -71,11 +76,28 @@ async function candidateBuyers(
           and t.block_number between $3 and $4
           and t.to_addr = any($5::text[])
           and t.from_addr <> all($5::text[])
+     ),
+     /*
+      * ROUND-TRIPPING IS DECIDED PER TRANSACTION, NOT PER WINDOW.
+      *
+      * A wallet that both receives from and sends to a pool INSIDE ONE
+      * TRANSACTION is a fee recipient or an arbitrage hop. A wallet that buys
+      * in March and sells in May is a trader, and aggregating across the whole
+      * window cannot tell them apart. Measured on PONS: the window-level test
+      * flags 10,389 wallets and would drop 8,220 of the 13,095 genuine cohort
+      * members; the per-transaction test flags 512 and drops 3.
+      */
+     per_tx as (
+       select tx_hash, wallet,
+              bool_or(received) and bool_or(not received) as both_ways,
+              sum(case when received then amount else 0 end) as got
+         from moves
+        group by tx_hash, wallet
      )
      select wallet,
-            sum(case when received then amount else 0 end)::text as got,
-            sum(case when not received then amount else 0 end)::text as gave
-       from moves
+            sum(got)::text        as got,
+            bool_or(both_ways)    as round_tripper
+       from per_tx
       group by wallet`,
     [cfg.chain, cfg.token, startBlock, endBlock, counterparties],
   );
@@ -84,12 +106,7 @@ async function candidateBuyers(
     .filter((r) => BigInt(r.got) > 0n)
     .map((r) => ({
       wallet: normalizeAddress(r.wallet),
-      /*
-       * Both directions against a pool inside the window is the fee-recipient
-       * and arbitrage-hop signature, not a buyer. These are token-specific and
-       * so are detected per run rather than listed in configuration.
-       */
-      roundTripper: BigInt(r.gave) > 0n && BigInt(r.got) > 0n,
+      roundTripper: r.round_tripper,
     }));
 }
 
@@ -157,16 +174,14 @@ export async function buildCohort(
   let delegatedEip7702 = 0;
   for (const wallet of survivors) {
     const code = await rpc.getCode(wallet, endBlock);
-    if (code !== '0x') {
+    const kind = classifyCode(code);
+    if (kind === 'contract') {
       excludedAsContracts += 1;
-      // 23 bytes of 0xef0100 + address is an EIP-7702 delegation, not a
-      // contract in the ordinary sense. Counted separately so the split is
-      // visible rather than assumed.
-      if (code.startsWith('0xef0100') && code.length === 2 + 23 * 2) {
-        delegatedEip7702 += 1;
-      }
       continue;
     }
+    // A DELEGATED ACCOUNT IS A WALLET. It stays in the cohort, and is counted
+    // separately so the composition is visible rather than assumed.
+    if (kind === 'delegated') delegatedEip7702 += 1;
     cohort.push(wallet);
   }
 
