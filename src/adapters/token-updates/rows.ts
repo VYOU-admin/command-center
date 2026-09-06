@@ -22,11 +22,25 @@
  * two of the 2,266 unpriced PONS rows carried token amounts in the thousands.
  */
 
-import type { UpdateConfig } from './config.js';
+import type { Floors } from './config.js';
 import type { SwapLog, TransferLog } from './decode.js';
 import type { PoolRow } from './pools.js';
 import { bucketOf } from './prices.js';
 import { abs, formatUnits, toNumber } from './units.js';
+
+/**
+ * The slice of configuration row-building actually needs. Declared narrowly so
+ * the hourly update job and the intake runner can both pass their own config
+ * object without one importing the other's shape.
+ */
+export interface RowConfig {
+  usdAsset: string;
+  nativeAssets: string[];
+  v4PoolManager: string;
+  bucketBlocks: number;
+  bucketOrigin: number;
+  floors: Floors;
+}
 
 export interface WalletRow {
   wallet: string;
@@ -73,7 +87,7 @@ interface Group {
 export function buildRows(
   swaps: { swap: SwapLog; pool: PoolRow }[],
   transfers: TransferLog[],
-  cfg: UpdateConfig,
+  cfg: RowConfig,
   tokenDecimals: number,
   nativeUsd: Map<number, { price: number }>,
   exclusions: Set<string>,

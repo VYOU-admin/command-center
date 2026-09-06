@@ -14,6 +14,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "run-once": "npm run build && node dist/cli/run-once.js",
     "catch-up": "npm run build && node dist/cli/catch-up.js",
+    "intake": "npm run build && node dist/cli/intake.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },

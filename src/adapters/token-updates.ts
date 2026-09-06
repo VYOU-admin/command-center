@@ -118,7 +118,7 @@ const adapter: SourceAdapter<WalletRow> = {
     let tokenDecimals: number;
     try {
       cursor = await readCursor(client, cfg);
-      existingPools = await loadPools(client);
+      existingPools = await loadPools(client, cfg.chain, cfg.token);
       cohort = await loadCohort(client, cfg);
       nativeReference = await loadNativeReference(client, cfg.nativeUsdTable, cfg.chain);
       tokenDecimals = await readTokenDecimals(client, rpc, cfg);
@@ -328,7 +328,7 @@ const adapter: SourceAdapter<WalletRow> = {
     pending.delete(ctx.monitorId);
     if (p.idle) return 0;
 
-    await persistPools(client, p.newPools);
+    await persistPools(client, p.cfg.chain, p.cfg.token, p.newPools);
     const priceWrites = p.prices
       ? await persistPrices(client, p.cfg, p.prices)
       : { tokenUsdInserted: 0, tokenUsdAlreadyPresent: 0,

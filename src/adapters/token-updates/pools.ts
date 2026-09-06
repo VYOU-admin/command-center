@@ -55,15 +55,23 @@ export interface PoolScan {
 export const poolKey = (venue: string, pool: string): string => `${venue}:${pool}`;
 
 /**
- * Every in-scope pool already known for this token.
+ * Every in-scope pool already known for this chain and token.
  *
- * NOTE: `pool_meta` has neither a chain nor a token column -- it was created
- * during the PONS intake, when there was one chain and one token. Every row in
- * it therefore belongs to this token by construction. A second EVM token on
- * this chain needs a token column before it can share the table; until then
- * this load would hand it another token's pools.
+ * `pool_meta` was created during the PONS intake with neither a chain nor a
+ * token column, so every row in it belonged to one token by construction and a
+ * second token would have been handed the first one's pools. Both columns now
+ * exist and this filters on them.
+ *
+ * The primary key stays (venue, pool) rather than becoming
+ * (chain, token, venue, pool): a pool pairs the tracked token with a pricing
+ * asset, so an in-scope pool can only ever belong to one tracked token, and
+ * widening a live table's primary key is a larger risk than the one it removes.
  */
-export async function loadPools(client: PoolClient): Promise<Map<string, PoolRow>> {
+export async function loadPools(
+  client: PoolClient,
+  chain: string,
+  token: string,
+): Promise<Map<string, PoolRow>> {
   const res = await client.query<{
     venue: string;
     pool: string;
@@ -72,7 +80,9 @@ export async function loadPools(client: PoolClient): Promise<Map<string, PoolRow
     counter_dec: number;
     counter_sym: string | null;
   }>(
-    `select venue, pool, pons_side, counter, counter_dec, counter_sym from pool_meta`,
+    `select venue, pool, pons_side, counter, counter_dec, counter_sym
+       from pool_meta where chain = $1 and token = $2`,
+    [chain, token],
   );
   const out = new Map<string, PoolRow>();
   for (const r of res.rows) {
@@ -197,14 +207,20 @@ export async function scanForPools(
   return { all, added, rejected, seen };
 }
 
-export async function persistPools(client: PoolClient, added: PoolRow[]): Promise<number> {
+export async function persistPools(
+  client: PoolClient,
+  chain: string,
+  token: string,
+  added: PoolRow[],
+): Promise<number> {
   let stored = 0;
   for (const p of added) {
     const res = await client.query(
-      `insert into pool_meta (venue, pool, pons_side, counter, counter_dec, counter_sym)
-       values ($1, $2, $3, $4, $5, $6)
+      `insert into pool_meta
+         (chain, token, venue, pool, pons_side, counter, counter_dec, counter_sym)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
        on conflict (venue, pool) do nothing`,
-      [p.venue, p.pool, p.tokenSide, p.counter, p.counterDec, p.counterSym],
+      [chain, token, p.venue, p.pool, p.tokenSide, p.counter, p.counterDec, p.counterSym],
     );
     stored += res.rowCount ?? 0;
   }

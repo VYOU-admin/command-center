@@ -21,7 +21,18 @@
  * means every row written falls inside a bucket this run saw in full.
  */
 
-import type { UpdateConfig } from './config.js';
+/** The configuration price derivation needs, narrow enough for both callers. */
+export interface PriceConfig {
+  chain: string;
+  usdAsset: string;
+  nativeAssets: string[];
+  bucketBlocks: number;
+  bucketOrigin: number;
+  tickFenceMultiple: number;
+  nativeFenceMultiple: number;
+  tokenUsdTable: string;
+  nativeUsdTable: string;
+}
 import type { SwapLog } from './decode.js';
 import type { PoolRow } from './pools.js';
 import { abs, median, toNumber } from './units.js';
@@ -95,7 +106,7 @@ function push(into: Map<number, number[]>, key: number, value: number): void {
  */
 export function derivePrices(
   swaps: { swap: SwapLog; pool: PoolRow }[],
-  cfg: UpdateConfig,
+  cfg: PriceConfig,
   tokenDecimals: number,
   reference: number[],
   minCompleteBucket: number,
@@ -253,7 +264,7 @@ export async function loadNativeReference(
  */
 export async function persistPrices(
   client: PoolClient,
-  cfg: UpdateConfig,
+  cfg: PriceConfig,
   series: PriceSeries,
 ): Promise<{
   tokenUsdInserted: number;

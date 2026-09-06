@@ -30,6 +30,7 @@ const CU: Record<string, number> = {
   eth_getLogs: 60,
   eth_getBlockByNumber: 20,
   eth_call: 26,
+  eth_getCode: 26,
 };
 const DEFAULT_CU = 60;
 
@@ -72,6 +73,8 @@ export const hexBlock = (n: number): string => '0x' + n.toString(16);
 export class RpcClient {
   private spent = 0;
   private readonly counts = new Map<string, number>();
+  /** Rate refusals seen since the last call that succeeded. */
+  private rateRefusals = 0;
 
   constructor(
     private readonly url: string,
@@ -119,9 +122,11 @@ export class RpcClient {
 
       if (res.status === 429 || (body?.error && RATE_REFUSAL.test(body.error.message ?? ''))) {
         lastRate = body?.error?.message ?? `HTTP ${res.status}`;
+        this.rateRefusals += 1;
         await new Promise((r) => setTimeout(r, 1_000 * 2 ** attempt));
         continue;
       }
+      this.rateRefusals = 0;
       if (!body) throw new Error(`${method}: HTTP ${res.status} with a non-JSON body`);
       if (body.error) throw new RpcError(body.error.message ?? 'unknown JSON-RPC error');
       /*
@@ -138,6 +143,36 @@ export class RpcClient {
     throw new Error(`${method}: still rate limited after 5 attempts (${lastRate})`);
   }
 
+  /**
+   * Distinguish a spend cap from a throughput throttle. BOTH return 429, and
+   * they need opposite responses: a throttle wants slower pacing and the job
+   * continues, a cap means the account is cut off and every further call is
+   * wasted. The probe is the cheapest call the endpoint offers -- if it is
+   * answered the refusals were throughput, if it is refused too the account
+   * itself is refusing.
+   *
+   * Returns 'throttle' or 'cap'. It never guesses: an error other than a rate
+   * refusal propagates, because that is a third thing again.
+   */
+  async diagnoseRefusal(): Promise<'throttle' | 'cap'> {
+    const before = this.rateRefusals;
+    try {
+      await this.call('eth_blockNumber', []);
+      return 'throttle';
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (RATE_REFUSAL.test(message) || /still rate limited/.test(message)) return 'cap';
+      throw err;
+    } finally {
+      this.rateRefusals = before;
+    }
+  }
+
+  /** How many rate refusals have been seen since the last successful call. */
+  get consecutiveRateRefusals(): number {
+    return this.rateRefusals;
+  }
+
   async blockNumber(): Promise<number> {
     const r = await this.call('eth_blockNumber', []);
     const n = Number.parseInt(String(r), 16);
@@ -148,6 +183,31 @@ export class RpcClient {
   async ethCall(to: string, data: string, block: string | number = 'latest'): Promise<string> {
     const tag = typeof block === 'number' ? hexBlock(block) : block;
     return String(await this.call('eth_call', [{ to, data }, tag]));
+  }
+
+  /**
+   * Contract code at a block.
+   *
+   * MUST BE EVALUATED AT A SPECIFIC BLOCK for the cohort check, not at
+   * `latest`. An address that was an ordinary wallet when it bought is a buyer
+   * whatever it became afterwards; checking at `latest` cost 581 wallets on
+   * PONS -- 4.6% of the cohort -- because they have since adopted EIP-7702
+   * delegation and now return 23 bytes of code. It cut both ways: six wallets
+   * held a delegation during the window and revoked it later, and `latest`
+   * wrongly included those.
+   *
+   * A failed read THROWS. eth_getCode has no legitimate error, so anything
+   * other than a result is a failed read, and recording it as "no contract
+   * here" is how a pool or a router becomes a wallet. The public RPC is not
+   * archival and errors "metadata is not found" on any historical block.
+   */
+  async getCode(address: string, block: string | number): Promise<string> {
+    const tag = typeof block === 'number' ? hexBlock(block) : block;
+    const result = await this.call('eth_getCode', [address, tag]);
+    if (typeof result !== 'string' || !result.startsWith('0x')) {
+      throw new Error(`eth_getCode(${address}, ${tag}) returned ${String(result)}`);
+    }
+    return result;
   }
 
   async getBlockTimestamp(block: number): Promise<number> {

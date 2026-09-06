@@ -29,6 +29,11 @@ export const TOPICS = {
 export const SELECTORS = {
   decimals: '0x313ce567',
   symbol: '0x95d89b41',
+  name: '0x06fdde03',
+  totalSupply: '0x18160ddd',
+  /** A v3 pool answers both; a router reverts, and that revert is the answer. */
+  token0: '0x0dfe1681',
+  token1: '0xd21220a7',
 } as const;
 
 /** Pad an address into a 32-byte topic, for filtering by an indexed address. */

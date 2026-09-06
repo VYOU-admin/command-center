@@ -38,6 +38,8 @@ create table if not exists token_ingest_cursor (
  * is historical and is kept because the live table uses it.
  */
 create table if not exists pool_meta (
+  chain        text    not null,
+  token        text    not null,
   venue        text    not null,
   pool         text    not null,
   pons_side    integer not null,
@@ -46,6 +48,10 @@ create table if not exists pool_meta (
   counter_sym  text,
   primary key (venue, pool)
 );
+-- Added after the PONS intake, which predates multi-token support.
+alter table pool_meta add column if not exists chain text;
+alter table pool_meta add column if not exists token text;
+create index if not exists pool_meta_chain_token_idx on pool_meta (chain, token);
 
 /* Token price in USD per block bucket, median of that bucket's USDG-quoted ticks. */
 create table if not exists pons_usd_prices (
