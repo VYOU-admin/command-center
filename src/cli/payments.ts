@@ -80,12 +80,43 @@ async function main(): Promise<void> {
     });
     if (estimateOnly) { client.release(); await app.pool.end(); process.exit(0); }
 
+    /*
+     * RESUME FROM WHAT IS STORED. Progressive writes are what make an
+     * interrupted collection survivable, and a redeploy -- including one caused
+     * by an ordinary git push -- replaces the container and kills a detached
+     * process. Rows already committed to Postgres are the only thing that
+     * survives, so start from the highest block already written rather than
+     * re-fetching a range that is already complete.
+     */
+    const resumeRow = await client.query<{ hi: string | null }>(
+      `select max(block_number)::text hi from token_payment_logs
+        where chain = $1 and token = $2 and block_number between $3 and $4`,
+      [cfg.chain, cfg.token, lo, hi],
+    );
+    const storedHi = resumeRow.rows[0]?.hi === null || resumeRow.rows[0]?.hi === undefined
+      ? null : Number(resumeRow.rows[0]!.hi);
+    /*
+     * Back off one span from the high-water mark: the last block written may
+     * have been mid-batch when the process died, so re-reading a little is the
+     * cheap way to guarantee no gap. Re-inserting is free -- the primary key
+     * makes it a no-op.
+     */
+    const startFrom = storedHi === null
+      ? lo : Math.max(lo, storedHi - cfg.maxLogSpanBlocks);
+    log.info('resume point', {
+      highest_block_already_stored: storedHi,
+      starting_from: startFrom,
+      blocks_skipped: startFrom - lo,
+      note: storedHi === null ? 'nothing stored; full sweep'
+        : 'backed off one span from the high-water mark so no gap can open',
+    });
+
     let total = 0;
     for (const asset of payable) {
       const st = await adaptiveSweep(
         rpc, cfg,
         { address: asset, topics: [TOPICS.transfer, null, counterparties.map(addressTopic)] },
-        lo, hi,
+        startFrom, hi,
         async (logs) => {
           for (const l of logs) {
             const d = decodeTransfer(l);
