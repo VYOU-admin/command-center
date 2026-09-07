@@ -107,6 +107,13 @@ export interface IntakeConfig {
   /** Share of an address's sends that must sit inside a swap transaction. */
   routerMinSwapShare: number;
 
+  /** Blocks per slice wherever stored logs are read back. One value, one place. */
+  sliceBlocks: number;
+  /** Stop and report above this many pools rather than reading them all. */
+  maxPools: number;
+  /** An implied token price above this fails the USD-total sanity check. */
+  impliedPriceCeiling: number;
+
   bucketBlocks: number;
   bucketOrigin: number;
   tickFenceMultiple: number;
@@ -268,6 +275,9 @@ export async function loadIntakeConfig(path: string): Promise<IntakeConfig> {
       if (!Array.isArray(v)) throw new Error('pricing.bridge_assets must be a list');
       return v.map((x) => String(x).trim());
     })(),
+    sliceBlocks: num(rpc, 'slice_blocks', 500_000),
+    maxPools: num(raw, 'max_pools', 2_000),
+    impliedPriceCeiling: num(raw, 'implied_price_ceiling', 1_000_000),
     routerMinRecipients: num(obj(raw, 'routers'), 'min_recipients', 50),
     routerMinSwapShare: num(obj(raw, 'routers'), 'min_swap_share', 0.5),
 

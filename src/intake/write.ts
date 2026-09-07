@@ -11,7 +11,7 @@
 
 import type { IntakeConfig } from './plan.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
-import type { PoolRow } from '../adapters/token-updates/pools.js';
+import { poolKey, type PoolRow } from '../adapters/token-updates/pools.js';
 import type { SwapLog, TransferLog } from '../adapters/token-updates/decode.js';
 import {
   buildRows, buildTransferRows, tradeLegs,
@@ -179,7 +179,7 @@ export async function loadLegsInput(
   const swaps: Slice['swaps'] = [];
   for (const r of swapRows.rows) {
     const venue = r.venue === 'v4' ? 'v4' : 'v3';
-    const pool = pools.get(`${venue}:${r.pool.toLowerCase()}`);
+    const pool = pools.get(poolKey(venue, r.pool.toLowerCase()));
     if (!pool) continue;
     swaps.push({
       pool,
@@ -236,7 +236,7 @@ export async function loadSlice(
   const swaps: Slice['swaps'] = [];
   for (const r of swapRows.rows) {
     const venue = r.venue === 'v4' ? 'v4' : 'v3';
-    const pool = pools.get(`${venue}:${r.pool.toLowerCase()}`);
+    const pool = pools.get(poolKey(venue, r.pool.toLowerCase()));
     if (!pool) continue; // out of scope; not an error
     if (r.ts === null) {
       throw new Error(
@@ -293,8 +293,8 @@ export async function derivePricesForLife(
   tokenDecimals: number,
   firstBlock: number,
   lastBlock: number,
-  sliceBlocks = 500_000,
 ): Promise<{ series: PriceSeries[]; buckets: number }> {
+  const sliceBlocks = cfg.sliceBlocks;
   const reference = await loadNativeReference(client, cfg.nativeUsdTable, cfg.chain);
   const series: PriceSeries[] = [];
   let buckets = 0;
@@ -311,6 +311,29 @@ export async function derivePricesForLife(
     buckets += s.nativeUsd.size;
   }
   return { series, buckets };
+}
+
+/**
+ * The (tx, wallet) pairs where a wallet paid a pool, for one block range.
+ *
+ * Loaded per slice rather than whole: the full index for a busy token is
+ * millions of pairs, and a transaction lives in one block so a block-range
+ * slice never splits one.
+ */
+export async function loadPayments(
+  client: PoolClient,
+  cfg: IntakeConfig,
+  fromBlock: number,
+  toBlock: number,
+): Promise<Set<string>> {
+  const res = await client.query<{ tx_hash: string; payer: string }>(
+    `select tx_hash, payer from token_payment_logs
+      where chain = $1 and token = $2 and block_number between $3 and $4`,
+    [cfg.chain, cfg.token, fromBlock, toBlock],
+  );
+  const out = new Set<string>();
+  for (const r of res.rows) out.add(`${r.tx_hash.toLowerCase()}:${r.payer.toLowerCase()}`);
+  return out;
 }
 
 /** Store a bridge series, and read one back for the pricing resolver. */
@@ -353,6 +376,61 @@ export async function loadBridgeUsd(
   return out;
 }
 
+/**
+ * ROBINHOOD.md step 10: stored prices must fall inside the range of the ticks
+ * they came from. Anything outside it is a defect to explain, not an outlier to
+ * accept -- a stored range of 1.2e-14..0.25 against a tick range of
+ * 0.065..0.102 is what exposed 89 invented buyer rows once.
+ */
+export async function checkPricesAgainstTicks(
+  client: PoolClient,
+  cfg: IntakeConfig,
+): Promise<{ tickLo: number; tickHi: number; storedLo: number; storedHi: number; outside: number }> {
+  const t = await client.query<{ lo: string; hi: string }>(
+    `select min(pons_usd)::text lo, max(pons_usd)::text hi
+       from ${cfg.tokenUsdTable} where chain = $1`,
+    [cfg.chain],
+  );
+  const r = await client.query<{ lo: string; hi: string; outside: number }>(
+    `select min(price_usd)::text lo, max(price_usd)::text hi,
+            count(*) filter (
+              where price_usd < (select min(pons_usd) from ${cfg.tokenUsdTable} where chain = $1)
+                 or price_usd > (select max(pons_usd) from ${cfg.tokenUsdTable} where chain = $1)
+            )::int as outside
+       from wallet_transactions
+      where chain = $1 and token = $2 and price_usd is not null`,
+    [cfg.chain, cfg.token],
+  );
+  return {
+    tickLo: Number(t.rows[0]?.lo ?? NaN), tickHi: Number(t.rows[0]?.hi ?? NaN),
+    storedLo: Number(r.rows[0]?.lo ?? NaN), storedHi: Number(r.rows[0]?.hi ?? NaN),
+    outside: r.rows[0]?.outside ?? 0,
+  };
+}
+
+/**
+ * ROBINHOOD.md step 11: sanity-check the USD total against market cap divided
+ * by supply before reporting it. A sum is the cheapest tripwire there is -- one
+ * window once totalled $136,522,225,213,212,380 on a token worth $0.095.
+ */
+export function checkUsdTotal(
+  totalUsd: number,
+  totalTokens: number,
+  totalSupply: number,
+  impliedPriceCeiling: number,
+): { impliedPrice: number; absurd: boolean; reason: string } {
+  const impliedPrice = totalTokens > 0 ? totalUsd / totalTokens : NaN;
+  const absurd = !Number.isFinite(impliedPrice) || impliedPrice > impliedPriceCeiling;
+  return {
+    impliedPrice,
+    absurd,
+    reason: absurd
+      ? `implied price ${impliedPrice} exceeds the ceiling ${impliedPriceCeiling}; ` +
+        `total supply ${totalSupply} -- stop rather than report this`
+      : 'within the ceiling',
+  };
+}
+
 export async function persistAllPrices(
   client: PoolClient,
   cfg: IntakeConfig,
@@ -392,6 +470,8 @@ export interface WritePlan {
   };
   groupsWithoutTransfers: number;
   groupsWithMultiplePools: number;
+  /** Trade rows only. Transfers are counted separately, never folded in. */
+  tradeRows: number;
   /** Movements that changed a position without being a trade. */
   transfersWritten: number;
   transfersSkippedAsTrades: number;
@@ -414,6 +494,7 @@ function emptyPlan(): WritePlan {
     excluded: { infrastructure: 0, isAPool: 0, roundTrippers: 0, outsideCohort: 0 },
     groupsWithoutTransfers: 0,
     groupsWithMultiplePools: 0,
+    tradeRows: 0,
     transfersWritten: 0,
     transfersSkippedAsTrades: 0,
     transfersBelowFloor: 0,
@@ -422,6 +503,7 @@ function emptyPlan(): WritePlan {
 
 function fold(plan: WritePlan, rows: WalletRow[], stats: RowStats, wallets: Set<string>): void {
   plan.rows += rows.length;
+  plan.tradeRows += rows.filter((r) => r.side === 'buy' || r.side === 'sell').length;
   for (const r of rows) {
     plan.bySide[r.side] = (plan.bySide[r.side] ?? 0) + 1;
     wallets.add(r.wallet);
@@ -457,8 +539,25 @@ export async function planOrWrite(
   lastBlock: number,
   commit: boolean,
   bridgeUsd: Map<string, Map<number, { price: number }>> = new Map(),
-  sliceBlocks = 500_000,
-): Promise<{ plan: WritePlan; stored: number }> {
+  /**
+   * Correction mode. Deletes this token's rows in the range before reinserting,
+   * scoped to (chain, token) and the block range -- NEVER wider. Without it a
+   * re-run cannot fix a bad run: `on conflict do nothing` leaves the wrong rows
+   * exactly where they are. The caller must have reported the dry-run counts,
+   * including the zeros, before setting this.
+   */
+  reinsert = false,
+): Promise<{ plan: WritePlan; stored: number; deleted: number }> {
+  const sliceBlocks = cfg.sliceBlocks;
+  let deleted = 0;
+  if (commit && reinsert) {
+    const res = await client.query(
+      `delete from wallet_transactions
+        where chain = $1 and token = $2 and block_number between $3 and $4`,
+      [cfg.chain, cfg.token, firstBlock, lastBlock],
+    );
+    deleted = res.rowCount ?? 0;
+  }
   const plan = emptyPlan();
   const wallets = new Set<string>();
   const knownPools = new Set([...pools.values()].map((p) => p.pool));
@@ -482,8 +581,9 @@ export async function planOrWrite(
     }
 
     const resolver = counterUsdResolver(cfg, nativeUsd, bridgeUsd);
+    const payments = await loadPayments(client, cfg, from, to);
     const { legs } = tradeLegs(
-      slice.swaps, slice.transfers, cfg, resolver, exclusions, knownPools,
+      slice.swaps, slice.transfers, cfg, resolver, exclusions, knownPools, payments,
     );
     const { rows: tRows, skippedBecauseTraded, skippedBelowFloor } = buildTransferRows(
       slice.transfers, legs, cfg, tokenDecimals, exclusions, knownPools, cohort,
@@ -497,9 +597,10 @@ export async function planOrWrite(
       slice.transfers,
       cfg,
       tokenDecimals,
-      counterUsdResolver(cfg, nativeUsd, bridgeUsd),
+      resolver,
       exclusions,
       knownPools,
+      payments,
       cohort,
     );
     fold(plan, rows.concat(tRows), stats, wallets);
@@ -524,5 +625,5 @@ export async function planOrWrite(
   }
 
   plan.wallets = wallets.size;
-  return { plan, stored };
+  return { plan, stored, deleted };
 }

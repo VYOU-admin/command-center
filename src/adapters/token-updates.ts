@@ -37,6 +37,7 @@ import { SCHEMA } from './token-updates/schema.js';
 import { RpcClient } from './token-updates/rpc.js';
 import {
   TOPICS,
+  addressTopic,
   decodeSwap,
   decodeTransfer,
   decodeUint8,
@@ -59,6 +60,7 @@ import { loadExclusions } from './token-updates/exclusions.js';
 import type { PoolClient } from '../store/db.js';
 
 const INFRASTRUCTURE_PATH = 'config/infrastructure.yaml';
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
 interface Pending {
   cfg: UpdateConfig;
@@ -73,6 +75,7 @@ interface Pending {
   callCounts: Record<string, number>;
   swapCounts: { v3: number; v4: number };
   transferCount: number;
+  paymentRows: { tx: string; payer: string; asset: string; amt: bigint; block: number }[];
   poolsRejected: number;
   idle: boolean;
 }
@@ -158,7 +161,8 @@ const adapter: SourceAdapter<WalletRow> = {
       pending.set(ctx.monitorId, {
         cfg, from, to: cursor, head, newPools: [], prices: null, priceError: null,
         stats: emptyStats(), cuSpent: rpc.cuSpent, callCounts: rpc.callCounts(),
-        swapCounts: { v3: 0, v4: 0 }, transferCount: 0, poolsRejected: 0, idle: true,
+        swapCounts: { v3: 0, v4: 0 }, transferCount: 0, paymentRows: [],
+        poolsRejected: 0, idle: true,
       });
       return [];
     }
@@ -215,6 +219,36 @@ const adapter: SourceAdapter<WalletRow> = {
       from, to, cfg.logSpanBlocks, cfg.minLogSpanBlocks,
     );
     const transfers = transferLogs.map(decodeTransfer);
+
+    /*
+     * WHO PAID. A buy has two halves and the token's own transfers prove only
+     * the first; this proves the second. One eth_getLogs per pricing asset,
+     * with every pool counterparty as a topic array, so the cost is per asset
+     * rather than per pool. See docs/ROBINHOOD.md step 7.
+     *
+     * Native-ETH-quoted pools move value without a Transfer log and are not
+     * covered -- that limitation is recorded in the document, not worked around.
+     */
+    const counterparties = [
+      ...new Set([...scan.all.values()].filter((p) => p.venue === 'v3').map((p) => p.pool)),
+      cfg.v4PoolManager.toLowerCase(),
+    ];
+    const payAssets = [...new Set(
+      [...scan.all.values()].map((p) => p.counter).filter((a) => a !== ZERO_ADDRESS),
+    )];
+    const payments = new Set<string>();
+    const paymentRows: { tx: string; payer: string; asset: string; amt: bigint; block: number }[] = [];
+    for (const asset of payAssets) {
+      const logs = await rpc.getLogs(
+        { address: asset, topics: [TOPICS.transfer, null, counterparties.map(addressTopic)] },
+        from, to, cfg.logSpanBlocks, cfg.minLogSpanBlocks,
+      );
+      for (const l of logs) {
+        const d = decodeTransfer(l);
+        payments.add(`${d.txHash}:${d.from}`);
+        paymentRows.push({ tx: d.txHash, payer: d.from, asset, amt: d.amount, block: d.block });
+      }
+    }
 
     /* ---- prices: a failure here does NOT fail the run -------------------- */
     /*
@@ -286,6 +320,7 @@ const adapter: SourceAdapter<WalletRow> = {
       counterUsdResolver(cfg, pricingMap),
       exclusions,
       knownPools,
+      payments,
       cohort,
     );
 
@@ -296,6 +331,8 @@ const adapter: SourceAdapter<WalletRow> = {
       swaps_v3: v3Count,
       swaps_v4: v4Count,
       transfers: transfers.length,
+      payment_legs: paymentRows.length,
+      payment_assets_swept: payAssets.length,
       rows_built: rows.length,
       price_buckets_partial_skipped: prices?.stats.bucketsPartial ?? 0,
       price_buckets_reused_from_store: storedBucketsUsed,
@@ -313,6 +350,7 @@ const adapter: SourceAdapter<WalletRow> = {
       callCounts: rpc.callCounts(),
       swapCounts: { v3: v3Count, v4: v4Count },
       transferCount: transfers.length,
+      paymentRows,
       poolsRejected: scan.rejected.length,
       idle: false,
     });
@@ -330,6 +368,14 @@ const adapter: SourceAdapter<WalletRow> = {
     if (p.idle) return 0;
 
     await persistPools(client, p.cfg.chain, p.cfg.token, p.newPools);
+    for (const pr of p.paymentRows) {
+      await client.query(
+        `insert into token_payment_logs
+           (chain, token, tx_hash, payer, asset, amount, block_number)
+         values ($1,$2,$3,$4,$5,$6,$7) on conflict do nothing`,
+        [p.cfg.chain, p.cfg.token, pr.tx, pr.payer, pr.asset, pr.amt.toString(), pr.block],
+      );
+    }
     const priceWrites = p.prices
       ? await persistPrices(client, p.cfg, p.prices)
       : { tokenUsdInserted: 0, tokenUsdAlreadyPresent: 0,
@@ -384,6 +430,7 @@ const adapter: SourceAdapter<WalletRow> = {
         rows_below_token_amount: p.stats.rowsBelowTokenAmountFloor,
         rows_below_usd: p.stats.rowsBelowUsdFloor,
       },
+      buys_rejected_no_payment: p.stats.buysWithNoPayment,
       excluded: {
         infrastructure: p.stats.walletsExcludedInfrastructure,
         is_a_pool: p.stats.walletsExcludedIsPool,
@@ -404,6 +451,7 @@ function emptyStats(): RowStats {
     candidateWallets: 0, walletsExcludedInfrastructure: 0, walletsExcludedIsPool: 0,
     roundTrippers: 0, rowsBelowTokenAmountFloor: 0, rowsBelowUsdFloor: 0,
     rowsOutsideCohort: 0, rowsWithNullUsd: 0, nullUsdBecauseNoBucketPrice: 0,
+    buysWithNoPayment: 0,
   };
 }
 

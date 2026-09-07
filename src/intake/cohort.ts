@@ -25,11 +25,20 @@
 import type { IntakeConfig, IntakeWindow } from './plan.js';
 import { classifyCode } from '../adapters/token-updates/decode.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
-import type { ExclusionEntry } from '../adapters/token-updates/exclusions.js';
 import type { PoolRow } from '../adapters/token-updates/pools.js';
-import { tradeLegs } from '../adapters/token-updates/rows.js';
+import { tradeLegs, type PaymentIndex } from '../adapters/token-updates/rows.js';
 import { loadLegsInput } from './write.js';
 import type { PoolClient } from '../store/db.js';
+
+export interface TagReport {
+  /** Genuinely new tag rows. */
+  tagsStored: number;
+  /** Existing `auto` tags re-asserted by this run. */
+  tagsRefreshed: number;
+  /** Tags a human set to `manual`, which a re-run must never overwrite. */
+  manualLeftAlone: number;
+  windowRow: boolean;
+}
 
 export interface CohortReport {
   window: string;
@@ -55,7 +64,10 @@ export async function buildCohort(
   cfg: IntakeConfig,
   window: IntakeWindow,
   pools: Map<string, PoolRow>,
-  exclusions: ExclusionEntry[],
+  /** The effective exclusions: the configured list union the detected routers. */
+  excludedSet: Set<string>,
+  /** (tx, wallet) pairs where the wallet paid a pool. See ROBINHOOD.md step 7. */
+  payments: PaymentIndex,
 ): Promise<CohortReport> {
   const startBlock = window.startBlock!;
   const endBlock = window.endBlock!;
@@ -67,29 +79,41 @@ export async function buildCohort(
    * the infrastructure list, and detects round-tripping per transaction, all
    * because the row writer does, not because this file repeats the rules.
    */
-  const slice = await loadLegsInput(client, cfg, pools, startBlock, endBlock);
-  const excludedSet = new Set(exclusions.map((e) => e.address));
   const knownPools = new Set([...pools.values()].map((p) => p.pool));
   knownPools.add(cfg.v4PoolManager.toLowerCase());
 
-  const { legs, stats } = tradeLegs(
-    // The cohort does not need prices: membership is who traded, not for how
-    // much. A resolver that always returns null keeps every leg's USD null.
-    slice.swaps, slice.transfers, cfg, () => null, excludedSet, knownPools,
-  );
-
+  /*
+   * SLICED, never loaded whole. A cohort window on a busy token is millions of
+   * transfers, and a transaction lives in exactly one block, so a block-range
+   * slice can never split one apart.
+   */
   const buyers = new Set<string>();
-  for (const leg of legs) if (leg.side === 'buy') buyers.add(leg.wallet);
-  const survivors = [...buyers].sort();
-
   const usedExclusions = new Set<string>();
-  for (const t of slice.transfers) {
-    if (excludedSet.has(t.from)) usedExclusions.add(t.from);
-    if (excludedSet.has(t.to)) usedExclusions.add(t.to);
+  let excludedByInfrastructure = 0;
+  let excludedAsRoundTrippers = 0;
+  let excludedAsPools = 0;
+  let candidateWallets = 0;
+
+  for (let from = startBlock; from <= endBlock; from += cfg.sliceBlocks) {
+    const to = Math.min(from + cfg.sliceBlocks - 1, endBlock);
+    const slice = await loadLegsInput(client, cfg, pools, from, to);
+    const { legs, stats } = tradeLegs(
+      // The cohort does not need prices: membership is who traded, not for how
+      // much. A resolver that always returns null keeps every leg's USD null.
+      slice.swaps, slice.transfers, cfg, () => null, excludedSet, knownPools,
+      payments,
+    );
+    for (const leg of legs) if (leg.side === 'buy') buyers.add(leg.wallet);
+    for (const t of slice.transfers) {
+      if (excludedSet.has(t.from)) usedExclusions.add(t.from);
+      if (excludedSet.has(t.to)) usedExclusions.add(t.to);
+    }
+    excludedByInfrastructure += stats.walletsExcludedInfrastructure;
+    excludedAsRoundTrippers += stats.roundTrippers;
+    excludedAsPools += stats.walletsExcludedIsPool;
+    candidateWallets += stats.candidateWallets;
   }
-  const excludedByInfrastructure = stats.walletsExcludedInfrastructure;
-  const excludedAsRoundTrippers = stats.roundTrippers;
-  const excludedAsPools = stats.walletsExcludedIsPool;
+  const survivors = [...buyers].sort();
 
   /*
    * The code check, at the window's END block. This needs an archival endpoint:
@@ -117,7 +141,7 @@ export async function buildCohort(
     window: window.label,
     startBlock,
     endBlock,
-    rawBuyers: stats.candidateWallets,
+    rawBuyers: candidateWallets,
     excludedByInfrastructure,
     excludedAsRoundTrippers,
     excludedAsPools,
@@ -125,32 +149,68 @@ export async function buildCohort(
     excludedAsContracts,
     delegatedEip7702,
     cohort,
-    unusedExclusions: exclusions
-      .filter((e) => !usedExclusions.has(e.address))
-      .map((e) => `${e.label} (${e.address})`),
+    unusedExclusions: [...excludedSet].filter((a) => !usedExclusions.has(a)),
   };
 }
 
 /**
- * Write the tags. Called only after the cohort STOP has been cleared.
- * Returns how many rows were newly stored, which will be less than the cohort
- * size on a re-run and equal to it on a first run.
+ * Write the tags AND the window record. ROBINHOOD.md step 8.
+ *
+ * `wallet_tags.source` is `auto` for a run and `manual` for a human edit, and it
+ * is NOT NULL with no default -- omitting it threw on the first tag, which is
+ * why the runner never got past this step. A re-run re-asserts `auto` tags by
+ * upsert and never touches a `manual` one, because tags live in their own table
+ * so operator edits survive a re-run.
+ *
+ * EVERY RUN WRITES ITS token_windows ROW. A cohort with rows and no window row
+ * is a defect: the cohort's definition was never written down and the only
+ * remaining description of it is the rows themselves. The dashboard legend and
+ * the scorer both read it, and a token with no window row cannot be scored at
+ * all.
+ *
+ * The window row is written ONLY when the window is complete across every pool
+ * in scope -- `complete` is the caller's assertion that the sweep and the cohort
+ * both finished. A window with tags and no window row is the signal that it was
+ * interrupted, and it renders with no legend entry, which is correct: a
+ * half-collected cohort must not look complete.
  */
 export async function writeTags(
   client: PoolClient,
   cfg: IntakeConfig,
   window: IntakeWindow,
   cohort: string[],
-): Promise<number> {
-  let stored = 0;
+  complete: boolean,
+): Promise<TagReport> {
+  let tagsStored = 0;
+  let tagsRefreshed = 0;
   for (const wallet of cohort) {
-    const res = await client.query(
-      `insert into wallet_tags (wallet, mint, tag)
-       values ($1, $2, $3)
-       on conflict (wallet, mint, tag) do nothing`,
+    // `xmax = 0` is true only for a genuine insert, so a re-run reports how many
+    // tags are new rather than counting every upsert as one.
+    const res = await client.query<{ inserted: boolean }>(
+      `insert into wallet_tags (wallet, mint, tag, source)
+       values ($1, $2, $3, 'auto')
+       on conflict (wallet, mint, tag) do update
+         set updated_at = now()
+       where wallet_tags.source = 'auto'
+       returning (xmax = 0) as inserted`,
       [wallet, cfg.token, window.label],
     );
-    stored += res.rowCount ?? 0;
+    if (res.rows[0]?.inserted) tagsStored += 1;
+    else if (res.rowCount) tagsRefreshed += 1;
   }
-  return stored;
+
+  const manualLeftAlone = cohort.length - tagsStored - tagsRefreshed;
+  if (!complete) {
+    return { tagsStored, tagsRefreshed, manualLeftAlone, windowRow: false };
+  }
+  await client.query(
+    `insert into token_windows (mint, tag, window_start, window_end, label)
+     values ($1, $2, $3::timestamptz, $4::timestamptz, $5)
+     on conflict (mint, tag) do update
+       set window_start = excluded.window_start,
+           window_end   = excluded.window_end,
+           label        = excluded.label`,
+    [cfg.token, window.label, window.start, window.end, window.label],
+  );
+  return { tagsStored, tagsRefreshed, manualLeftAlone, windowRow: true };
 }

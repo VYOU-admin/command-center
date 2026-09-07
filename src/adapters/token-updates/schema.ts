@@ -63,6 +63,51 @@ create table if not exists pons_usd_prices (
 );
 
 /*
+ * The pools that were REJECTED, and why.
+ *
+ * ROBINHOOD.md step 4: record the pools excluded and why, before any swap is
+ * read, so the set that was read is on record independently of what the read
+ * returned. Counting them is not the same as being able to say which they were.
+ */
+create table if not exists pool_rejected (
+  chain       text not null,
+  token       text not null,
+  venue       text not null,
+  pool        text not null,
+  counter     text not null,
+  counter_sym text,
+  reason      text not null,
+  created_at  timestamptz not null default now(),
+  primary key (chain, token, venue, pool)
+);
+
+/*
+ * WHO PAID A POOL, and in which transaction.
+ *
+ * A buy has two halves: the wallet received the token in a swap, AND it gave up
+ * value in the same transaction. The token's own Transfer logs prove the first
+ * half only. This table proves the second: every transfer of a pricing or
+ * bridge asset INTO a pool counterparty, which is what paying for a swap looks
+ * like on chain.
+ *
+ * Bounded by the pool set, not by the chain: one eth_getLogs per asset with the
+ * counterparties as a topic array, rather than one per pool.
+ */
+create table if not exists token_payment_logs (
+  chain        text    not null,
+  token        text    not null,
+  tx_hash      text    not null,
+  payer        text    not null,
+  asset        text    not null,
+  amount       numeric not null,
+  block_number bigint  not null,
+  primary key (chain, token, tx_hash, payer, asset, block_number)
+);
+
+create index if not exists token_payment_logs_range_idx
+  on token_payment_logs (chain, token, block_number);
+
+/*
  * A bridge asset's own USD price per bucket -- the SECOND HOP.
  *
  * Derived from the bridge's pools against a recognised pricing asset, never

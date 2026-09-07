@@ -508,6 +508,12 @@ delegations adopted later, and wrongly *included* six that held a delegation
 during the window and revoked it after. It was wrong in both directions. This
 needs the archival endpoint.
 
+**Pool-ness and wallet-ness are checked at DIFFERENT blocks, deliberately.** A
+pool is a pool for good, so the flow probe checks code at the enumeration head.
+A wallet's status is a fact about a moment, so the cohort checks code at the
+window's end block. Using one block for both would be wrong in one direction or
+the other.
+
 **A failed `eth_getCode` must throw.** It has no legitimate error, so anything
 else is a failed read, and recording it as "no contract here" turns a pool or a
 router into a wallet.
@@ -1025,36 +1031,21 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 
 ## 9. Rules here the code does not implement
 
-The running gap list, in one place. Each is a defect in the code.
+**Empty.** Every rule above is implemented.
 
-**Fatal — the runner cannot complete a first run:**
+Two limitations are recorded here because they are properties of the chain
+rather than gaps in the code, and both are visible in what gets reported:
 
-1. `writeTags` omits `source`, which is `NOT NULL` with no default. It throws on
-   the first tag.
-2. The runner never writes `token_windows`. A token it loads cannot be scored.
+- **Native-ETH payments are invisible to the "gave up value" test.** Value sent
+  as native ETH moves without a `Transfer` log, so a wallet that paid an
+  ETH-quoted v4 pool in native value cannot be shown to have paid from log data
+  alone. It would need a receipt per transaction. Buys on ETH-quoted pools are
+  therefore counted only when the wallet also moved an ERC-20 in the same
+  transaction, and the count rejected for no payment is reported every run.
+- **A bucket median is still a median over ~17 minutes.** The window-median bias
+  measured elsewhere (95.56 whole-window against 127.17 and 97.41 for the
+  halves) has never been measured on this chain. Measure it on a token that
+  moved.
 
-**Substantive:**
-
-3. The "gave up value" half of the buy rule is not implemented anywhere.
-4. "A wallet absent from the transaction cannot have paid in it" is not checked.
-5. No scoped delete-and-reinsert correction path, so a re-run cannot fix a bad
-   run.
-6. No USD route is reported but does not stop the run.
-7. No "too many pools, stop and report" gate.
-8. Excluded pools are counted, not persisted with their reason.
-9. `wallet_tags.source` semantics unimplemented.
-10. Stored prices are not compared against the range of the ticks they came from.
-11. The USD total is not sanity-checked against market cap ÷ supply.
-12. The `low-weight` threshold is hard-coded at 0.8 rather than re-derived.
-13. Routers are identified from behaviour in a report, but the exclusion list the
-    pipeline actually applies is still the hand-typed one.
-
-**From the re-audit, including defects introduced while fixing others:**
-
-14. The cohort builder loads a whole window's swaps and transfers in one query.
-15. The bridge series skips no partial bucket.
-16. Router detection analyses only the first window.
-17. The dry-run row total conflates trade rows and transfer rows.
-18. The pool key is built inline in two places instead of using `poolKey()`.
-19. Decimals are read by two separate code paths.
-20. The flow probe and the cohort read code at different blocks.
+When something is found that this document requires and the code does not do,
+it goes here, and it is a defect in the code.

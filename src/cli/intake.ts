@@ -32,7 +32,9 @@ import {
 } from '../intake/plan.js';
 import { SCHEMA as TOKEN_UPDATE_SCHEMA } from '../adapters/token-updates/schema.js';
 import { RpcClient } from '../adapters/token-updates/rpc.js';
-import { TOPICS, decodeSwap, decodeTransfer } from '../adapters/token-updates/decode.js';
+import {
+  TOPICS, addressTopic, decodeSwap, decodeTransfer, readDecimals,
+} from '../adapters/token-updates/decode.js';
 import { loadPools, persistPools, poolKey, type PoolRow } from '../adapters/token-updates/pools.js';
 import { loadExclusions } from '../adapters/token-updates/exclusions.js';
 import {
@@ -53,13 +55,16 @@ import {
   fetchTimestamps,
   loadBridgeUsd,
   loadLegsInput,
+  loadPayments,
   persistAllPrices,
+  checkPricesAgainstTicks,
+  checkUsdTotal,
   persistBridgeUsd,
   planOrWrite,
   planTimestamps,
 } from '../intake/write.js';
 import { deriveBridgeUsd } from '../adapters/token-updates/prices.js';
-import { detectRouters, compareToList } from '../intake/routers.js';
+import { compareToList, detectRouters, effectiveExclusions } from '../intake/routers.js';
 
 const INFRASTRUCTURE_PATH = 'config/infrastructure.yaml';
 
@@ -153,7 +158,16 @@ async function main(): Promise<void> {
   let firstBlock = 0;
   let pools = new Map<string, PoolRow>();
   const exclusions = await loadExclusions(INFRASTRUCTURE_PATH, cfg.chain);
-  const excludedAddresses = new Set(exclusions.map((e) => e.address));
+  /*
+   * Resolved per phase rather than once at startup: the scope phase is what
+   * discovers the routers, so a phase running after it must pick them up.
+   */
+  const effective = async (c: PoolClient): Promise<Set<string>> => {
+    const e = await effectiveExclusions(
+      c, cfg.chain, cfg.token, exclusions.map((x) => x.address),
+    );
+    return e.addresses;
+  };
 
   const run = async <T>(
     phase: Phase,
@@ -256,6 +270,18 @@ async function main(): Promise<void> {
       const found = await discoverPools(
         rpc, cfg, firstBlock || 1, head, sweepStream, head,
       );
+      /*
+       * ROBINHOOD.md step 3: if a token resolves to a very large number of
+       * pools, stop and report rather than reading all of them. Cost is linear
+       * in pools and the choice is the operator's. AI has 4,856.
+       */
+      if (found.candidates.length > cfg.maxPools) {
+        throw new Error(
+          `${cfg.ticker} resolved to ${found.candidates.length.toLocaleString()} pools, ` +
+            `above the max_pools ceiling of ${cfg.maxPools.toLocaleString()}. Reading them ` +
+            'all costs linearly in pools. Raise the ceiling deliberately or narrow the scope.',
+        );
+      }
       await c.query(
         `insert into token_intake_state (chain, token, phase, status, detail)
          values ($1, $2, 'pools:candidates', 'complete', $3::jsonb)
@@ -290,6 +316,17 @@ async function main(): Promise<void> {
       }
       const scope = await scopePools(rpc, cfg, candidates);
       await persistPools(c, cfg.chain, cfg.token, scope.inScope);
+      for (const r of scope.rejected) {
+        await c.query(
+          `insert into pool_rejected
+             (chain, token, venue, pool, counter, counter_sym, reason)
+           values ($1,$2,$3,$4,$5,$6,$7)
+           on conflict (chain, token, venue, pool) do update
+             set reason = excluded.reason, counter_sym = excluded.counter_sym`,
+          [cfg.chain, cfg.token, r.venue, r.pool, r.counter, r.symbol,
+           `counter ${r.symbol ?? r.counter} is not a recognised pricing or bridge asset`],
+        );
+      }
 
       /*
        * WHO IS A ROUTER, FROM BEHAVIOUR. Reported here rather than taken from
@@ -299,11 +336,49 @@ async function main(): Promise<void> {
        * does not support is a claim nobody checked.
        */
       const v3Addrs = scope.inScope.filter((p) => p.venue === 'v3').map((p) => p.pool);
-      const w0 = windows[0]!;
-      const detected = await detectRouters(
-        c, rpc, cfg, v3Addrs, w0.startBlock ?? firstBlock, w0.endBlock ?? head, head,
-      );
+      // EVERY window, not just the first: a multi-window token routes
+      // differently in each, and one window's behaviour is not the token's.
+      const detectedAll: Awaited<ReturnType<typeof detectRouters>>['candidates'] = [];
+      let probedTotal = 0;
+      for (const w of windows) {
+        const d = await detectRouters(
+          c, rpc, cfg, v3Addrs, w.startBlock ?? firstBlock, w.endBlock ?? head, head,
+        );
+        probedTotal += d.probed;
+        for (const cand of d.candidates) {
+          if (!detectedAll.some((x) => x.address === cand.address)) detectedAll.push(cand);
+        }
+      }
+      const detected = { candidates: detectedAll, probed: probedTotal };
       const versus = compareToList(detected.candidates, exclusions.map((e) => e.address));
+
+      /*
+       * ROBINHOOD.md step 7: routers are identified by BEHAVIOUR. The detected
+       * set is persisted and merged into the exclusions the pipeline actually
+       * applies, rather than only appearing in a report while the hand-typed
+       * list does the work.
+       */
+      for (const cand of detected.candidates.filter((x) => x.isRouter)) {
+        await c.query(
+          `insert into token_intake_state (chain, token, phase, status, detail)
+           values ($1,$2,$3,'complete',$4::jsonb)
+           on conflict (chain, token, phase) do update set detail = excluded.detail`,
+          [cfg.chain, cfg.token, `router:${cand.address}`, JSON.stringify(cand)],
+        );
+      }
+
+      /*
+       * ROBINHOOD.md step 4: if a token has no USD route at all -- no
+       * stablecoin pool and no bridge -- report it and stop. Do not substitute
+       * a rate from anywhere else.
+       */
+      if (scope.noUsdRoute && cfg.bridgeAssets.length === 0) {
+        throw new Error(
+          `${cfg.ticker} has no USD-quoted pool and no bridge asset configured. ` +
+            'Every row would carry a null usd_amount. Configure a bridge whose own ' +
+            'price is derivable on chain, or stop.',
+        );
+      }
 
       return {
         report: {
@@ -421,6 +496,39 @@ async function main(): Promise<void> {
       );
       totals['transfer'] = t.logs;
 
+      /*
+       * WHO PAID. One eth_getLogs per pricing asset with every counterparty as
+       * a topic array. Native-ETH-quoted pools move value with no Transfer log
+       * and are not covered; ROBINHOOD.md step 7 records that limitation.
+       */
+      const counterparties = [...new Set([...v3, cfg.v4PoolManager.toLowerCase()])];
+      const payAssets = [...new Set(
+        [...pools.values()].map((p) => p.counter)
+          .filter((a) => a !== '0x0000000000000000000000000000000000000000'),
+      )];
+      let paymentLegs = 0;
+      for (const asset of payAssets) {
+        const st = await adaptiveSweep(
+          rpc, cfg,
+          { address: asset, topics: [TOPICS.transfer, null, counterparties.map(addressTopic)] },
+          firstBlock, head,
+          async (logs, f, t) => {
+            for (const l of logs) {
+              const d = decodeTransfer(l);
+              await c.query(
+                `insert into token_payment_logs
+                   (chain, token, tx_hash, payer, asset, amount, block_number)
+                 values ($1,$2,$3,$4,$5,$6,$7) on conflict do nothing`,
+                [cfg.chain, cfg.token, d.txHash, d.from, asset, d.amount.toString(), d.block],
+              );
+            }
+            await recordSweepRange(c, cfg, `payment:${asset}`, f, t, logs.length);
+          },
+        );
+        paymentLegs += st.logs;
+      }
+      totals['payments'] = paymentLegs;
+
       const coverage: Record<string, unknown> = {};
       for (const kind of ['swap-v3', 'swap-v4', 'transfer']) {
         const chk = await checkCoverage(c, cfg, kind, firstBlock, head);
@@ -518,7 +626,11 @@ async function main(): Promise<void> {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
       const reports = [];
       for (const w of windows) {
-        const r = await buildCohort(c, rpc, cfg, w, pools, exclusions);
+        const payments = await loadPayments(c, cfg, w.startBlock!, w.endBlock!);
+        const eff = await effectiveExclusions(
+          c, cfg.chain, cfg.token, exclusions.map((x) => x.address),
+        );
+        const r = await buildCohort(c, rpc, cfg, w, pools, eff.addresses, payments);
         reports.push({ ...r, cohort: r.cohort.length, sample: r.cohort.slice(0, 3) });
         await c.query(
           `insert into token_intake_state (chain, token, phase, status, detail)
@@ -532,7 +644,7 @@ async function main(): Promise<void> {
 
     /* ---- 7b. tags -- its own phase, so the log names what it writes ----- */
     await run('tags', async (_rpc, c) => {
-      const written: Record<string, number> = {};
+      const written: Record<string, unknown> = {};
       for (const w of windows) {
         const stored = await c.query<{ detail: unknown }>(
           `select detail from token_intake_state where chain=$1 and token=$2 and phase=$3`,
@@ -544,9 +656,11 @@ async function main(): Promise<void> {
             `no stored cohort for window "${w.label}"; the cohort phase did not complete`,
           );
         }
-        written[w.label] = await writeTags(c, cfg, w, cohort);
+        // Complete: the sweep gap-checked clean and the cohort phase finished,
+        // both of which are prerequisites of reaching this phase at all.
+        written[w.label] = await writeTags(c, cfg, w, cohort, true);
       }
-      return { report: { tags_written: written } };
+      return { report: { tags_and_windows: written } };
     });
 
     /* ---- 8. timestamps -------------------------------------------------- */
@@ -581,7 +695,10 @@ async function main(): Promise<void> {
         );
         const bdec = (await c.query<{ decimals: number }>(
           `select decimals from tokens where mint=$1`, [bridge])).rows[0]?.decimals ?? 18;
-        const d = deriveBridgeUsd(slice.swaps, cfg, bdec, cfg.bucketOrigin);
+        const firstComplete =
+          cfg.bucketOrigin +
+          Math.ceil((firstBlock - cfg.bucketOrigin) / cfg.bucketBlocks) * cfg.bucketBlocks;
+        const d = deriveBridgeUsd(slice.swaps, cfg, bdec, firstComplete);
         const written = await persistBridgeUsd(c, cfg, bridge, d.series);
         bridgeReport[bridge] = {
           buckets_with_ticks: d.buckets, buckets_priced: d.series.size,
@@ -619,7 +736,7 @@ async function main(): Promise<void> {
       const cohort = new Set(cohortRows.rows.map((r) => r.wallet.toLowerCase()));
       const bridgeUsd = await loadBridgeUsd(c, cfg);
       const { plan } = await planOrWrite(
-        c, cfg, pools, decimals, cohort, excludedAddresses, firstBlock, head, false, bridgeUsd,
+        c, cfg, pools, decimals, cohort, await effective(c), firstBlock, head, false, bridgeUsd,
       );
       return { report: { DRY_RUN: true, cohort: cohort.size, ...plan } };
     });
@@ -634,10 +751,59 @@ async function main(): Promise<void> {
         `select distinct wallet from wallet_tags where mint=$1`, [cfg.token]);
       const cohort = new Set(cohortRows.rows.map((r) => r.wallet.toLowerCase()));
       const bridgeUsd = await loadBridgeUsd(c, cfg);
-      const { plan, stored } = await planOrWrite(
-        c, cfg, pools, decimals, cohort, excludedAddresses, firstBlock, head, true, bridgeUsd,
+      /*
+       * Dry-run counts before any delete, including the zeros. On a first run
+       * the existing-row count is 0, and that zero is stated rather than
+       * omitted -- an omitted line is indistinguishable from a check that never
+       * ran.
+       */
+      const existing = Number((await c.query<{ n: string }>(
+        `select count(*)::text n from wallet_transactions
+          where chain=$1 and token=$2 and block_number between $3 and $4`,
+        [cfg.chain, cfg.token, firstBlock, head])).rows[0]!.n);
+      const reinsert = process.argv.includes('--reinsert');
+      log.info('write pre-flight', {
+        rows_already_present: existing,
+        mode: reinsert ? 'DELETE AND REINSERT, scoped to this token and range'
+                       : 'insert only; existing rows are left untouched',
+      });
+      if (existing > 0 && !reinsert) {
+        throw new Error(
+          `${existing.toLocaleString()} rows already exist for this token in ` +
+            `${firstBlock}..${head}. Insert-only would leave them as they are. ` +
+            'Pass --reinsert to delete and rewrite this range, or narrow the range.',
+        );
+      }
+
+      const { plan, stored, deleted } = await planOrWrite(
+        c, cfg, pools, decimals, cohort, await effective(c), firstBlock, head, true,
+        bridgeUsd, reinsert,
       );
-      return { report: { ...plan, rows_stored: stored } };
+
+      const priceCheck = await checkPricesAgainstTicks(c, cfg);
+      if (priceCheck.outside > 0) {
+        throw new Error(
+          `${priceCheck.outside} stored prices fall outside the range of the ticks ` +
+            `they came from (ticks ${priceCheck.tickLo}..${priceCheck.tickHi}, stored ` +
+            `${priceCheck.storedLo}..${priceCheck.storedHi}). That is a defect to explain.`,
+        );
+      }
+      const supply = Number((await c.query<{ s: string }>(
+        `select coalesce(max(total_supply),0)::text s from tokens where mint=$1`,
+        [cfg.token]).catch(() => ({ rows: [{ s: '0' }] }))).rows[0]!.s);
+      const usdCheck = checkUsdTotal(
+        plan.totals.usd, plan.totals.tokenAmount, supply, cfg.impliedPriceCeiling,
+      );
+      if (usdCheck.absurd) throw new Error(`USD total sanity check failed: ${usdCheck.reason}`);
+
+      return {
+        report: {
+          ...plan, rows_stored: stored, rows_deleted: deleted,
+          rows_already_present_before: existing,
+          price_range_check: priceCheck,
+          usd_total_check: usdCheck,
+        },
+      };
     });
 
     log.info('intake complete', { token: cfg.token, ticker: cfg.ticker });

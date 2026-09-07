@@ -29,7 +29,45 @@ import { FLAG_INFLATED_PNL, FLAG_LOW_WEIGHT, SCORES_SCHEMA } from '../scoring/sc
  * there; 0.9 would additionally flag 85 wallets missing only earliness, which
  * is a question about cohort construction rather than data quality.
  */
-const LOW_WEIGHT_THRESHOLD = 0.8;
+const LOW_WEIGHT_DEFAULT = 0.8;
+
+/**
+ * Derive the low-weight cut from THIS token's weight distribution rather than
+ * inheriting another token's number.
+ *
+ * The PONS distribution is bimodal -- 12,296 wallets at 1.000, then 67 at
+ * 0.875, 18 at 0.825, 1 at 0.175 -- so 0.5 and 0.8 make the same cut there and
+ * 0.9 catches 86. A token with a smoother distribution needs a different
+ * number, and the point of the flag is comparability, not the constant.
+ *
+ * The rule: take the largest gap in the sorted distinct weights below 1.0 and
+ * cut there. Fall back to the default when there is no gap to find, and say so.
+ */
+export function deriveLowWeightThreshold(
+  weights: number[],
+): { threshold: number; derived: boolean; reason: string } {
+  const distinct = [...new Set(weights.filter((w) => w > 0 && w < 0.999))].sort((a, b) => a - b);
+  if (distinct.length < 2) {
+    return {
+      threshold: LOW_WEIGHT_DEFAULT,
+      derived: false,
+      reason: `only ${distinct.length} distinct partial weight(s); no gap to cut at, ` +
+        `so the ${LOW_WEIGHT_DEFAULT} default stands`,
+    };
+  }
+  let bestGap = -1;
+  let cut = LOW_WEIGHT_DEFAULT;
+  for (let i = 1; i < distinct.length; i++) {
+    const gap = distinct[i]! - distinct[i - 1]!;
+    if (gap > bestGap) { bestGap = gap; cut = (distinct[i]! + distinct[i - 1]!) / 2; }
+  }
+  return {
+    threshold: cut,
+    derived: true,
+    reason: `largest gap in the partial-weight distribution is ${bestGap.toFixed(3)}, ` +
+      `cutting at ${cut.toFixed(3)} across ${distinct.length} distinct values`,
+  };
+}
 
 /**
  * How negative a position has to be to count as acquisition we cannot see.
@@ -283,12 +321,15 @@ async function main(): Promise<void> {
       "those wallets' PnL.",
   });
 
+  const lowWeight = deriveLowWeightThreshold(result.wallets.map((w) => w.weightUsed));
+  log.info('low-weight threshold', { ...lowWeight });
+
   /* Flags are rebuilt from scratch every run; nothing is accumulated. */
   const flagsFor = (w: { wallet: string; score: number | null; weightUsed: number }): string[] => {
     const f: string[] = [];
     // Only a SCORED wallet can be low-weight: an unscored one already reads as
     // unscored, and flagging it adds nothing.
-    if (w.score !== null && w.weightUsed < LOW_WEIGHT_THRESHOLD) f.push(FLAG_LOW_WEIGHT);
+    if (w.score !== null && w.weightUsed < lowWeight.threshold) f.push(FLAG_LOW_WEIGHT);
     // Applied regardless of scored status: it is a fact about the wallet.
     if (inflated.has(w.wallet)) f.push(FLAG_INFLATED_PNL);
     return f;
@@ -297,7 +338,8 @@ async function main(): Promise<void> {
   const withLow = flagged.filter((x) => x.f.includes(FLAG_LOW_WEIGHT));
   const withInf = flagged.filter((x) => x.f.includes(FLAG_INFLATED_PNL));
   log.info('score-quality flags', {
-    low_weight_threshold: LOW_WEIGHT_THRESHOLD,
+    low_weight_threshold: lowWeight.threshold,
+    low_weight_threshold_derived: lowWeight.derived,
     inflated_position_floor: INFLATED_POSITION_FLOOR,
     wallets_negative_in_sql_numeric: inflated.size,
     'low-weight': withLow.length,

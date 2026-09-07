@@ -6,7 +6,7 @@
  * the three it named turns out to front 36,850 recipients while two others on
  * the list front far fewer.
  *
- * DEFINITIONS section 4 gives the test, and it has three parts that must all
+ * docs/ROBINHOOD.md step 7 gives the test, and it has three parts that must all
  * hold:
  *
  *   1. it is a deployed contract          -- an EOA distributing tokens is not
@@ -122,6 +122,38 @@ export async function detectRouters(
     });
   }
   return { candidates, probed };
+}
+
+/**
+ * The exclusions the pipeline actually applies: the configured infrastructure
+ * list UNION every address behaviour identified as a router.
+ *
+ * Detecting routers in a report while the hand-typed list does the real work is
+ * the same defect as documenting a rule the code does not implement. For PONS,
+ * behaviour finds 30 routers where the list holds 3, of which only 2 are
+ * routers at all -- a router the list misses gets the trade attributed to it
+ * instead of to the buyer.
+ */
+export async function effectiveExclusions(
+  client: PoolClient,
+  chain: string,
+  token: string,
+  configured: string[],
+): Promise<{ addresses: Set<string>; fromConfig: number; fromBehaviour: number }> {
+  const res = await client.query<{ phase: string }>(
+    `select phase from token_intake_state
+      where chain = $1 and token = $2 and phase like 'router:%'`,
+    [chain, token],
+  );
+  const detected = res.rows.map((r) => r.phase.slice('router:'.length).toLowerCase());
+  const addresses = new Set(configured.map((a) => a.toLowerCase()));
+  const before = addresses.size;
+  for (const a of detected) addresses.add(a);
+  return {
+    addresses,
+    fromConfig: before,
+    fromBehaviour: addresses.size - before,
+  };
 }
 
 /**

@@ -16,7 +16,7 @@ import {
   classifyCode,
   addressFromTopic,
   decodeString,
-  decodeUint8,
+  readDecimals,
   normalizeAddress,
 } from '../adapters/token-updates/decode.js';
 import { RpcError, type LogEntry, type RpcClient } from '../adapters/token-updates/rpc.js';
@@ -42,7 +42,7 @@ export async function readIdentity(
   rpc: RpcClient,
   cfg: IntakeConfig,
 ): Promise<TokenIdentity> {
-  const decimals = decodeUint8(await rpc.ethCall(cfg.token, SELECTORS.decimals));
+  const decimals = await readDecimals((to, data) => rpc.ethCall(to, data), cfg.token);
   const name = decodeString(await rpc.ethCall(cfg.token, SELECTORS.name));
   const symbol = decodeString(await rpc.ethCall(cfg.token, SELECTORS.symbol));
   const supplyRaw = await rpc.ethCall(cfg.token, SELECTORS.totalSupply);
@@ -405,7 +405,7 @@ export async function scopePools(
       if (!(err instanceof RpcError)) throw err;
     }
     try {
-      decimals = decodeUint8(await rpc.ethCall(counter, SELECTORS.decimals));
+      decimals = await readDecimals((to, data) => rpc.ethCall(to, data), counter);
     } catch (err) {
       if (!(err instanceof RpcError)) throw err;
     }

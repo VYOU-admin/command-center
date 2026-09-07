@@ -89,6 +89,8 @@ export interface RowStats {
   rowsOutsideCohort: number;
   rowsWithNullUsd: number;
   nullUsdBecauseNoBucketPrice: number;
+  /** Receipts rejected because the wallet gave up nothing in that transaction. */
+  buysWithNoPayment: number;
 }
 
 /**
@@ -102,6 +104,12 @@ export interface RowStats {
  * qualified a wallet for the cohort but produced no row. Two implementations of
  * one rule is a bug waiting to happen; this is the fix.
  */
+/**
+ * Membership test for "this wallet gave up value in transaction X".
+ * A plain Set of `${txHash}:${wallet}` satisfies it.
+ */
+export type PaymentIndex = { has(key: string): boolean };
+
 export interface TradeLeg {
   wallet: string;
   side: 'buy' | 'sell';
@@ -140,6 +148,12 @@ export function tradeLegs(
   counterUsd: CounterUsdResolver,
   exclusions: Set<string>,
   knownPools: Set<string>,
+  /**
+   * (tx, wallet) pairs where the wallet sent a pricing or bridge asset to a
+   * pool. Null disables the check, which is only correct where payment data
+   * genuinely cannot be had -- it is not a default.
+   */
+  payments: PaymentIndex | null,
 ): { legs: TradeLeg[]; stats: RowStats } {
   const poolManager = cfg.v4PoolManager.toLowerCase();
 
@@ -159,6 +173,7 @@ export function tradeLegs(
     rowsOutsideCohort: 0,
     rowsWithNullUsd: 0,
     nullUsdBecauseNoBucketPrice: 0,
+    buysWithNoPayment: 0,
   };
 
   /* ---- 1. group swaps by transaction and counterparty --------------------- */
@@ -238,8 +253,23 @@ export function tradeLegs(
       // Both directions against the same pool in one TRANSACTION: a fee
       // recipient or arbitrage hop, not a trade to attribute.
       if (gotRaw > 0n && gaveRaw > 0n) { stats.roundTrippers += 1; continue; }
+      const side: 'buy' | 'sell' = gotRaw > 0n ? 'buy' : 'sell';
+      /*
+       * THE SECOND HALF OF A BUY. Receiving the token is not buying it: the
+       * wallet must have given up value in the same transaction. Testing only
+       * the receipt classified 159 of 1,395 legs -- 11% -- as purchases where
+       * the wallet paid nothing, and on this chain 38 of 40 sampled router-fed
+       * recipients were funded by someone else.
+       *
+       * A SELL needs no such test: the wallet gave up the token itself.
+       */
+      if (side === 'buy' && payments !== null
+          && !payments.has(`${group.txHash}:${wallet}`)) {
+        stats.buysWithNoPayment += 1;
+        continue;
+      }
       candidates.push({
-        wallet, side: gotRaw > 0n ? 'buy' : 'sell', raw: gotRaw > 0n ? gotRaw : gaveRaw,
+        wallet, side, raw: gotRaw > 0n ? gotRaw : gaveRaw,
       });
     }
     stats.candidateWallets += candidates.length;
@@ -268,11 +298,14 @@ export function buildRows(
   counterUsd: CounterUsdResolver,
   exclusions: Set<string>,
   knownPools: Set<string>,
+  payments: PaymentIndex | null,
   /** Null accepts every wallet -- used by the cohort builder, which is deciding
    *  membership rather than filtering by it. */
   cohort: Set<string> | null,
 ): { rows: WalletRow[]; stats: RowStats } {
-  const { legs, stats } = tradeLegs(swaps, transfers, cfg, counterUsd, exclusions, knownPools);
+  const { legs, stats } = tradeLegs(
+    swaps, transfers, cfg, counterUsd, exclusions, knownPools, payments,
+  );
   const rows: WalletRow[] = [];
 
   for (const leg of legs) {

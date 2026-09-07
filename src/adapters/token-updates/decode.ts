@@ -217,6 +217,20 @@ export function decodeUint8(result: string): number {
   return n;
 }
 
+/**
+ * Read `decimals()` from a contract. THE ONLY PLACE decimals are obtained.
+ *
+ * A `0x` return is UNKNOWN -- not 18 and not 0. Assuming 18 for a token that
+ * actually has 6 inflates every figure quoted in it by 10^12, and USDG has 6
+ * where everything around it has 18.
+ */
+export async function readDecimals(
+  call: (to: string, data: string) => Promise<string>,
+  address: string,
+): Promise<number> {
+  return decodeUint8(await call(address, SELECTORS.decimals));
+}
+
 /** ABI-decode a string return. Falls back to bytes32 for older tokens. */
 export function decodeString(result: string): string | null {
   if (!result || result === '0x') return null;
