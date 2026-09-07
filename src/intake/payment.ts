@@ -1,0 +1,113 @@
+/**
+ * Proving the second half of a buy: did the wallet give up value?
+ *
+ * docs/ROBINHOOD.md step 7 defines a buy as a swap in which the wallet receives
+ * the token AND gives up value in the same transaction. The first half is
+ * provable from the token's own Transfer logs. The second is NOT, and an
+ * earlier attempt to prove it from logs alone was wrong in a way worth
+ * recording:
+ *
+ * It asked "did the wallet send a pricing asset to a pool?", which is a much
+ * narrower question. Measured on 40 decoded PONS buys, that rule rejected 39
+ * and ALL 39 had actually paid -- 36 of them in native ETH, which moves with no
+ * Transfer log at all. On this chain the normal path is: the wallet sends
+ * native ETH, a wrapper converts it, and the POOL receives WETH from the
+ * wrapper. The wallet never appears as the sender of an ERC-20.
+ *
+ * So payment is proven from the transaction receipt plus the transaction's own
+ * `value` field, which together see both halves:
+ *
+ *   - any ERC-20 Transfer whose sender is the wallet, other than the token
+ *     being bought (sending that back is a round trip, not a payment)
+ *   - the wallet being the transaction's sender with a non-zero `value`
+ *
+ * ONE RECEIPT SERVES EVERY WALLET IN THAT TRANSACTION, so the cost is per
+ * transaction rather than per candidate, and a wallet needs only one proven
+ * payment to be a buyer -- which is what makes this affordable.
+ */
+
+import type { RpcClient } from '../adapters/token-updates/rpc.js';
+
+const XFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+export interface PaymentProof {
+  paid: boolean;
+  /** What was given up, for the report. Empty when nothing was. */
+  how: string;
+}
+
+interface CachedTx {
+  /** Sender of each ERC-20 Transfer, with the token contract it moved. */
+  sends: { token: string; from: string; raw: bigint }[];
+  txFrom: string;
+  txValue: bigint;
+}
+
+/**
+ * Caches one receipt per transaction. Deliberately NOT a global: a run should
+ * be able to bound and report its own receipt count.
+ */
+export class ReceiptPayments {
+  private readonly cache = new Map<string, CachedTx>();
+  private fetched = 0;
+
+  constructor(
+    private readonly rpc: RpcClient,
+    /** The token being bought; sending it back is not a payment. */
+    private readonly token: string,
+  ) {}
+
+  get receiptsFetched(): number {
+    return this.fetched;
+  }
+
+  private async load(txHash: string): Promise<CachedTx> {
+    const hit = this.cache.get(txHash);
+    if (hit) return hit;
+
+    const receipt = (await this.rpc.raw('eth_getTransactionReceipt', [txHash])) as {
+      logs?: { address: string; topics: string[]; data: string }[];
+    } | null;
+    const tx = (await this.rpc.raw('eth_getTransactionByHash', [txHash])) as {
+      from?: string; value?: string;
+    } | null;
+    this.fetched += 1;
+
+    // A receipt that cannot be read is a failed read, not an absent payment.
+    if (!receipt || !tx) {
+      throw new Error(`could not read transaction ${txHash}; refusing to call that "unpaid"`);
+    }
+
+    const sends: CachedTx['sends'] = [];
+    for (const l of receipt.logs ?? []) {
+      if ((l.topics[0] ?? '').toLowerCase() !== XFER || l.topics.length < 3) continue;
+      sends.push({
+        token: l.address.toLowerCase(),
+        from: '0x' + l.topics[1]!.slice(-40).toLowerCase(),
+        raw: BigInt(l.data === '0x' ? '0x0' : l.data),
+      });
+    }
+    const entry: CachedTx = {
+      sends,
+      txFrom: (tx.from ?? '').toLowerCase(),
+      txValue: BigInt(tx.value ?? '0x0'),
+    };
+    this.cache.set(txHash, entry);
+    return entry;
+  }
+
+  async prove(txHash: string, wallet: string): Promise<PaymentProof> {
+    const t = await this.load(txHash.toLowerCase());
+    const w = wallet.toLowerCase();
+    const token = this.token.toLowerCase();
+
+    const tokenSends = t.sends.filter((s) => s.from === w && s.token !== token);
+    const paidNative = t.txFrom === w && t.txValue > 0n;
+
+    if (tokenSends.length === 0 && !paidNative) return { paid: false, how: '' };
+    const parts: string[] = [];
+    for (const s of tokenSends) parts.push(`${s.raw.toString()} raw of ${s.token}`);
+    if (paidNative) parts.push(`${t.txValue.toString()} wei native`);
+    return { paid: true, how: parts.join(' + ') };
+  }
+}

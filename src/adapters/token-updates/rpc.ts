@@ -31,6 +31,8 @@ const CU: Record<string, number> = {
   eth_getBlockByNumber: 20,
   eth_call: 26,
   eth_getCode: 26,
+  eth_getTransactionReceipt: 15,
+  eth_getTransactionByHash: 15,
 };
 const DEFAULT_CU = 60;
 
@@ -171,6 +173,15 @@ export class RpcClient {
   /** How many rate refusals have been seen since the last successful call. */
   get consecutiveRateRefusals(): number {
     return this.rateRefusals;
+  }
+
+  /**
+   * An arbitrary metered call, for methods with no typed helper. Goes through
+   * the same CU meter and ceiling as everything else, so a receipt fetch cannot
+   * escape the budget the phase was given.
+   */
+  async raw(method: string, params: unknown[]): Promise<unknown> {
+    return this.call(method, params);
   }
 
   async blockNumber(): Promise<number> {
