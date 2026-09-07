@@ -35,16 +35,23 @@ export interface PaymentProof {
   /** What was given up, for the report. Empty when nothing was. */
   how: string;
   /**
-   * Did any of what the wallet gave up actually reach a pool counterparty?
+   * Was a pool actually paid in this transaction?
    *
-   * The rule proves the wallet gave up value; it does not prove the value was
-   * given up FOR THIS TOKEN. A wallet can pay someone else in the same
-   * transaction that a router hands it tokens. Where payment is proven but
-   * none of it reached a pool, the rule accepts and this flag says the purpose
-   * is unproven, so the case can be counted and reported rather than hidden
-   * inside the accept total.
+   * NOT "did the wallet hand a pool the money" -- that is the log-based rule
+   * this replaces, and on the normal path it is false: the wallet sends native
+   * ETH to a router, the router wraps it, and the POOL receives WETH from the
+   * router. Asking whether the wallet's own address appears as the sender is
+   * what rejected 39 of 40 real buyers.
+   *
+   * So this asks the weaker, answerable question: did any pricing asset reach
+   * a pool counterparty in this transaction, from anyone. Where payment is
+   * proven and this is false, the rule still accepts -- the document's
+   * definition asks only that the wallet gave up value -- but the case is
+   * reported as purpose-unproven rather than hidden inside the accept total.
    */
   reachedAPool: boolean;
+  /** The old rule's question, kept only to size the difference. */
+  walletPaidPoolDirectly: boolean;
 }
 
 interface CachedTx {
@@ -120,19 +127,23 @@ export class ReceiptPayments {
     const tokenSends = t.sends.filter((s) => s.from === w && s.token !== token);
     const paidNative = t.txFrom === w && t.txValue > 0n;
 
+    const poolWasPaid = t.sends.some(
+      (s) => s.token !== token && this.poolCounterparties.has(s.to),
+    );
+    const direct = tokenSends.some((s) => this.poolCounterparties.has(s.to));
+
     if (tokenSends.length === 0 && !paidNative) {
-      return { paid: false, how: '', reachedAPool: false };
+      return {
+        paid: false, how: '', reachedAPool: poolWasPaid, walletPaidPoolDirectly: false,
+      };
     }
     const parts: string[] = [];
     for (const s of tokenSends) parts.push(`${s.raw.toString()} raw of ${s.token}`);
     if (paidNative) parts.push(`${t.txValue.toString()} wei native`);
 
-    // Native value is handed to whatever the transaction called -- typically a
-    // router, which forwards it -- so the pool is reached indirectly. An
-    // ERC-20 leg names its own recipient.
-    const reachedAPool =
-      tokenSends.some((s) => this.poolCounterparties.has(s.to))
-      || (paidNative && this.poolCounterparties.has(t.txTo));
-    return { paid: true, how: parts.join(' + '), reachedAPool };
+    return {
+      paid: true, how: parts.join(' + '),
+      reachedAPool: poolWasPaid, walletPaidPoolDirectly: direct,
+    };
   }
 }

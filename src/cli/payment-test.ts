@@ -201,6 +201,7 @@ async function main(): Promise<void> {
 
     const prover = new ReceiptPayments(rpc, cfg.token, new Set(cps));
     let traces = 0;
+    let directCount = 0;
     const cells = { ap: 0, an: 0, rp: 0, rn: 0 };
     const disagreements: unknown[] = [];
     const undecidable: unknown[] = [];
@@ -230,11 +231,13 @@ async function main(): Promise<void> {
       else if (!verdict.paid && truth) cells.rp += 1;
       else cells.rn += 1;
 
+      if (verdict.walletPaidPoolDirectly) directCount += 1;
       if (verdict.paid && !verdict.reachedAPool) {
         undecidable.push({
           tx: r.tx_hash, wallet: r.wallet,
-          why: 'the wallet gave up value, but none of it reached a pool counterparty '
-             + 'in this transaction -- payment is proven, its purpose is not',
+          why: 'the wallet gave up value, but NO pricing asset reached a pool '
+             + 'counterparty anywhere in this transaction -- payment is proven, '
+             + 'its purpose is not',
           receipt_shows: verdict.how, trace_shows: gave.join(' + ') || 'nothing',
         });
       }
@@ -274,6 +277,10 @@ async function main(): Promise<void> {
     });
     log.info('unreadable transactions (raised, never counted as unpaid)', {
       count: unreadable.length, cases: unreadable,
+    });
+    log.info('what the OLD rule would have asked, on this same sample', {
+      wallet_itself_sent_a_pricing_asset_to_a_pool: directCount,
+      note: 'the old rule accepted only these; the rest it rejected',
     });
     log.info('examples where they agree', { examples });
 
