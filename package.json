@@ -17,6 +17,7 @@
     "intake": "npm run build && node dist/cli/intake.js",
     "score": "npm run build && node dist/cli/score.js",
     "routers": "npm run build && node dist/cli/routers.js",
+    "payments": "npm run build && node dist/cli/payments.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },
