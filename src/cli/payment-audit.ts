@@ -1,3 +1,16 @@
+/*
+ * SUPERSEDED -- DO NOT RUN AGAINST A NEW TOKEN.
+ *
+ * This tool belongs to the log-based payment rule, which asked whether a wallet
+ * sent a pricing asset directly to a pool. Measured against 40 decoded
+ * transactions that rule rejected 39 real buyers, 36 of whom paid in native
+ * ETH, which moves with no Transfer log. Payment is now proven from the
+ * transaction receipt in `src/intake/payment.ts`, which is the one
+ * implementation the intake and the hourly job both use.
+ *
+ * It is kept only to read the 625,888 rows already in `token_payment_logs`.
+ * See docs/ROBINHOOD.md step 7.
+ */
 /**
  * `npm run payment-audit -- <config.yaml> [--window N]`
  *

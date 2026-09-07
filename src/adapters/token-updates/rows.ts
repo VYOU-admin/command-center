@@ -149,9 +149,11 @@ export function tradeLegs(
   exclusions: Set<string>,
   knownPools: Set<string>,
   /**
-   * (tx, wallet) pairs where the wallet sent a pricing or bridge asset to a
-   * pool. Null disables the check, which is only correct where payment data
-   * genuinely cannot be had -- it is not a default.
+   * (tx, wallet) pairs where the wallet has been PROVEN to give up value, from
+   * the transaction receipt plus `tx.value` -- see `intake/payment.ts`, which
+   * is the single implementation. Null disables the check, and is correct only
+   * for the first of the two passes that builds this index; it is not a
+   * default, and no caller should pass null and then write the result.
    */
   payments: PaymentIndex | null,
 ): { legs: TradeLeg[]; stats: RowStats } {
@@ -260,6 +262,12 @@ export function tradeLegs(
        * the receipt classified 159 of 1,395 legs -- 11% -- as purchases where
        * the wallet paid nothing, and on this chain 38 of 40 sampled router-fed
        * recipients were funded by someone else.
+       *
+       * The index consulted here is built from RECEIPTS, not from transfers to
+       * a pool. Asking whether the wallet itself sent a pricing asset to a pool
+       * rejected 39 of 40 decoded buys, all of which had paid, because the
+       * normal path on this chain is native ETH to a router, the router wraps
+       * it, and the POOL receives WETH from the router.
        *
        * A SELL needs no such test: the wallet gave up the token itself.
        */

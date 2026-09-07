@@ -55,7 +55,6 @@ import {
   fetchTimestamps,
   loadBridgeUsd,
   loadLegsInput,
-  loadPayments,
   persistAllPrices,
   checkPricesAgainstTicks,
   checkUsdTotal,
@@ -497,37 +496,14 @@ async function main(): Promise<void> {
       totals['transfer'] = t.logs;
 
       /*
-       * WHO PAID. One eth_getLogs per pricing asset with every counterparty as
-       * a topic array. Native-ETH-quoted pools move value with no Transfer log
-       * and are not covered; ROBINHOOD.md step 7 records that limitation.
+       * NO PAYMENT SWEEP. This used to sweep `Transfer` on each pricing asset
+       * with the pools as a topic array, to ask whether a wallet had sent one
+       * to a pool. That question rejected 39 of 40 decoded buys, all of which
+       * had paid. Payment is now proven per transaction from the receipt --
+       * see intake/payment.ts, the single implementation -- and nothing reads
+       * `token_payment_logs` any more. Its rows are kept; it is simply no
+       * longer written.
        */
-      const counterparties = [...new Set([...v3, cfg.v4PoolManager.toLowerCase()])];
-      const payAssets = [...new Set(
-        [...pools.values()].map((p) => p.counter)
-          .filter((a) => a !== '0x0000000000000000000000000000000000000000'),
-      )];
-      let paymentLegs = 0;
-      for (const asset of payAssets) {
-        const st = await adaptiveSweep(
-          rpc, cfg,
-          { address: asset, topics: [TOPICS.transfer, null, counterparties.map(addressTopic)] },
-          firstBlock, head,
-          async (logs, f, t) => {
-            for (const l of logs) {
-              const d = decodeTransfer(l);
-              await c.query(
-                `insert into token_payment_logs
-                   (chain, token, tx_hash, payer, asset, amount, block_number)
-                 values ($1,$2,$3,$4,$5,$6,$7) on conflict do nothing`,
-                [cfg.chain, cfg.token, d.txHash, d.from, asset, d.amount.toString(), d.block],
-              );
-            }
-            await recordSweepRange(c, cfg, `payment:${asset}`, f, t, logs.length);
-          },
-        );
-        paymentLegs += st.logs;
-      }
-      totals['payments'] = paymentLegs;
 
       const coverage: Record<string, unknown> = {};
       for (const kind of ['swap-v3', 'swap-v4', 'transfer']) {
@@ -626,11 +602,10 @@ async function main(): Promise<void> {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
       const reports = [];
       for (const w of windows) {
-        const payments = await loadPayments(c, cfg, w.startBlock!, w.endBlock!);
         const eff = await effectiveExclusions(
           c, cfg.chain, cfg.token, exclusions.map((x) => x.address),
         );
-        const r = await buildCohort(c, rpc, cfg, w, pools, eff.addresses, payments);
+        const r = await buildCohort(c, rpc, cfg, w, pools, eff.addresses);
         reports.push({ ...r, cohort: r.cohort.length, sample: r.cohort.slice(0, 3) });
         await c.query(
           `insert into token_intake_state (chain, token, phase, status, detail)
@@ -726,7 +701,7 @@ async function main(): Promise<void> {
     });
 
     /* ---- 9. dry run ----------------------------------------- STOP ------ */
-    await run('dryrun', async (_rpc, c) => {
+    await run('dryrun', async (rpc, c) => {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
       const decimals = (await c.query<{ decimals: number }>(
         `select decimals from tokens where mint=$1`, [cfg.token])).rows[0]?.decimals;
@@ -736,13 +711,14 @@ async function main(): Promise<void> {
       const cohort = new Set(cohortRows.rows.map((r) => r.wallet.toLowerCase()));
       const bridgeUsd = await loadBridgeUsd(c, cfg);
       const { plan } = await planOrWrite(
-        c, cfg, pools, decimals, cohort, await effective(c), firstBlock, head, false, bridgeUsd,
+        c, rpc, cfg, pools, decimals, cohort, await effective(c),
+        firstBlock, head, false, bridgeUsd,
       );
       return { report: { DRY_RUN: true, cohort: cohort.size, ...plan } };
     });
 
     /* ---- 10. write ------------------------------------------------------ */
-    await run('write', async (_rpc, c) => {
+    await run('write', async (rpc, c) => {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
       const decimals = (await c.query<{ decimals: number }>(
         `select decimals from tokens where mint=$1`, [cfg.token])).rows[0]?.decimals;
@@ -776,8 +752,8 @@ async function main(): Promise<void> {
       }
 
       const { plan, stored, deleted } = await planOrWrite(
-        c, cfg, pools, decimals, cohort, await effective(c), firstBlock, head, true,
-        bridgeUsd, reinsert,
+        c, rpc, cfg, pools, decimals, cohort, await effective(c),
+        firstBlock, head, true, bridgeUsd, reinsert,
       );
 
       const priceCheck = await checkPricesAgainstTicks(c, cfg);

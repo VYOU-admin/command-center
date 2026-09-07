@@ -26,7 +26,8 @@ import type { IntakeConfig, IntakeWindow } from './plan.js';
 import { classifyCode } from '../adapters/token-updates/decode.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
 import type { PoolRow } from '../adapters/token-updates/pools.js';
-import { tradeLegs, type PaymentIndex } from '../adapters/token-updates/rows.js';
+import { tradeLegs } from '../adapters/token-updates/rows.js';
+import { tradeLegsWithProvenPayment } from './payment.js';
 import { loadLegsInput } from './write.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -56,6 +57,12 @@ export interface CohortReport {
   cohort: string[];
   /** Exclusion-list entries that matched nothing, reported rather than dropped. */
   unusedExclusions: string[];
+  /** Receipts fetched to prove the payment half of each candidate buy. */
+  receiptsFetched: number;
+  candidateTransactions: number;
+  buysRejectedNoPayment: number;
+  /** Accepted on proven payment, but nothing reached a pool -- v4 settlement. */
+  purposeUnproven: number;
 }
 
 export async function buildCohort(
@@ -67,7 +74,6 @@ export async function buildCohort(
   /** The effective exclusions: the configured list union the detected routers. */
   excludedSet: Set<string>,
   /** (tx, wallet) pairs where the wallet paid a pool. See ROBINHOOD.md step 7. */
-  payments: PaymentIndex,
 ): Promise<CohortReport> {
   const startBlock = window.startBlock!;
   const endBlock = window.endBlock!;
@@ -93,16 +99,28 @@ export async function buildCohort(
   let excludedAsRoundTrippers = 0;
   let excludedAsPools = 0;
   let candidateWallets = 0;
+  let receiptsFetched = 0;
+  let candidateTransactions = 0;
+  let buysRejectedNoPayment = 0;
+  let purposeUnproven = 0;
 
   for (let from = startBlock; from <= endBlock; from += cfg.sliceBlocks) {
     const to = Math.min(from + cfg.sliceBlocks - 1, endBlock);
     const slice = await loadLegsInput(client, cfg, pools, from, to);
-    const { legs, stats } = tradeLegs(
+    const proven = await tradeLegsWithProvenPayment(
+      rpc, cfg.token, knownPools,
       // The cohort does not need prices: membership is who traded, not for how
       // much. A resolver that always returns null keeps every leg's USD null.
-      slice.swaps, slice.transfers, cfg, () => null, excludedSet, knownPools,
-      payments,
+      (payments) => tradeLegs(
+        slice.swaps, slice.transfers, cfg, () => null, excludedSet, knownPools,
+        payments,
+      ),
     );
+    const { legs, stats } = proven;
+    receiptsFetched += proven.receiptsFetched;
+    candidateTransactions += proven.candidateTransactions;
+    buysRejectedNoPayment += proven.buysRejected;
+    purposeUnproven += proven.purposeUnproven;
     for (const leg of legs) if (leg.side === 'buy') buyers.add(leg.wallet);
     for (const t of slice.transfers) {
       if (excludedSet.has(t.from)) usedExclusions.add(t.from);
@@ -150,6 +168,10 @@ export async function buildCohort(
     delegatedEip7702,
     cohort,
     unusedExclusions: [...excludedSet].filter((a) => !usedExclusions.has(a)),
+    receiptsFetched,
+    candidateTransactions,
+    buysRejectedNoPayment,
+    purposeUnproven,
   };
 }
 

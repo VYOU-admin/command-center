@@ -55,7 +55,8 @@ import {
   persistPrices,
   type PriceSeries,
 } from './token-updates/prices.js';
-import { buildRows, type RowStats, type WalletRow } from './token-updates/rows.js';
+import { tradeLegsWithProvenPayment } from '../intake/payment.js';
+import { buildRows, tradeLegs, type RowStats, type WalletRow } from './token-updates/rows.js';
 import { loadExclusions } from './token-updates/exclusions.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -75,7 +76,6 @@ interface Pending {
   callCounts: Record<string, number>;
   swapCounts: { v3: number; v4: number };
   transferCount: number;
-  paymentRows: { tx: string; payer: string; asset: string; amt: bigint; block: number }[];
   poolsRejected: number;
   idle: boolean;
 }
@@ -161,7 +161,7 @@ const adapter: SourceAdapter<WalletRow> = {
       pending.set(ctx.monitorId, {
         cfg, from, to: cursor, head, newPools: [], prices: null, priceError: null,
         stats: emptyStats(), cuSpent: rpc.cuSpent, callCounts: rpc.callCounts(),
-        swapCounts: { v3: 0, v4: 0 }, transferCount: 0, paymentRows: [],
+        swapCounts: { v3: 0, v4: 0 }, transferCount: 0,
         poolsRejected: 0, idle: true,
       });
       return [];
@@ -229,27 +229,18 @@ const adapter: SourceAdapter<WalletRow> = {
      * Native-ETH-quoted pools move value without a Transfer log and are not
      * covered -- that limitation is recorded in the document, not worked around.
      */
-    const counterparties = [
-      ...new Set([...scan.all.values()].filter((p) => p.venue === 'v3').map((p) => p.pool)),
-      cfg.v4PoolManager.toLowerCase(),
-    ];
-    const payAssets = [...new Set(
-      [...scan.all.values()].map((p) => p.counter).filter((a) => a !== ZERO_ADDRESS),
-    )];
-    const payments = new Set<string>();
-    const paymentRows: { tx: string; payer: string; asset: string; amt: bigint; block: number }[] = [];
-    for (const asset of payAssets) {
-      const logs = await rpc.getLogs(
-        { address: asset, topics: [TOPICS.transfer, null, counterparties.map(addressTopic)] },
-        from, to, cfg.logSpanBlocks, cfg.minLogSpanBlocks,
-      );
-      for (const l of logs) {
-        const d = decodeTransfer(l);
-        payments.add(`${d.txHash}:${d.from}`);
-        paymentRows.push({ tx: d.txHash, payer: d.from, asset, amt: d.amount, block: d.block });
-      }
-    }
-
+    /*
+     * THE PAYMENT HALF OF A BUY -- proven from receipts, in the SAME
+     * implementation the intake uses. See intake/payment.ts and
+     * docs/ROBINHOOD.md step 7.
+     *
+     * This used to sweep `Transfer` on each pricing asset with the pools as a
+     * topic filter and ask whether the wallet had sent one to a pool. That
+     * question is much narrower than "did the wallet give up value", and
+     * measured against 40 decoded transactions it rejected 39 real buyers, 36
+     * of whom paid in native ETH -- which moves with no Transfer log at all.
+     * The two getLogs calls it cost per run are gone with it.
+     */
     /* ---- prices: a failure here does NOT fail the run -------------------- */
     /*
      * The FIRST run after seeding starts mid-bucket, because the seed block is
@@ -312,15 +303,22 @@ const adapter: SourceAdapter<WalletRow> = {
     const exclusions = new Set(exclusionList.map((e) => e.address));
     const knownPools = new Set([...scan.all.values()].map((p) => p.pool));
 
+    const resolver = counterUsdResolver(cfg, pricingMap);
+    const proven = await tradeLegsWithProvenPayment(
+      rpc, cfg.token, knownPools,
+      (payments) => tradeLegs(
+        swaps, transfers, cfg, resolver, exclusions, knownPools, payments,
+      ),
+    );
     const { rows, stats } = buildRows(
       swaps,
       transfers,
       cfg,
       tokenDecimals,
-      counterUsdResolver(cfg, pricingMap),
+      resolver,
       exclusions,
       knownPools,
-      payments,
+      proven.index,
       cohort,
     );
 
@@ -331,8 +329,10 @@ const adapter: SourceAdapter<WalletRow> = {
       swaps_v3: v3Count,
       swaps_v4: v4Count,
       transfers: transfers.length,
-      payment_legs: paymentRows.length,
-      payment_assets_swept: payAssets.length,
+      receipts_fetched: proven.receiptsFetched,
+      candidate_buy_transactions: proven.candidateTransactions,
+      buys_rejected_no_payment: proven.buysRejected,
+      buys_accepted_purpose_unproven: proven.purposeUnproven,
       rows_built: rows.length,
       price_buckets_partial_skipped: prices?.stats.bucketsPartial ?? 0,
       price_buckets_reused_from_store: storedBucketsUsed,
@@ -350,7 +350,6 @@ const adapter: SourceAdapter<WalletRow> = {
       callCounts: rpc.callCounts(),
       swapCounts: { v3: v3Count, v4: v4Count },
       transferCount: transfers.length,
-      paymentRows,
       poolsRejected: scan.rejected.length,
       idle: false,
     });
@@ -368,14 +367,13 @@ const adapter: SourceAdapter<WalletRow> = {
     if (p.idle) return 0;
 
     await persistPools(client, p.cfg.chain, p.cfg.token, p.newPools);
-    for (const pr of p.paymentRows) {
-      await client.query(
-        `insert into token_payment_logs
-           (chain, token, tx_hash, payer, asset, amount, block_number)
-         values ($1,$2,$3,$4,$5,$6,$7) on conflict do nothing`,
-        [p.cfg.chain, p.cfg.token, pr.tx, pr.payer, pr.asset, pr.amt.toString(), pr.block],
-      );
-    }
+    /*
+     * `token_payment_logs` is no longer written. It recorded the log-based
+     * rule's evidence -- wallets that sent a pricing asset directly to a pool,
+     * which is the minority path -- and the receipt rule does not need it. The
+     * TABLE and its 625,888 rows are deliberately kept: they are a measurement
+     * that was made, and this project does not delete history.
+     */
     const priceWrites = p.prices
       ? await persistPrices(client, p.cfg, p.prices)
       : { tokenUsdInserted: 0, tokenUsdAlreadyPresent: 0,

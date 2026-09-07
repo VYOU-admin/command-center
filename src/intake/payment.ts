@@ -27,6 +27,7 @@
  */
 
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
+import type { PaymentIndex, RowStats, TradeLeg } from '../adapters/token-updates/rows.js';
 
 const XFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
@@ -146,4 +147,73 @@ export class ReceiptPayments {
       reachedAPool: poolWasPaid, walletPaidPoolDirectly: direct,
     };
   }
+}
+
+/**
+ * The one entry point both callers use: derive trade legs with the payment
+ * half of a buy actually proven.
+ *
+ * It runs `tradeLegs` twice, and the two passes are not a duplication. The
+ * first pass, with the check disabled, is the only way to learn WHICH
+ * transactions contain a candidate buy; receipts are then fetched for exactly
+ * those, and the second pass applies the answer. Both passes are pure
+ * computation over logs already in hand, so the second is free and the RPC cost
+ * is bounded by the candidates rather than by every transaction in the slice.
+ *
+ * The intake's cohort builder and the hourly job both call THIS, not
+ * `tradeLegs` directly, so the definition of a buy has one implementation and a
+ * change to it reaches both. See docs/ROBINHOOD.md step 7 and step 15.
+ */
+export async function tradeLegsWithProvenPayment(
+  rpc: RpcClient,
+  token: string,
+  poolCounterparties: Iterable<string>,
+  run: (payments: PaymentIndex | null) => { legs: TradeLeg[]; stats: RowStats },
+): Promise<{
+  legs: TradeLeg[];
+  stats: RowStats;
+  /** The proven index, for callers that go on to build rows from it. */
+  index: PaymentIndex;
+  receiptsFetched: number;
+  candidateTransactions: number;
+  buysAccepted: number;
+  buysRejected: number;
+  purposeUnproven: number;
+}> {
+  const first = run(null);
+
+  const wanted = new Map<string, string[]>();
+  for (const leg of first.legs) {
+    if (leg.side !== 'buy') continue;
+    const list = wanted.get(leg.txHash);
+    if (list) list.push(leg.wallet);
+    else wanted.set(leg.txHash, [leg.wallet]);
+  }
+
+  const prover = new ReceiptPayments(
+    rpc, token, new Set([...poolCounterparties].map((a) => a.toLowerCase())),
+  );
+  const index = new Set<string>();
+  let purposeUnproven = 0;
+  for (const [txHash, wallets] of wanted) {
+    for (const wallet of wallets) {
+      const proof = await prover.prove(txHash, wallet);
+      if (!proof.paid) continue;
+      if (!proof.reachedAPool) purposeUnproven += 1;
+      index.add(`${txHash}:${wallet}`);
+    }
+  }
+
+  const second = run(index);
+  const buysAccepted = second.legs.filter((l) => l.side === 'buy').length;
+  return {
+    legs: second.legs,
+    stats: second.stats,
+    index,
+    receiptsFetched: prover.receiptsFetched,
+    candidateTransactions: wanted.size,
+    buysAccepted,
+    buysRejected: second.stats.buysWithNoPayment,
+    purposeUnproven,
+  };
 }

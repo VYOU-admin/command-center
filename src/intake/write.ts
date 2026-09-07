@@ -11,6 +11,7 @@
 
 import type { IntakeConfig } from './plan.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
+import { tradeLegsWithProvenPayment } from './payment.js';
 import { poolKey, type PoolRow } from '../adapters/token-updates/pools.js';
 import type { SwapLog, TransferLog } from '../adapters/token-updates/decode.js';
 import {
@@ -313,28 +314,6 @@ export async function derivePricesForLife(
   return { series, buckets };
 }
 
-/**
- * The (tx, wallet) pairs where a wallet paid a pool, for one block range.
- *
- * Loaded per slice rather than whole: the full index for a busy token is
- * millions of pairs, and a transaction lives in one block so a block-range
- * slice never splits one.
- */
-export async function loadPayments(
-  client: PoolClient,
-  cfg: IntakeConfig,
-  fromBlock: number,
-  toBlock: number,
-): Promise<Set<string>> {
-  const res = await client.query<{ tx_hash: string; payer: string }>(
-    `select tx_hash, payer from token_payment_logs
-      where chain = $1 and token = $2 and block_number between $3 and $4`,
-    [cfg.chain, cfg.token, fromBlock, toBlock],
-  );
-  const out = new Set<string>();
-  for (const r of res.rows) out.add(`${r.tx_hash.toLowerCase()}:${r.payer.toLowerCase()}`);
-  return out;
-}
 
 /** Store a bridge series, and read one back for the pricing resolver. */
 export async function persistBridgeUsd(
@@ -470,6 +449,8 @@ export interface WritePlan {
   };
   groupsWithoutTransfers: number;
   groupsWithMultiplePools: number;
+  receiptsFetched: number;
+  buysRejectedNoPayment: number;
   /** Trade rows only. Transfers are counted separately, never folded in. */
   tradeRows: number;
   /** Movements that changed a position without being a trade. */
@@ -494,6 +475,8 @@ function emptyPlan(): WritePlan {
     excluded: { infrastructure: 0, isAPool: 0, roundTrippers: 0, outsideCohort: 0 },
     groupsWithoutTransfers: 0,
     groupsWithMultiplePools: 0,
+    receiptsFetched: 0,
+    buysRejectedNoPayment: 0,
     tradeRows: 0,
     transfersWritten: 0,
     transfersSkippedAsTrades: 0,
@@ -530,6 +513,8 @@ function fold(plan: WritePlan, rows: WalletRow[], stats: RowStats, wallets: Set<
  */
 export async function planOrWrite(
   client: PoolClient,
+  /** Needed to prove the payment half of a buy from receipts. */
+  rpc: RpcClient,
   cfg: IntakeConfig,
   pools: Map<string, PoolRow>,
   tokenDecimals: number,
@@ -581,10 +566,18 @@ export async function planOrWrite(
     }
 
     const resolver = counterUsdResolver(cfg, nativeUsd, bridgeUsd);
-    const payments = await loadPayments(client, cfg, from, to);
-    const { legs } = tradeLegs(
-      slice.swaps, slice.transfers, cfg, resolver, exclusions, knownPools, payments,
+    // ONE implementation of the buy rule, shared with the cohort builder and
+    // the hourly job. See intake/payment.ts.
+    const proven = await tradeLegsWithProvenPayment(
+      rpc, cfg.token, knownPools,
+      (payments) => tradeLegs(
+        slice.swaps, slice.transfers, cfg, resolver, exclusions, knownPools, payments,
+      ),
     );
+    const legs = proven.legs;
+    const payments = proven.index;
+    plan.receiptsFetched += proven.receiptsFetched;
+    plan.buysRejectedNoPayment += proven.buysRejected;
     const { rows: tRows, skippedBecauseTraded, skippedBelowFloor } = buildTransferRows(
       slice.transfers, legs, cfg, tokenDecimals, exclusions, knownPools, cohort,
     );

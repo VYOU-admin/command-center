@@ -473,6 +473,34 @@ This is a check, not a source of direction. See the next step.
 > **Definition — a seller.** The mirror: the token moves *from* the wallet *to*
 > an in-scope pool counterparty, inside a transaction containing a `Swap`.
 
+**Native-ETH payments are proven from the transaction receipt plus `tx.value`,
+not from logs.** Value sent as native ETH moves without a `Transfer` log. A rule
+that asked whether the wallet sent a pricing asset *to a pool* rejected **39 of
+40** decoded buys, and all 39 had paid — 36 of them in native ETH only. On this
+chain the wallet sends native ETH to a router, the router wraps it, and the
+**pool receives WETH from the router**, so the wallet never appears as the
+sender of an ERC-20 and the narrower question answers "no" for the normal path.
+
+Payment is proven **per transaction at 30 CU** — `eth_getTransactionReceipt`
+plus `eth_getTransactionByHash` — and one receipt serves every wallet in that
+transaction, which is what makes it affordable. A wallet counts as having paid
+when it is the sender of any ERC-20 other than the token being bought, or is the
+transaction's sender with a non-zero `value`.
+
+Measured against **execution traces** as independent ground truth — the call
+tree read as calldata, not as emitted logs, so the two views can disagree:
+**140 of 140 accepts confirmed, 0 disagreements, 0 unreadable**, across a
+deterministic 40 and a seeded random 100 with no overlap. **The receipt cannot
+score itself**; anything checking this rule again must use a second view.
+
+Six of the 100 accept on proven payment while no pricing asset reaches a pool
+counterparty anywhere in the transaction. All six are **v4**, whose settlement
+runs through the PoolManager's internal accounting rather than a plain
+`Transfer`. They are accepted — the definition asks only that the wallet gave up
+value — and reported as payment proven, purpose unproven.
+
+**A receipt that cannot be read raises.** It is not a wallet that did not pay.
+
 **Direction comes from the transfer, never from the sign.** The sign convention
 establishes which side is the token and how large the counter amount is. A wallet
 that received the token bought; one that sent it sold. That is directly
@@ -697,9 +725,21 @@ that are supposed to agree do not.
 
 **Write `transfer_in` and `transfer_out` for movements that are not trades**,
 always with a **null** USD amount — an acquisition or disposal at an unknown
-cost. Their absence is why **2,682 PONS cohort wallets show a negative
-position**, having sold more than they bought, and why the `inflated-pnl` flag
-exists.
+cost. Their absence is why a large minority of PONS cohort wallets show a
+**negative position**, having sold more than they bought, and why the
+`inflated-pnl` flag exists. Measured in `numeric` over the 13,095 cohort on
+2026-09-07:
+
+```
+position < -0.001, intake rows only              2,061
+position < -0.001, all rows including hourly     2,100
+stored inflated-pnl flags (computed 09-06 20:08) 2,088
+```
+
+**An earlier figure of 2,682 is recorded here and does not reproduce under any
+of the three.** It is not known which measurement produced it, and it has not
+been reinterpreted to fit — the three live numbers stand and the discrepancy is
+recorded as open.
 
 **A transfer becomes a row only when it is not part of a trade for that wallet in
 that transaction**, or the same movement counts twice and every position doubles.
@@ -728,7 +768,9 @@ and sends cancel nets to zero exactly and to `2.8e-14` in floating point. 89 suc
 rows existed once, and 10 wallets had no other rows at all — tagged as buyers who
 never bought. **Compute counts and thresholds in SQL, in `numeric`.** The same
 count gave 2,101 in doubles and 2,682 in numeric, a 28% difference on 18-decimal
-quantities.
+quantities. **Neither figure reproduces today** — see the negative-position
+counts above — so treat the 28% as the finding and the two numbers as
+unverified.
 
 **Allocate USD across wallets by each wallet's share of the token moved in that
 transaction and pool.** The denominator spans every candidate, including wallets
@@ -867,6 +909,16 @@ that writes the rows.** A run that dies leaves it where it was and the next run
 re-reads that range; re-reading is safe because the row key is unique, and
 skipping is impossible because the cursor never passes uncommitted data.
 
+**The hourly job and the intake share ONE buy rule, and a change to one is a
+change to both.** The hourly job is not a simplified version of the intake — it
+runs the same `tradeLegs`, so whatever decides who bought during a load also
+decides it every hour afterwards. This is why a rejected rule kept running: the
+payment check was measured wrong against 40 decoded transactions, and the
+scheduled job went on applying it to every hour it advanced, writing an
+incomplete set of buys with nothing raised. Whenever the definition of a buy
+moves, both callers move with it, and the hourly job is re-run from a cursor
+early enough to cover what the old rule dropped.
+
 **Seed the cursor where the intake stopped, never at the head.** Seeding at the
 head skips the backlog permanently and silently.
 
@@ -897,7 +949,7 @@ to be true. That is what the next token reads.
 |---|---|
 | `wallet_transactions.usd_amount` | the swap's price bucket had no derivable rate |
 | `wallet_transactions.price_usd` | the same |
-| `wallet_transactions.counterparty` | not recorded — all 179,736 PONS trade rows |
+| `wallet_transactions.counterparty` | not recorded — every PONS trade row, all 182,616 of them as of 2026-09-07 |
 | `wallet_scores.score` | every one of the eight metrics was null |
 | a metric inside `metrics.raw` | uncomputable for this wallet; it drops out and the weights renormalise |
 | a missing price bucket | no trade on both sides in that bucket; gaps stay gaps |
@@ -927,6 +979,8 @@ investigation. A crash would have been strictly better.
 | `eth_getLogs` cost | 60 CU, flat | **measured** — 4,920 CU over 82 calls, matches the provider's table |
 | `eth_getBlockByNumber` | 20 CU | provider's published table; not independently measured |
 | `eth_call` / `eth_getCode` | 26 CU | provider's published table |
+| `eth_getTransactionReceipt` / `…ByHash` | 15 CU each | provider's published table |
+| `debug_traceTransaction` | 309 CU | **published, not measured** — 95% of the payment test's cost, and worth confirming against the dashboard before any job depends on it |
 | `eth_blockNumber` | 10 CU | provider's published table |
 | throughput | 15.3 calls/s at concurrency 8, zero refusals | **measured** |
 | per-item errors begin | ~13 req/s × 100 sub-calls | **measured** — 2.4–2.5 req/s with batch 100 gave 0 errors in 51,475 sub-calls |
@@ -987,7 +1041,10 @@ These are not about Robinhood Chain, but the code that loads it obeys them.
 ### PONS — `0x39dBED3a2bd333467115dE45665cC57F813C4571`
 
 Cohort `PONS-P1`, 13,095 wallets, window 2026-07-21 → 2026-08-21 (blocks
-15,115,285–42,691,407), 181,477 rows. First EVM intake; most of the rules above
+15,115,285–42,691,407). **179,736 rows at intake; 182,616 as of 2026-09-07**, the
+difference written by the hourly job. (An earlier figure of 181,477 appeared here
+and reconciles with nothing in the database; it has been removed rather than
+explained.) First EVM intake; most of the rules above
 came from it.
 
 - Opposite sign conventions per venue, measured unanimously in three regions.
@@ -1033,15 +1090,9 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 
 **Empty.** Every rule above is implemented.
 
-Two limitations are recorded here because they are properties of the chain
-rather than gaps in the code, and both are visible in what gets reported:
+One limitation is recorded here because it is a property of the chain rather
+than a gap in the code:
 
-- **Native-ETH payments are invisible to the "gave up value" test.** Value sent
-  as native ETH moves without a `Transfer` log, so a wallet that paid an
-  ETH-quoted v4 pool in native value cannot be shown to have paid from log data
-  alone. It would need a receipt per transaction. Buys on ETH-quoted pools are
-  therefore counted only when the wallet also moved an ERC-20 in the same
-  transaction, and the count rejected for no payment is reported every run.
 - **A bucket median is still a median over ~17 minutes.** The window-median bias
   measured elsewhere (95.56 whole-window against 127.17 and 97.41 for the
   halves) has never been measured on this chain. Measure it on a token that
