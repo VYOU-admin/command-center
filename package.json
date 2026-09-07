@@ -18,6 +18,7 @@
     "score": "npm run build && node dist/cli/score.js",
     "routers": "npm run build && node dist/cli/routers.js",
     "payments": "npm run build && node dist/cli/payments.js",
+    "payment-audit": "npm run build && node dist/cli/payment-audit.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },
