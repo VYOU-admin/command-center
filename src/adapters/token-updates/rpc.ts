@@ -33,6 +33,9 @@ const CU: Record<string, number> = {
   eth_getCode: 26,
   eth_getTransactionReceipt: 15,
   eth_getTransactionByHash: 15,
+  // Alchemy's published figure; not independently confirmed against the
+  // dashboard the way eth_getLogs was. Used only by the payment test.
+  debug_traceTransaction: 309,
 };
 const DEFAULT_CU = 60;
 
