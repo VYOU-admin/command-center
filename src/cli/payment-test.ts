@@ -79,6 +79,9 @@ async function main(): Promise<void> {
   };
   const n = num('--n', 40);
   const offset = num('--offset', 0);
+  const randomN = num('--random', 0);
+  const seedIdx = args.indexOf('--seed');
+  const seed = seedIdx >= 0 ? (args[seedIdx + 1] ?? '') : '';
   const windowIndex = num('--window', 0);
   const ceiling = num('--ceiling', 60000);
 
@@ -145,8 +148,37 @@ async function main(): Promise<void> {
     const nativeOnly = rows.rows.filter((r) => r.any_native && !r.any_erc20);
     const erc20 = rows.rows.filter((r) => r.any_erc20);
     const share = (k: number): number => Math.round(k * 0.85);
-    const all = [...pick(erc20, share(n + offset)), ...pick(nativeOnly, (n + offset) - share(n + offset))];
-    const sample = offset === 0 ? all.slice(0, n) : all.slice(offset, offset + n);
+
+    // The deterministic first-40. Computed here even in random mode, because
+    // they are what the random sample must EXCLUDE -- a second test that
+    // re-scored the same transactions would only prove the rule is consistent
+    // with itself.
+    const firstForty = [...pick(erc20, 34), ...pick(nativeOnly, 6)];
+    const excluded = new Set(firstForty.map((r) => r.tx_hash.toLowerCase()));
+
+    let sample: typeof rows.rows;
+    if (randomN > 0) {
+      if (!seed) throw new Error('--random requires --seed, so the sample is reproducible');
+      const pool = rows.rows.filter((r) => !excluded.has(r.tx_hash.toLowerCase()));
+      // Deterministic under the seed, unrelated to block order, wallet order or
+      // pool. Shuffling in JS keeps it auditable next to the exclusion set.
+      const keyed = await c.query<{ tx_hash: string; k: string }>(
+        `select h tx_hash, md5(h || $1) k from unnest($2::text[]) h order by 2`,
+        [seed, pool.map((r) => r.tx_hash)],
+      );
+      const order = new Map(keyed.rows.map((r, i) => [r.tx_hash, i]));
+      sample = [...pool].sort((a, b) => order.get(a.tx_hash)! - order.get(b.tx_hash)!)
+        .slice(0, randomN);
+      log.info('random sample', {
+        seed, requested: randomN, pool_after_exclusion: pool.length,
+        excluded_first_forty: excluded.size,
+        overlap_with_first_forty: sample.filter((r) => excluded.has(r.tx_hash.toLowerCase())).length,
+      });
+    } else {
+      const all = [...pick(erc20, share(n + offset)),
+        ...pick(nativeOnly, (n + offset) - share(n + offset))];
+      sample = offset === 0 ? all.slice(0, n) : all.slice(offset, offset + n);
+    }
 
     log.info('sample', {
       candidate_wallets: rows.rowCount ?? 0,
@@ -167,14 +199,24 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    const prover = new ReceiptPayments(rpc, cfg.token);
+    const prover = new ReceiptPayments(rpc, cfg.token, new Set(cps));
     let traces = 0;
     const cells = { ap: 0, an: 0, rp: 0, rn: 0 };
     const disagreements: unknown[] = [];
+    const undecidable: unknown[] = [];
+    const unreadable: unknown[] = [];
     const examples: unknown[] = [];
 
     for (const r of sample) {
-      const verdict = await prover.prove(r.tx_hash, r.wallet);
+      let verdict;
+      try {
+        verdict = await prover.prove(r.tx_hash, r.wallet);
+      } catch (err) {
+        // A read that failed is NOT a wallet that did not pay. It is counted
+        // and reported on its own line, never folded into a reject.
+        unreadable.push({ tx: r.tx_hash, wallet: r.wallet, why: String(err) });
+        continue;
+      }
       const trace = (await rpc.raw('debug_traceTransaction', [
         r.tx_hash, { tracer: 'callTracer', tracerConfig: { onlyTopCall: false } },
       ])) as TraceCall | null;
@@ -187,6 +229,15 @@ async function main(): Promise<void> {
       else if (verdict.paid && !truth) cells.an += 1;
       else if (!verdict.paid && truth) cells.rp += 1;
       else cells.rn += 1;
+
+      if (verdict.paid && !verdict.reachedAPool) {
+        undecidable.push({
+          tx: r.tx_hash, wallet: r.wallet,
+          why: 'the wallet gave up value, but none of it reached a pool counterparty '
+             + 'in this transaction -- payment is proven, its purpose is not',
+          receipt_shows: verdict.how, trace_shows: gave.join(' + ') || 'nothing',
+        });
+      }
 
       if (verdict.paid !== truth) {
         disagreements.push({
@@ -207,6 +258,8 @@ async function main(): Promise<void> {
 
     log.info('RECEIPT RULE vs the execution trace', {
       sample: sample.length,
+      decided: cells.ap + cells.an + cells.rp + cells.rn,
+      unreadable_not_scored: unreadable.length,
       accepts_and_the_wallet_paid: cells.ap,
       accepts_but_the_wallet_did_NOT_pay: cells.an,
       rejects_but_the_wallet_DID_pay: cells.rp,
@@ -216,7 +269,32 @@ async function main(): Promise<void> {
     log.info('disagreements between the receipt and the trace', {
       count: disagreements.length, disagreements,
     });
+    log.info('accepted, but the purpose of the payment is unproven', {
+      count: undecidable.length, cases: undecidable,
+    });
+    log.info('unreadable transactions (raised, never counted as unpaid)', {
+      count: unreadable.length, cases: unreadable,
+    });
     log.info('examples where they agree', { examples });
+
+    // 2.7 -- the full-cohort projection, from measured figures only.
+    const proj = await c.query<{ txs: string }>(
+      `select count(distinct t.tx_hash)::text txs
+         from token_transfer_logs t
+        where t.chain=$1 and t.token=$2 and t.from_addr = any($3::text[])`,
+      [cfg.chain, cfg.token, cps],
+    );
+    const txs = Number(proj.rows[0]!.txs);
+    const perTx = 15 + 15; // eth_getTransactionReceipt + eth_getTransactionByHash
+    log.info('projected cost of the rule across the full cohort', {
+      note: 'ONE receipt serves every wallet in a transaction, so the unit is the '
+          + 'transaction, not the candidate. Traces are this test only; the rule '
+          + 'itself never fetches one.',
+      distinct_transactions_in_which_a_pool_sent_the_token: txs,
+      cu_per_transaction: perTx,
+      projected_cu: txs * perTx,
+      projected_dollars: ((txs * perTx * 0.45) / 1e6).toFixed(2),
+    });
     log.info('cost actually consumed', {
       receipts_fetched: prover.receiptsFetched, traces_fetched: traces,
       cu_spent: rpc.cuSpent, dollars: ((rpc.cuSpent * 0.45) / 1e6).toFixed(4),

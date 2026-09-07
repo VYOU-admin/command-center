@@ -34,13 +34,25 @@ export interface PaymentProof {
   paid: boolean;
   /** What was given up, for the report. Empty when nothing was. */
   how: string;
+  /**
+   * Did any of what the wallet gave up actually reach a pool counterparty?
+   *
+   * The rule proves the wallet gave up value; it does not prove the value was
+   * given up FOR THIS TOKEN. A wallet can pay someone else in the same
+   * transaction that a router hands it tokens. Where payment is proven but
+   * none of it reached a pool, the rule accepts and this flag says the purpose
+   * is unproven, so the case can be counted and reported rather than hidden
+   * inside the accept total.
+   */
+  reachedAPool: boolean;
 }
 
 interface CachedTx {
   /** Sender of each ERC-20 Transfer, with the token contract it moved. */
-  sends: { token: string; from: string; raw: bigint }[];
+  sends: { token: string; from: string; to: string; raw: bigint }[];
   txFrom: string;
   txValue: bigint;
+  txTo: string;
 }
 
 /**
@@ -55,6 +67,8 @@ export class ReceiptPayments {
     private readonly rpc: RpcClient,
     /** The token being bought; sending it back is not a payment. */
     private readonly token: string,
+    /** v3 pools plus the v4 PoolManager, lowercased. */
+    private readonly poolCounterparties: Set<string>,
   ) {}
 
   get receiptsFetched(): number {
@@ -69,7 +83,7 @@ export class ReceiptPayments {
       logs?: { address: string; topics: string[]; data: string }[];
     } | null;
     const tx = (await this.rpc.raw('eth_getTransactionByHash', [txHash])) as {
-      from?: string; value?: string;
+      from?: string; value?: string; to?: string;
     } | null;
     this.fetched += 1;
 
@@ -84,6 +98,7 @@ export class ReceiptPayments {
       sends.push({
         token: l.address.toLowerCase(),
         from: '0x' + l.topics[1]!.slice(-40).toLowerCase(),
+        to: '0x' + l.topics[2]!.slice(-40).toLowerCase(),
         raw: BigInt(l.data === '0x' ? '0x0' : l.data),
       });
     }
@@ -91,6 +106,7 @@ export class ReceiptPayments {
       sends,
       txFrom: (tx.from ?? '').toLowerCase(),
       txValue: BigInt(tx.value ?? '0x0'),
+      txTo: (tx.to ?? '').toLowerCase(),
     };
     this.cache.set(txHash, entry);
     return entry;
@@ -104,10 +120,19 @@ export class ReceiptPayments {
     const tokenSends = t.sends.filter((s) => s.from === w && s.token !== token);
     const paidNative = t.txFrom === w && t.txValue > 0n;
 
-    if (tokenSends.length === 0 && !paidNative) return { paid: false, how: '' };
+    if (tokenSends.length === 0 && !paidNative) {
+      return { paid: false, how: '', reachedAPool: false };
+    }
     const parts: string[] = [];
     for (const s of tokenSends) parts.push(`${s.raw.toString()} raw of ${s.token}`);
     if (paidNative) parts.push(`${t.txValue.toString()} wei native`);
-    return { paid: true, how: parts.join(' + ') };
+
+    // Native value is handed to whatever the transaction called -- typically a
+    // router, which forwards it -- so the pool is reached indirectly. An
+    // ERC-20 leg names its own recipient.
+    const reachedAPool =
+      tokenSends.some((s) => this.poolCounterparties.has(s.to))
+      || (paidNative && this.poolCounterparties.has(t.txTo));
+    return { paid: true, how: parts.join(' + '), reachedAPool };
   }
 }
