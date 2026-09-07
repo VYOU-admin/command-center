@@ -154,10 +154,18 @@ async function main(): Promise<void> {
       on_native_only_pools: nativeOnly.length,
       taking: sample.length, offset, window: w.label, blocks: `${lo}..${hi}`,
     });
-    log.info('pinned', {
-      note: 'these were printed by the previous test and must reappear here',
-      first: sample[0]?.tx_hash, last: sample[sample.length - 1]?.tx_hash,
+    // The whole sample, printed. A comparison between two rules is only
+    // "directly comparable" if the inputs can be checked against each other,
+    // and first-and-last is not a check.
+    log.info('sample transactions', {
+      transactions: sample.map((r) => `${r.tx_hash} ${r.wallet}`),
     });
+    if (args.includes('--list')) {
+      log.info('--list given; stopping before any RPC call', { cu_spent: 0 });
+      c.release();
+      await app.pool.end();
+      process.exit(0);
+    }
 
     const prover = new ReceiptPayments(rpc, cfg.token);
     let traces = 0;
