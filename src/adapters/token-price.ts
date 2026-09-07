@@ -5,7 +5,7 @@
  * adding a token to the dashboard needs no monitor and no config change.
  *
  * WHY DEXSCREENER. It is free, it needs no key, and it answers in ~150ms from
- * the Railway host. FAILURE_MODES records DexScreener returning 403, which is
+ * the Railway host. docs/ROBINHOOD.md records DexScreener returning 403, which is
  * true of curl -- the block is on the User-Agent, and Node's fetch is not
  * affected. Pricing from recent swaps on the pool was the alternative and would
  * have cost Helius credits on every cycle forever, to produce a worse number.

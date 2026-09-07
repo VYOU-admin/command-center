@@ -3,7 +3,7 @@
  *
  * Brings one token's cohort rows forward from a cursor to the chain head, one
  * bounded slice per run. It is the standing counterpart to the one-off intake
- * in docs/ROBINHOOD-TOKEN-INTAKE.md and applies the same rules: pools
+ * in docs/ROBINHOOD.md and applies the same rules: pools
  * re-enumerated every run, scope applied to both venues, decimals read per
  * contract, direction taken from the transfer, USD null where underivable, and
  * all four floors.

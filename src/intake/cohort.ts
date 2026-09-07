@@ -12,7 +12,7 @@
  *
  * A DELEGATED ACCOUNT IS A WALLET, NOT A CONTRACT. Exactly 23 bytes of
  * 0xef0100 + a delegate address is an EIP-7702 user account. Only other
- * non-empty code is a deployed contract. See docs/DEFINITIONS.md section 5.
+ * non-empty code is a deployed contract. See docs/ROBINHOOD.md, step 7.
  *
  * THE CONTRACT CHECK RUNS AT THE WINDOW'S END BLOCK, NOT AT `latest`. An
  * address that was an ordinary wallet when it bought is a buyer whatever it

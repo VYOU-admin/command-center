@@ -93,7 +93,7 @@ export interface WindowRow {
  * render: the header and every Change cell read this same object, so the
  * percentage in a row can always be reconciled against the price printed above
  * it. Letting the two read separate rows is the paired-baseline defect in
- * FAILURE_MODES section 8, and would be invisible -- both numbers would look
+ * docs/ROBINHOOD.md, the paired-baseline rule, and would be invisible -- both numbers would look
  * right on their own.
  */
 export interface TokenPrice {

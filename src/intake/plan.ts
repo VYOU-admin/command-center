@@ -4,7 +4,7 @@
  *
  * WHY THIS EXISTS. The PONS intake was carried out by ad-hoc scripts in a
  * scratchpad directory. The container recycled and every one of them was lost;
- * only docs/ROBINHOOD-TOKEN-INTAKE.md survived. This is that procedure as code,
+ * only docs/ROBINHOOD.md survived. This is that procedure as code,
  * in the repository, so the next token does not start from prose.
  *
  * EVERY STOP IN THE DOCUMENT IS A STOP HERE. The runner reports and exits at
@@ -41,7 +41,7 @@ export type Phase = (typeof PHASES)[number];
 
 /**
  * Phases that end by reporting and waiting for review. Taken directly from the
- * step order in docs/ROBINHOOD-TOKEN-INTAKE.md:
+ * step order in docs/ROBINHOOD.md:
  *
  *   pools    -- the pool set decides what is swept and what is missed
  *   scope    -- the counter-asset decision decides every price downstream

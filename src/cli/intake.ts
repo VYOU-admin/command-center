@@ -1,7 +1,7 @@
 /**
  * The token intake runner: `npm run intake -- <config.yaml> [--continue]`
  *
- * docs/ROBINHOOD-TOKEN-INTAKE.md as code. The PONS intake was carried out by
+ * docs/ROBINHOOD.md as code. The PONS intake was carried out by
  * scripts in a scratchpad directory; the container recycled and every one of
  * them was lost. This lives in the repository.
  *

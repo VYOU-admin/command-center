@@ -4,7 +4,7 @@
 # a token needs no change here and no new monitor.
 #
 # SOURCE. DexScreener, free and keyless, answering in ~150ms from this host.
-# FAILURE_MODES records DexScreener returning 403 — that is true of curl, whose
+# docs/ROBINHOOD.md records DexScreener returning 403 — that is true of curl, whose
 # User-Agent is blocked; Node's fetch is not affected, which was measured from
 # the Railway host before this was written. The alternative, pricing from recent
 # swaps on the pool, would spend Helius credits every cycle forever to produce a

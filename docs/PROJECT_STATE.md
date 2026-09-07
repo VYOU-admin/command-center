@@ -180,5 +180,5 @@ pipeline and 166 MB of intermediates. The database went from 10 GB to 27 MB.
 filename: it describes a system that no longer exists and will mislead you about
 what currently does.
 
-`FAILURE_MODES.md` at the repo root is NOT archived. It is the standing
+`docs/ROBINHOOD.md` is the standing document for Robinhood Chain. It is the
 failure-mode list and still applies.

@@ -45,7 +45,7 @@ export interface TimestampPlan {
  * that were supposed to agree and did not: the plan scoped its count to
  * transactions involving cohort wallets and the fetch selected every block in
  * `token_swap_logs`, so the plan printed a small number and the fetch would
- * have done a much larger job. That is FAILURE_MODES 17 and 18 -- a work set
+ * have done a much larger job. That is docs/ROBINHOOD.md step 9 -- the work-set rule -- a work set
  * derived from the wrong population -- reappearing inside the code written to
  * prevent them. On PONS the same distinction was 144,073 blocks against
  * 1,379,236, and roughly 7,000,000 compute units.
