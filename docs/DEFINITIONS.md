@@ -20,9 +20,22 @@ rather than reading as settled.
 — a v3 pool address, or the v4 PoolManager — inside a transaction that contains
 a `Swap` event on an in-scope pool.
 
-**It does NOT require the wallet to give up value in the same transaction.**
-That is not implemented today, it has never been implemented, and it is the
-single biggest open question in this file.
+**A buy has TWO halves and both are required: it is a swap in which the wallet
+receives the token, AND the wallet gave up value in the same transaction.**
+
+This is settled, not open. It is stated in `docs/SOLANA-TOKEN-INTAKE.md` under
+"Receiving the token is not buying it", with its measurement: testing only "net
+token delta > 0" classified **159 of 1,395 legs — 11% — as purchases where the
+wallet gave up nothing at all.** One received 12,913 MOS against a zero lamport
+delta; another received two tokens and paid for neither.
+
+A wallet gave up value when, in the same transaction, it sent some other token,
+or sent native value beyond the fee. **A wallet absent from the transaction
+cannot have paid in it** — 32 Solana legs had owners appearing nowhere in the
+transaction, and those are receipts into someone's account, not purchases by them.
+
+**The EVM path implements only the first half.** That is a defect in the code,
+not an open question about the definition.
 
 **Evidence.** Direction is taken from the transfer, never from the swap's sign,
 because the two venues use opposite conventions. Measured on PONS across three
@@ -48,16 +61,21 @@ v4        164/164      294/294         154/154       SWAPPER perspective
   Economically someone bought for it. Under "gave up value in the same
   transaction" it is not.
 
-**Measured frequency.** On 40 router-fed recipients sampled evenly across the
-whole population, **2 gave up value in the same transaction and 38 did not**.
-96% of those recipients are EIP-7702 delegated accounts.
+**Measured frequency on EVM.** On 40 router-fed recipients sampled evenly across
+the whole population, **2 gave up value in the same transaction and 38 did not**.
+96% of those recipients are EIP-7702 delegated accounts, funded by a shared EOA
+that pays on their behalf. Under this definition the 38 are not buyers: someone
+bought for them, and that someone is the funding address.
 
 **What would falsify it.** A wallet counted as a buyer that received nothing of
 value; a routed buy where payer and recipient are the same address and we still
 miss it; or a venue where the transfer direction disagrees with the economics.
 
-**Open.** Whether a custodially-funded receipt into a user's own account is a
-buy. This decides roughly 29,542 PONS addresses and has not been settled.
+**Consequence, not an open question.** A custodially-funded receipt into a
+user's own account is NOT a buy by that account, because the account gave up
+nothing. This decides roughly 29,542 PONS addresses. Whether those wallets are
+interesting for some other purpose is a separate question from whether they
+bought.
 
 ---
 
@@ -245,12 +263,24 @@ Decimals are read from each counter contract. **USDG has 6, not 18**; assuming
 18 inflates every USDG-quoted figure by 10^12, and USDG was the counter on 238
 of PONS's 381 in-scope pools.
 
-**Known limitation.** There is no second pricing hop. A token whose main market
-is against a non-pricing asset loses that market entirely rather than being
-priced through it. AI is the case: its charted AI/NVDA pool is **56% of its
-swaps and 59% of its window activity**, and NVDA is itself priceable on-chain
-(512 NVDA pools against pricing assets, 226,454 swaps) — so the price exists and
-we do not use it.
+**The second hop.** A token whose main market is against a non-pricing asset is
+priced *through* that asset when the asset itself has an on-chain USD route.
+`token -> bridge -> USD`, using the same bucketed-median machinery one level
+deeper, and no off-chain feed at any point.
+
+**The scope rule applies recursively.** A bridge asset's own series is derived
+only from pools pairing it WITH a recognised pricing asset. Pools where the
+bridge is itself the pricing side of some third token are excluded — including
+them would price the bridge against the thing it is pricing.
+
+AI is the case this exists for: its charted AI/NVDA pool is **56% of its swaps
+and 59% of its window activity**, and NVDA has 512 pools against pricing assets
+carrying 226,454 swaps. Stored per bridge in `bridge_usd_prices`.
+
+**A bucket with no bridge trade prices nothing.** Gaps stay gaps here as
+everywhere else, and two bucketed medians multiplied compound their error —
+which must be reported against direct trades in the same buckets rather than
+assumed small.
 
 **What would falsify it.** A counter asset in the pricing set whose own USD
 price is unsound; or a token where excluding non-pricing pools drops the
