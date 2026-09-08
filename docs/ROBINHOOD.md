@@ -452,7 +452,11 @@ This is a check, not a source of direction. See the next step.
 ### Step 7 — Cohort — **STOP**
 
 **Does:** decides who bought inside each window.
-**Costs:** one `eth_getCode` per surviving candidate. ~85,000 CU for PONS.
+**Costs:** two things. One `eth_getCode` per surviving candidate — the figure
+recorded for PONS is ~85,000 CU, which does not reconcile against 26 CU per call
+over 15,096 candidates (392,496 CU) and is **flagged, not corrected**. Plus the
+payment proof, ~17.1 CU per candidate wallet, **~289,000 CU / $0.13 for PONS's
+16,910 candidate wallets**.
 **Produces:** the cohort list, held for review.
 **Stops:** yes — before anything is written to `wallet_tags`.
 
@@ -460,6 +464,24 @@ This is a check, not a source of direction. See the next step.
 > 1. it is a **swap** in which the wallet **receives** the token, and
 > 2. the wallet **gave up value in the same transaction** — it sent some other
 >    token, or sent native value beyond the fee.
+>
+> **A wallet needs ONE proven payment to enter the cohort, and proving stops
+> there.** Membership asks "did this wallet buy", which one proven purchase
+> answers for good; it does not ask how many times. Once a wallet is in, its
+> remaining candidate transactions are not bought.
+>
+> **Individual buy and sell rows are NOT payment-proven.** This is settled and
+> is not to be reopened. A row records that the token moved between a wallet and
+> an in-scope pool inside a swap transaction, which is what step 11 defines a
+> trade to be. Some of those receipts will not have been paid for by the wallet
+> they are credited to; those are already covered by the **`inflated-pnl` flag**,
+> exactly as missing transfer rows are, and that is the accepted treatment.
+>
+> The reason is cost, and it was measured rather than argued. Proving every row
+> is **$4.23 per intake**; proving membership once per wallet is **$0.13** — the
+> difference between 430,215 candidate transactions and 16,910 candidate
+> wallets on PONS. Row-level proof buys a precision the `inflated-pnl` flag
+> already delivers, at thirty times the price.
 >
 > Testing only the first half classified **159 of 1,395 legs — 11% — as
 > purchases where the wallet gave up nothing at all.** One received 12,913
@@ -481,11 +503,50 @@ chain the wallet sends native ETH to a router, the router wraps it, and the
 **pool receives WETH from the router**, so the wallet never appears as the
 sender of an ERC-20 and the narrower question answers "no" for the normal path.
 
-Payment is proven **per transaction at 30 CU** — `eth_getTransactionReceipt`
-plus `eth_getTransactionByHash` — and one receipt serves every wallet in that
-transaction, which is what makes it affordable. A wallet counts as having paid
-when it is the sender of any ERC-20 other than the token being bought, or is the
-transaction's sender with a non-zero `value`.
+A wallet counts as having paid when it is the sender of any ERC-20 other than
+the token being bought, or is the transaction's sender with a non-zero `value`.
+
+**Ask the cheap half first.** Native ETH is how most buyers pay here, and that
+is visible in the transaction alone — no receipt. So `eth_getTransactionByHash`
+is fetched first at 15 CU, and `eth_getTransactionReceipt` costs a further 15
+only when the native test fails and an ERC-20 leg is the one remaining way to
+have paid. This is not an approximation: every case still gets a definite
+answer, identical to fetching both, and it only skips evidence that cannot
+change the verdict. Measured on 100 transactions:
+
+```
+answered by the transaction alone, 15 CU     86
+needed a receipt as well,          30 CU     14
+mean per candidate                         17.1 CU
+```
+
+One transaction read serves every wallet in it, so the unit is the transaction
+rather than the candidate.
+
+**The hourly job proves nothing and spends nothing on this.** It writes rows for
+wallets that are already in the cohort and never decides membership, and rows
+are not payment-proven — so it stays at the 430–714 CU in step 15. The figure
+worth recording is the one it avoids: had rows been proven, a median slice holds
+**41 cohort-relevant transactions of which ~6 need a receipt, about 705 CU a
+run**, and that is the number to compare against if row-level proof is ever
+reconsidered. It is also ~78x below the 3,219 transactions an *unfiltered*
+candidate stream holds — proving must never be applied before the cohort filter,
+which is the mistake that produced a 200x cost estimate once.
+
+**Where the receipt is skipped, "did the payment reach a pool" is reported as
+NULL, never as false.** It was not looked at.
+
+**`eth_getBlockByNumber` was tested for this and rejected on measurement. Do not
+re-derive it.** It returns every transaction in a block with its `value` for 20
+CU, so it would replace the per-transaction read — but only above **1.33
+transactions per block**, and PONS measures **1.22**. Using it costs 52,860 CU
+per slice against 48,285, which is 9% worse.
+
+**`token_payment_logs` is a free fast path where it already covers a wallet.**
+Its 625,888 rows name 9,875 payers who sent a pricing asset straight to a pool,
+and that answers roughly 9 of every 14 receipts that would otherwise be bought.
+It is worth consulting for PONS, where the rows exist. **It is not worth
+sweeping for a new token** — collecting it was the rejected rule's cost.
 
 Measured against **execution traces** as independent ground truth — the call
 tree read as calldata, not as emitted logs, so the two views can disagree:
@@ -719,6 +780,15 @@ that are supposed to agree do not.
 > whose counterparty is an in-scope pool, inside a transaction containing a
 > `Swap` on that pool.
 >
+> **A trade carries no payment test, and step 7's does not apply here.** That is
+> deliberate and the two sections agree: payment is proven **once per wallet, to
+> decide cohort membership**, and never again per row. A row saying the token
+> moved between a wallet and a pool in a swap transaction is a true statement
+> about the chain whether or not that particular wallet funded that particular
+> transaction. Rows that are really unpaid receipts show up as a negative
+> position and are flagged `inflated-pnl`, which is the same treatment missing
+> transfer rows get. See step 7 for the decision and its cost.
+>
 > **"Was present in a transaction containing X" is not "did X."** A transaction
 > contains many transfers, most of them intermediate hops. That conflation
 > produced a wrong count of 34,744 that nearly justified a rebuild.
@@ -848,7 +918,12 @@ and reported**, rather than dividing by a zero range.
   1.000, then 67 at 0.875, 18 at 0.825, 1 at 0.175), so 0.5 and 0.8 make the
   same cut there and 0.9 catches 86.
 - **`inflated-pnl`** — position below **-0.001** tokens: it sold more than it
-  bought, so its PnL counts a sale whose purchase is invisible. **The floor is
+  bought, so its PnL counts a sale whose purchase is invisible. **It covers two
+  causes and does not distinguish them**: transfers not yet collected, and buy
+  rows that were never payment-proven because proof is taken once per wallet at
+  cohort time rather than per row (step 7). Both produce the same symptom — a
+  sale with no matching purchase — and both clear the same way, by collecting
+  the missing side. **The floor is
   not zero**: 589 PONS wallets are negative by less than a millionth of a token,
   the smallest by 3e-18, which is allocation residue.
 
