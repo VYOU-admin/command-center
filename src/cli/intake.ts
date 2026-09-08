@@ -701,7 +701,7 @@ async function main(): Promise<void> {
     });
 
     /* ---- 9. dry run ----------------------------------------- STOP ------ */
-    await run('dryrun', async (rpc, c) => {
+    await run('dryrun', async (_rpc, c) => {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
       const decimals = (await c.query<{ decimals: number }>(
         `select decimals from tokens where mint=$1`, [cfg.token])).rows[0]?.decimals;
@@ -711,14 +711,14 @@ async function main(): Promise<void> {
       const cohort = new Set(cohortRows.rows.map((r) => r.wallet.toLowerCase()));
       const bridgeUsd = await loadBridgeUsd(c, cfg);
       const { plan } = await planOrWrite(
-        c, rpc, cfg, pools, decimals, cohort, await effective(c),
+        c, cfg, pools, decimals, cohort, await effective(c),
         firstBlock, head, false, bridgeUsd,
       );
       return { report: { DRY_RUN: true, cohort: cohort.size, ...plan } };
     });
 
     /* ---- 10. write ------------------------------------------------------ */
-    await run('write', async (rpc, c) => {
+    await run('write', async (_rpc, c) => {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
       const decimals = (await c.query<{ decimals: number }>(
         `select decimals from tokens where mint=$1`, [cfg.token])).rows[0]?.decimals;
@@ -752,7 +752,7 @@ async function main(): Promise<void> {
       }
 
       const { plan, stored, deleted } = await planOrWrite(
-        c, rpc, cfg, pools, decimals, cohort, await effective(c),
+        c, cfg, pools, decimals, cohort, await effective(c),
         firstBlock, head, true, bridgeUsd, reinsert,
       );
 

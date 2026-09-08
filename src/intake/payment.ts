@@ -27,7 +27,6 @@
  */
 
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
-import type { PaymentIndex, RowStats, TradeLeg } from '../adapters/token-updates/rows.js';
 
 const XFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
@@ -207,70 +206,85 @@ export class ReceiptPayments {
 }
 
 /**
- * The one entry point both callers use: derive trade legs with the payment
- * half of a buy actually proven.
+ * Prove cohort membership: which of these wallets bought.
  *
- * It runs `tradeLegs` twice, and the two passes are not a duplication. The
- * first pass, with the check disabled, is the only way to learn WHICH
- * transactions contain a candidate buy; receipts are then fetched for exactly
- * those, and the second pass applies the answer. Both passes are pure
- * computation over logs already in hand, so the second is free and the RPC cost
- * is bounded by the candidates rather than by every transaction in the slice.
+ * ONE PROVEN PAYMENT PER WALLET, and proving stops there. Membership asks "did
+ * this wallet buy", which one purchase answers for good. Walking every
+ * candidate transaction instead costs $4.23 an intake against $0.13, for a
+ * precision the `inflated-pnl` flag already delivers -- see docs/ROBINHOOD.md
+ * step 7, where this is recorded as settled.
  *
- * The intake's cohort builder and the hourly job both call THIS, not
- * `tradeLegs` directly, so the definition of a buy has one implementation and a
- * change to it reaches both. See docs/ROBINHOOD.md step 7 and step 15.
+ * `candidates` maps a wallet to the transactions in which it received the token
+ * from a pool, cheapest first is not required -- the loop exits on the first
+ * success either way.
+ *
+ * `alreadyProven` is the free fast path: wallets `token_payment_logs` already
+ * shows paying a pool directly. Those cost nothing to confirm.
  */
-export async function tradeLegsWithProvenPayment(
+export async function provenBuyers(
   rpc: RpcClient,
   token: string,
   poolCounterparties: Iterable<string>,
-  run: (payments: PaymentIndex | null) => { legs: TradeLeg[]; stats: RowStats },
+  candidates: Map<string, string[]>,
+  alreadyProven: ReadonlySet<string>,
 ): Promise<{
-  legs: TradeLeg[];
-  stats: RowStats;
-  /** The proven index, for callers that go on to build rows from it. */
-  index: PaymentIndex;
-  receiptsFetched: number;
-  candidateTransactions: number;
-  buysAccepted: number;
-  buysRejected: number;
-  purposeUnproven: number;
+  buyers: Set<string>;
+  walletsProvenFree: number;
+  walletsProvenByRpc: number;
+  walletsWithNoPaymentInAnyTransaction: number;
+  transactionsRead: number;
+  receiptsRead: number;
+  cuSpent: number;
 }> {
-  const first = run(null);
-
-  const wanted = new Map<string, string[]>();
-  for (const leg of first.legs) {
-    if (leg.side !== 'buy') continue;
-    const list = wanted.get(leg.txHash);
-    if (list) list.push(leg.wallet);
-    else wanted.set(leg.txHash, [leg.wallet]);
-  }
-
   const prover = new ReceiptPayments(
     rpc, token, new Set([...poolCounterparties].map((a) => a.toLowerCase())),
   );
-  const index = new Set<string>();
-  let purposeUnproven = 0;
-  for (const [txHash, wallets] of wanted) {
-    for (const wallet of wallets) {
-      const proof = await prover.prove(txHash, wallet);
-      if (!proof.paid) continue;
-      if (!proof.reachedAPool) purposeUnproven += 1;
-      index.add(`${txHash}:${wallet}`);
+  const buyers = new Set<string>();
+  let free = 0;
+  let byRpc = 0;
+  let unpaid = 0;
+
+  for (const [wallet, txs] of candidates) {
+    const w = wallet.toLowerCase();
+    if (alreadyProven.has(w)) {
+      buyers.add(w);
+      free += 1;
+      continue;
     }
+    let proven = false;
+    for (const txHash of txs) {
+      const proof = await prover.prove(txHash, w);
+      if (proof.paid) { proven = true; break; }
+    }
+    if (proven) { buyers.add(w); byRpc += 1; } else { unpaid += 1; }
   }
 
-  const second = run(index);
-  const buysAccepted = second.legs.filter((l) => l.side === 'buy').length;
   return {
-    legs: second.legs,
-    stats: second.stats,
-    index,
-    receiptsFetched: prover.receiptsFetched,
-    candidateTransactions: wanted.size,
-    buysAccepted,
-    buysRejected: second.stats.buysWithNoPayment,
-    purposeUnproven,
+    buyers,
+    walletsProvenFree: free,
+    walletsProvenByRpc: byRpc,
+    walletsWithNoPaymentInAnyTransaction: unpaid,
+    transactionsRead: prover.transactionsFetched,
+    receiptsRead: prover.receiptsFetched,
+    cuSpent: prover.cuSpent,
   };
+}
+
+/**
+ * The free fast path: wallets `token_payment_logs` already shows sending a
+ * pricing asset straight to a pool. That is the rejected rule's evidence, and
+ * while it is far too narrow to DECIDE payment, every wallet in it did pay --
+ * so it is sound as a shortcut and unsound as a test. It is not worth
+ * collecting for a new token; it is worth reading where it already exists.
+ */
+export async function fastPathPayers(
+  client: { query: (sql: string, params: unknown[]) => Promise<{ rows: { payer: string }[] }> },
+  chain: string,
+  token: string,
+): Promise<Set<string>> {
+  const res = await client.query(
+    `select distinct payer from token_payment_logs where chain = $1 and token = $2`,
+    [chain, token],
+  );
+  return new Set(res.rows.map((r) => r.payer.toLowerCase()));
 }

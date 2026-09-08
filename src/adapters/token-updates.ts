@@ -55,8 +55,7 @@ import {
   persistPrices,
   type PriceSeries,
 } from './token-updates/prices.js';
-import { tradeLegsWithProvenPayment } from '../intake/payment.js';
-import { buildRows, tradeLegs, type RowStats, type WalletRow } from './token-updates/rows.js';
+import { buildRows, type RowStats, type WalletRow } from './token-updates/rows.js';
 import { loadExclusions } from './token-updates/exclusions.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -304,12 +303,6 @@ const adapter: SourceAdapter<WalletRow> = {
     const knownPools = new Set([...scan.all.values()].map((p) => p.pool));
 
     const resolver = counterUsdResolver(cfg, pricingMap);
-    const proven = await tradeLegsWithProvenPayment(
-      rpc, cfg.token, knownPools,
-      (payments) => tradeLegs(
-        swaps, transfers, cfg, resolver, exclusions, knownPools, payments,
-      ),
-    );
     const { rows, stats } = buildRows(
       swaps,
       transfers,
@@ -318,7 +311,6 @@ const adapter: SourceAdapter<WalletRow> = {
       resolver,
       exclusions,
       knownPools,
-      proven.index,
       cohort,
     );
 
@@ -329,10 +321,6 @@ const adapter: SourceAdapter<WalletRow> = {
       swaps_v3: v3Count,
       swaps_v4: v4Count,
       transfers: transfers.length,
-      receipts_fetched: proven.receiptsFetched,
-      candidate_buy_transactions: proven.candidateTransactions,
-      buys_rejected_no_payment: proven.buysRejected,
-      buys_accepted_purpose_unproven: proven.purposeUnproven,
       rows_built: rows.length,
       price_buckets_partial_skipped: prices?.stats.bucketsPartial ?? 0,
       price_buckets_reused_from_store: storedBucketsUsed,
@@ -428,7 +416,6 @@ const adapter: SourceAdapter<WalletRow> = {
         rows_below_token_amount: p.stats.rowsBelowTokenAmountFloor,
         rows_below_usd: p.stats.rowsBelowUsdFloor,
       },
-      buys_rejected_no_payment: p.stats.buysWithNoPayment,
       excluded: {
         infrastructure: p.stats.walletsExcludedInfrastructure,
         is_a_pool: p.stats.walletsExcludedIsPool,
@@ -449,7 +436,6 @@ function emptyStats(): RowStats {
     candidateWallets: 0, walletsExcludedInfrastructure: 0, walletsExcludedIsPool: 0,
     roundTrippers: 0, rowsBelowTokenAmountFloor: 0, rowsBelowUsdFloor: 0,
     rowsOutsideCohort: 0, rowsWithNullUsd: 0, nullUsdBecauseNoBucketPrice: 0,
-    buysWithNoPayment: 0,
   };
 }
 

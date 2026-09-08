@@ -90,7 +90,6 @@ export interface RowStats {
   rowsWithNullUsd: number;
   nullUsdBecauseNoBucketPrice: number;
   /** Receipts rejected because the wallet gave up nothing in that transaction. */
-  buysWithNoPayment: number;
 }
 
 /**
@@ -104,12 +103,6 @@ export interface RowStats {
  * qualified a wallet for the cohort but produced no row. Two implementations of
  * one rule is a bug waiting to happen; this is the fix.
  */
-/**
- * Membership test for "this wallet gave up value in transaction X".
- * A plain Set of `${txHash}:${wallet}` satisfies it.
- */
-export type PaymentIndex = { has(key: string): boolean };
-
 export interface TradeLeg {
   wallet: string;
   side: 'buy' | 'sell';
@@ -148,14 +141,6 @@ export function tradeLegs(
   counterUsd: CounterUsdResolver,
   exclusions: Set<string>,
   knownPools: Set<string>,
-  /**
-   * (tx, wallet) pairs where the wallet has been PROVEN to give up value, from
-   * the transaction receipt plus `tx.value` -- see `intake/payment.ts`, which
-   * is the single implementation. Null disables the check, and is correct only
-   * for the first of the two passes that builds this index; it is not a
-   * default, and no caller should pass null and then write the result.
-   */
-  payments: PaymentIndex | null,
 ): { legs: TradeLeg[]; stats: RowStats } {
   const poolManager = cfg.v4PoolManager.toLowerCase();
 
@@ -175,7 +160,6 @@ export function tradeLegs(
     rowsOutsideCohort: 0,
     rowsWithNullUsd: 0,
     nullUsdBecauseNoBucketPrice: 0,
-    buysWithNoPayment: 0,
   };
 
   /* ---- 1. group swaps by transaction and counterparty --------------------- */
@@ -257,25 +241,16 @@ export function tradeLegs(
       if (gotRaw > 0n && gaveRaw > 0n) { stats.roundTrippers += 1; continue; }
       const side: 'buy' | 'sell' = gotRaw > 0n ? 'buy' : 'sell';
       /*
-       * THE SECOND HALF OF A BUY. Receiving the token is not buying it: the
-       * wallet must have given up value in the same transaction. Testing only
-       * the receipt classified 159 of 1,395 legs -- 11% -- as purchases where
-       * the wallet paid nothing, and on this chain 38 of 40 sampled router-fed
-       * recipients were funded by someone else.
+       * NO PAYMENT TEST HERE, DELIBERATELY. A row records that the token moved
+       * between a wallet and an in-scope pool inside a swap transaction, which
+       * is what step 11 defines a trade to be. Payment is proven ONCE PER
+       * WALLET when the cohort is decided (step 7) and never again per row:
+       * proving every row costs $4.23 an intake against $0.13 for membership,
+       * and buys a precision `inflated-pnl` already delivers.
        *
-       * The index consulted here is built from RECEIPTS, not from transfers to
-       * a pool. Asking whether the wallet itself sent a pricing asset to a pool
-       * rejected 39 of 40 decoded buys, all of which had paid, because the
-       * normal path on this chain is native ETH to a router, the router wraps
-       * it, and the POOL receives WETH from the router.
-       *
-       * A SELL needs no such test: the wallet gave up the token itself.
+       * Do not reintroduce a per-row check here. See docs/ROBINHOOD.md step 7,
+       * which records this as settled.
        */
-      if (side === 'buy' && payments !== null
-          && !payments.has(`${group.txHash}:${wallet}`)) {
-        stats.buysWithNoPayment += 1;
-        continue;
-      }
       candidates.push({
         wallet, side, raw: gotRaw > 0n ? gotRaw : gaveRaw,
       });
@@ -306,13 +281,12 @@ export function buildRows(
   counterUsd: CounterUsdResolver,
   exclusions: Set<string>,
   knownPools: Set<string>,
-  payments: PaymentIndex | null,
   /** Null accepts every wallet -- used by the cohort builder, which is deciding
    *  membership rather than filtering by it. */
   cohort: Set<string> | null,
 ): { rows: WalletRow[]; stats: RowStats } {
   const { legs, stats } = tradeLegs(
-    swaps, transfers, cfg, counterUsd, exclusions, knownPools, payments,
+    swaps, transfers, cfg, counterUsd, exclusions, knownPools,
   );
   const rows: WalletRow[] = [];
 

@@ -27,7 +27,7 @@ import { classifyCode } from '../adapters/token-updates/decode.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
 import type { PoolRow } from '../adapters/token-updates/pools.js';
 import { tradeLegs } from '../adapters/token-updates/rows.js';
-import { tradeLegsWithProvenPayment } from './payment.js';
+import { fastPathPayers, provenBuyers } from './payment.js';
 import { loadLegsInput } from './write.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -57,12 +57,16 @@ export interface CohortReport {
   cohort: string[];
   /** Exclusion-list entries that matched nothing, reported rather than dropped. */
   unusedExclusions: string[];
-  /** Receipts fetched to prove the payment half of each candidate buy. */
-  receiptsFetched: number;
-  candidateTransactions: number;
-  buysRejectedNoPayment: number;
-  /** Accepted on proven payment, but nothing reached a pool -- v4 settlement. */
-  purposeUnproven: number;
+  /** Wallets that received the token from a pool and so needed proving. */
+  candidateWalletsForPayment: number;
+  /** Proven at no cost from token_payment_logs. */
+  walletsProvenFree: number;
+  walletsProvenByRpc: number;
+  /** Received the token but paid in none of their candidate transactions. */
+  walletsWithNoPaymentInAnyTransaction: number;
+  paymentTransactionsRead: number;
+  paymentReceiptsRead: number;
+  paymentCu: number;
 }
 
 export async function buildCohort(
@@ -99,29 +103,30 @@ export async function buildCohort(
   let excludedAsRoundTrippers = 0;
   let excludedAsPools = 0;
   let candidateWallets = 0;
-  let receiptsFetched = 0;
-  let candidateTransactions = 0;
-  let buysRejectedNoPayment = 0;
-  let purposeUnproven = 0;
+  /**
+   * Wallet -> a few of the transactions in which it received the token from a
+   * pool. Capped at 8 per wallet: proving stops at the first success, and a
+   * wallet with no payment in its first eight candidate transactions is not a
+   * buyer that a ninth would rescue.
+   */
+  const candidateTxs = new Map<string, string[]>();
 
   for (let from = startBlock; from <= endBlock; from += cfg.sliceBlocks) {
     const to = Math.min(from + cfg.sliceBlocks - 1, endBlock);
     const slice = await loadLegsInput(client, cfg, pools, from, to);
-    const proven = await tradeLegsWithProvenPayment(
-      rpc, cfg.token, knownPools,
-      // The cohort does not need prices: membership is who traded, not for how
-      // much. A resolver that always returns null keeps every leg's USD null.
-      (payments) => tradeLegs(
-        slice.swaps, slice.transfers, cfg, () => null, excludedSet, knownPools,
-        payments,
-      ),
+    // The cohort does not need prices: membership is who traded, not for how
+    // much. A resolver that always returns null keeps every leg's USD null.
+    const { legs, stats } = tradeLegs(
+      slice.swaps, slice.transfers, cfg, () => null, excludedSet, knownPools,
     );
-    const { legs, stats } = proven;
-    receiptsFetched += proven.receiptsFetched;
-    candidateTransactions += proven.candidateTransactions;
-    buysRejectedNoPayment += proven.buysRejected;
-    purposeUnproven += proven.purposeUnproven;
-    for (const leg of legs) if (leg.side === 'buy') buyers.add(leg.wallet);
+    // Candidates accumulate across slices; payment is proven ONCE, after every
+    // slice has been read, so a wallet buying in ten slices is proven once.
+    for (const leg of legs) {
+      if (leg.side !== 'buy') continue;
+      const list = candidateTxs.get(leg.wallet);
+      if (list) { if (list.length < 8) list.push(leg.txHash); }
+      else candidateTxs.set(leg.wallet, [leg.txHash]);
+    }
     for (const t of slice.transfers) {
       if (excludedSet.has(t.from)) usedExclusions.add(t.from);
       if (excludedSet.has(t.to)) usedExclusions.add(t.to);
@@ -131,6 +136,15 @@ export async function buildCohort(
     excludedAsPools += stats.walletsExcludedIsPool;
     candidateWallets += stats.candidateWallets;
   }
+  /*
+   * PAYMENT, ONCE PER WALLET. Every candidate slice has been read, so each
+   * wallet is proven a single time across the whole window rather than once per
+   * slice. See docs/ROBINHOOD.md step 7.
+   */
+  const fastPath = await fastPathPayers(client, cfg.chain, cfg.token);
+  const proof = await provenBuyers(rpc, cfg.token, knownPools, candidateTxs, fastPath);
+  for (const w of proof.buyers) buyers.add(w);
+
   const survivors = [...buyers].sort();
 
   /*
@@ -168,10 +182,13 @@ export async function buildCohort(
     delegatedEip7702,
     cohort,
     unusedExclusions: [...excludedSet].filter((a) => !usedExclusions.has(a)),
-    receiptsFetched,
-    candidateTransactions,
-    buysRejectedNoPayment,
-    purposeUnproven,
+    candidateWalletsForPayment: candidateTxs.size,
+    walletsProvenFree: proof.walletsProvenFree,
+    walletsProvenByRpc: proof.walletsProvenByRpc,
+    walletsWithNoPaymentInAnyTransaction: proof.walletsWithNoPaymentInAnyTransaction,
+    paymentTransactionsRead: proof.transactionsRead,
+    paymentReceiptsRead: proof.receiptsRead,
+    paymentCu: proof.cuSpent,
   };
 }
 

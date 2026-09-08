@@ -11,7 +11,6 @@
 
 import type { IntakeConfig } from './plan.js';
 import type { RpcClient } from '../adapters/token-updates/rpc.js';
-import { tradeLegsWithProvenPayment } from './payment.js';
 import { poolKey, type PoolRow } from '../adapters/token-updates/pools.js';
 import type { SwapLog, TransferLog } from '../adapters/token-updates/decode.js';
 import {
@@ -449,8 +448,6 @@ export interface WritePlan {
   };
   groupsWithoutTransfers: number;
   groupsWithMultiplePools: number;
-  receiptsFetched: number;
-  buysRejectedNoPayment: number;
   /** Trade rows only. Transfers are counted separately, never folded in. */
   tradeRows: number;
   /** Movements that changed a position without being a trade. */
@@ -475,8 +472,6 @@ function emptyPlan(): WritePlan {
     excluded: { infrastructure: 0, isAPool: 0, roundTrippers: 0, outsideCohort: 0 },
     groupsWithoutTransfers: 0,
     groupsWithMultiplePools: 0,
-    receiptsFetched: 0,
-    buysRejectedNoPayment: 0,
     tradeRows: 0,
     transfersWritten: 0,
     transfersSkippedAsTrades: 0,
@@ -513,8 +508,6 @@ function fold(plan: WritePlan, rows: WalletRow[], stats: RowStats, wallets: Set<
  */
 export async function planOrWrite(
   client: PoolClient,
-  /** Needed to prove the payment half of a buy from receipts. */
-  rpc: RpcClient,
   cfg: IntakeConfig,
   pools: Map<string, PoolRow>,
   tokenDecimals: number,
@@ -566,18 +559,11 @@ export async function planOrWrite(
     }
 
     const resolver = counterUsdResolver(cfg, nativeUsd, bridgeUsd);
-    // ONE implementation of the buy rule, shared with the cohort builder and
-    // the hourly job. See intake/payment.ts.
-    const proven = await tradeLegsWithProvenPayment(
-      rpc, cfg.token, knownPools,
-      (payments) => tradeLegs(
-        slice.swaps, slice.transfers, cfg, resolver, exclusions, knownPools, payments,
-      ),
+    // Rows are NOT payment-proven -- that is settled; see docs/ROBINHOOD.md
+    // step 7 and step 11. Proof happens once per wallet at cohort time.
+    const { legs } = tradeLegs(
+      slice.swaps, slice.transfers, cfg, resolver, exclusions, knownPools,
     );
-    const legs = proven.legs;
-    const payments = proven.index;
-    plan.receiptsFetched += proven.receiptsFetched;
-    plan.buysRejectedNoPayment += proven.buysRejected;
     const { rows: tRows, skippedBecauseTraded, skippedBelowFloor } = buildTransferRows(
       slice.transfers, legs, cfg, tokenDecimals, exclusions, knownPools, cohort,
     );
@@ -593,7 +579,6 @@ export async function planOrWrite(
       resolver,
       exclusions,
       knownPools,
-      payments,
       cohort,
     );
     fold(plan, rows.concat(tRows), stats, wallets);

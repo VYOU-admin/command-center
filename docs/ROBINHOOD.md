@@ -543,10 +543,28 @@ transactions per block**, and PONS measures **1.22**. Using it costs 52,860 CU
 per slice against 48,285, which is 9% worse.
 
 **`token_payment_logs` is a free fast path where it already covers a wallet.**
-Its 625,888 rows name 9,875 payers who sent a pricing asset straight to a pool,
-and that answers roughly 9 of every 14 receipts that would otherwise be bought.
-It is worth consulting for PONS, where the rows exist. **It is not worth
-sweeping for a new token** — collecting it was the rejected rule's cost.
+Its 625,888 rows name 9,875 payers who sent a pricing asset straight to a pool.
+Every wallet in it did pay, so it is sound as a shortcut and unsound as a test —
+which is exactly the distinction the rejected rule got wrong. Measured against
+PONS's 16,910 in-window candidate wallets it proves **2,166 of them, 12.8%, for
+nothing**. **It is not worth sweeping for a new token** — collecting it was the
+rejected rule's cost, and a new token starts with an empty table.
+
+**The measured cost of the cohort step on PONS, after all of this:**
+
+```
+candidate wallets                                     16,910
+proven free from token_payment_logs                    2,166   (12.8%)
+left to prove over RPC                                14,744
+  x 15 CU for the transaction                        221,160 CU
+  + ~14% needing a receipt, x 15 CU                   30,962 CU
+                                                   -----------
+                                                    ~252,000 CU   ~$0.11
+```
+
+That is the whole payment cost of an intake. It fits inside the 600,000 CU
+cohort ceiling with room, and it replaces the $4.23 that per-row proof would
+have cost.
 
 Measured against **execution traces** as independent ground truth — the call
 tree read as calldata, not as emitted logs, so the two views can disagree:
