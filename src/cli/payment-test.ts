@@ -202,7 +202,7 @@ async function main(): Promise<void> {
     const prover = new ReceiptPayments(rpc, cfg.token, new Set(cps));
     const noTrace = args.includes('--no-trace');
     let neededReceipt = 0;
-    let nativeOnly = 0;
+    let answeredByTx = 0;
     let traces = 0;
     let directCount = 0;
     const cells = { ap: 0, an: 0, rp: 0, rn: 0 };
@@ -238,7 +238,7 @@ async function main(): Promise<void> {
       else if (!verdict.paid && truth) cells.rp += 1;
       else cells.rn += 1;
 
-      if (verdict.neededReceipt) neededReceipt += 1; else nativeOnly += 1;
+      if (verdict.neededReceipt) neededReceipt += 1; else answeredByTx += 1;
       if (verdict.walletPaidPoolDirectly) directCount += 1;
       if (verdict.paid && !verdict.reachedAPool) {
         undecidable.push({
@@ -311,12 +311,12 @@ async function main(): Promise<void> {
       projected_dollars: ((txs * perTx * 0.45) / 1e6).toFixed(2),
     });
     log.info('which half of the rule answered it', {
-      answered_by_the_transaction_alone_15_cu: nativeOnly,
+      answered_by_the_transaction_alone_15_cu: answeredByTx,
       needed_a_receipt_as_well_30_cu: neededReceipt,
       distinct_wallets_in_this_sample: new Set(sample.map((r) => r.wallet)).size,
       wallets_proven_to_have_paid: prover.provenWallets.size,
       mean_cu_per_candidate: (
-        (nativeOnly * 15 + neededReceipt * 30) / Math.max(1, nativeOnly + neededReceipt)
+        (answeredByTx * 15 + neededReceipt * 30) / Math.max(1, answeredByTx + neededReceipt)
       ).toFixed(1),
     });
     log.info('cost actually consumed', {
