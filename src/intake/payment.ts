@@ -50,17 +50,23 @@ export interface PaymentProof {
    * definition asks only that the wallet gave up value -- but the case is
    * reported as purpose-unproven rather than hidden inside the accept total.
    */
-  reachedAPool: boolean;
+  reachedAPool: boolean | null;
   /** The old rule's question, kept only to size the difference. */
-  walletPaidPoolDirectly: boolean;
+  walletPaidPoolDirectly: boolean | null;
+  /** True when the native test failed and a receipt had to be bought. */
+  neededReceipt: boolean;
 }
 
 interface CachedTx {
-  /** Sender of each ERC-20 Transfer, with the token contract it moved. */
-  sends: { token: string; from: string; to: string; raw: bigint }[];
   txFrom: string;
   txValue: bigint;
   txTo: string;
+  /**
+   * Sender of each ERC-20 Transfer, with the token contract it moved. Null
+   * until the receipt has actually been fetched -- see the two-step order in
+   * `prove`. Null is "not looked at", never "there were none".
+   */
+  sends: { token: string; from: string; to: string; raw: bigint }[] | null;
 }
 
 /**
@@ -69,7 +75,10 @@ interface CachedTx {
  */
 export class ReceiptPayments {
   private readonly cache = new Map<string, CachedTx>();
-  private fetched = 0;
+  private txFetched = 0;
+  private receiptFetched = 0;
+  /** Wallets already proven to have paid somewhere; see `provenWallets`. */
+  private readonly proven = new Set<string>();
 
   constructor(
     private readonly rpc: RpcClient,
@@ -80,24 +89,51 @@ export class ReceiptPayments {
   ) {}
 
   get receiptsFetched(): number {
-    return this.fetched;
+    return this.receiptFetched;
   }
 
-  private async load(txHash: string): Promise<CachedTx> {
+  get transactionsFetched(): number {
+    return this.txFetched;
+  }
+
+  /** 15 CU per transaction read, 15 more only when a receipt was needed. */
+  get cuSpent(): number {
+    return this.txFetched * 15 + this.receiptFetched * 15;
+  }
+
+  /** The transaction alone: sender, value, callee. 15 CU. */
+  private async loadTx(txHash: string): Promise<CachedTx> {
     const hit = this.cache.get(txHash);
     if (hit) return hit;
+
+    const tx = (await this.rpc.raw('eth_getTransactionByHash', [txHash])) as {
+      from?: string; value?: string; to?: string;
+    } | null;
+    this.txFetched += 1;
+    // A transaction that cannot be read is a failed read, not an absent payment.
+    if (!tx) {
+      throw new Error(`could not read transaction ${txHash}; refusing to call that "unpaid"`);
+    }
+    const entry: CachedTx = {
+      txFrom: (tx.from ?? '').toLowerCase(),
+      txValue: BigInt(tx.value ?? '0x0'),
+      txTo: (tx.to ?? '').toLowerCase(),
+      sends: null,
+    };
+    this.cache.set(txHash, entry);
+    return entry;
+  }
+
+  /** The receipt's Transfer logs. A further 15 CU, and only when needed. */
+  private async loadReceipt(txHash: string, entry: CachedTx): Promise<CachedTx> {
+    if (entry.sends !== null) return entry;
 
     const receipt = (await this.rpc.raw('eth_getTransactionReceipt', [txHash])) as {
       logs?: { address: string; topics: string[]; data: string }[];
     } | null;
-    const tx = (await this.rpc.raw('eth_getTransactionByHash', [txHash])) as {
-      from?: string; value?: string; to?: string;
-    } | null;
-    this.fetched += 1;
-
-    // A receipt that cannot be read is a failed read, not an absent payment.
-    if (!receipt || !tx) {
-      throw new Error(`could not read transaction ${txHash}; refusing to call that "unpaid"`);
+    this.receiptFetched += 1;
+    if (!receipt) {
+      throw new Error(`could not read receipt for ${txHash}; refusing to call that "unpaid"`);
     }
 
     const sends: CachedTx['sends'] = [];
@@ -110,42 +146,63 @@ export class ReceiptPayments {
         raw: BigInt(l.data === '0x' ? '0x0' : l.data),
       });
     }
-    const entry: CachedTx = {
-      sends,
-      txFrom: (tx.from ?? '').toLowerCase(),
-      txValue: BigInt(tx.value ?? '0x0'),
-      txTo: (tx.to ?? '').toLowerCase(),
-    };
-    this.cache.set(txHash, entry);
+    entry.sends = sends;
     return entry;
   }
 
+  /**
+   * THE CHEAP HALF FIRST. Measured on this chain, native ETH is how the large
+   * majority of buyers pay, and that is visible in the transaction alone: the
+   * wallet is the sender and `value` is non-zero. That costs 15 CU and needs no
+   * receipt at all.
+   *
+   * The receipt -- another 15 CU -- is fetched only when the native test fails,
+   * because then the only remaining way to have paid is an ERC-20 leg, which
+   * lives in the logs. Ordering the two this way is not an approximation: every
+   * case still gets a definite answer, and the answer is identical to fetching
+   * both. It only avoids buying evidence that cannot change the verdict.
+   */
   async prove(txHash: string, wallet: string): Promise<PaymentProof> {
-    const t = await this.load(txHash.toLowerCase());
+    const key = txHash.toLowerCase();
     const w = wallet.toLowerCase();
     const token = this.token.toLowerCase();
 
-    const tokenSends = t.sends.filter((s) => s.from === w && s.token !== token);
-    const paidNative = t.txFrom === w && t.txValue > 0n;
+    const t = await this.loadTx(key);
+    if (t.txFrom === w && t.txValue > 0n) {
+      this.proven.add(w);
+      return {
+        paid: true, how: `${t.txValue.toString()} wei native`,
+        // Not looked at: settling it would cost a receipt that cannot change
+        // the verdict. Null is "unknown", never "no".
+        reachedAPool: null, walletPaidPoolDirectly: null, neededReceipt: false,
+      };
+    }
 
-    const poolWasPaid = t.sends.some(
+    await this.loadReceipt(key, t);
+    const sends = t.sends!;
+    const tokenSends = sends.filter((s) => s.from === w && s.token !== token);
+    const poolWasPaid = sends.some(
       (s) => s.token !== token && this.poolCounterparties.has(s.to),
     );
     const direct = tokenSends.some((s) => this.poolCounterparties.has(s.to));
 
-    if (tokenSends.length === 0 && !paidNative) {
+    if (tokenSends.length === 0) {
       return {
-        paid: false, how: '', reachedAPool: poolWasPaid, walletPaidPoolDirectly: false,
+        paid: false, how: '', reachedAPool: poolWasPaid,
+        walletPaidPoolDirectly: false, neededReceipt: true,
       };
     }
-    const parts: string[] = [];
-    for (const s of tokenSends) parts.push(`${s.raw.toString()} raw of ${s.token}`);
-    if (paidNative) parts.push(`${t.txValue.toString()} wei native`);
-
+    this.proven.add(w);
     return {
-      paid: true, how: parts.join(' + '),
-      reachedAPool: poolWasPaid, walletPaidPoolDirectly: direct,
+      paid: true,
+      how: tokenSends.map((s) => `${s.raw.toString()} raw of ${s.token}`).join(' + '),
+      reachedAPool: poolWasPaid, walletPaidPoolDirectly: direct, neededReceipt: true,
     };
+  }
+
+  /** Wallets proven to have paid at least once during this run. */
+  get provenWallets(): ReadonlySet<string> {
+    return this.proven;
   }
 }
 

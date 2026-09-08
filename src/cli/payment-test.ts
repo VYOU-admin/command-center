@@ -200,6 +200,9 @@ async function main(): Promise<void> {
     }
 
     const prover = new ReceiptPayments(rpc, cfg.token, new Set(cps));
+    const noTrace = args.includes('--no-trace');
+    let neededReceipt = 0;
+    let nativeOnly = 0;
     let traces = 0;
     let directCount = 0;
     const cells = { ap: 0, an: 0, rp: 0, rn: 0 };
@@ -218,19 +221,24 @@ async function main(): Promise<void> {
         unreadable.push({ tx: r.tx_hash, wallet: r.wallet, why: String(err) });
         continue;
       }
-      const trace = (await rpc.raw('debug_traceTransaction', [
-        r.tx_hash, { tracer: 'callTracer', tracerConfig: { onlyTopCall: false } },
-      ])) as TraceCall | null;
-      traces += 1;
-      if (!trace) throw new Error(`no trace for ${r.tx_hash}; refusing to guess a verdict`);
-      const gave = traceGaveUp(trace, r.wallet.toLowerCase(), cfg.token.toLowerCase());
-      const truth = gave.length > 0;
+      let gave: string[] = [];
+      let truth = verdict.paid;
+      if (!noTrace) {
+        const trace = (await rpc.raw('debug_traceTransaction', [
+          r.tx_hash, { tracer: 'callTracer', tracerConfig: { onlyTopCall: false } },
+        ])) as TraceCall | null;
+        traces += 1;
+        if (!trace) throw new Error(`no trace for ${r.tx_hash}; refusing to guess a verdict`);
+        gave = traceGaveUp(trace, r.wallet.toLowerCase(), cfg.token.toLowerCase());
+        truth = gave.length > 0;
+      }
 
       if (verdict.paid && truth) cells.ap += 1;
       else if (verdict.paid && !truth) cells.an += 1;
       else if (!verdict.paid && truth) cells.rp += 1;
       else cells.rn += 1;
 
+      if (verdict.neededReceipt) neededReceipt += 1; else nativeOnly += 1;
       if (verdict.walletPaidPoolDirectly) directCount += 1;
       if (verdict.paid && !verdict.reachedAPool) {
         undecidable.push({
@@ -302,8 +310,19 @@ async function main(): Promise<void> {
       projected_cu: txs * perTx,
       projected_dollars: ((txs * perTx * 0.45) / 1e6).toFixed(2),
     });
+    log.info('which half of the rule answered it', {
+      answered_by_the_transaction_alone_15_cu: nativeOnly,
+      needed_a_receipt_as_well_30_cu: neededReceipt,
+      distinct_wallets_in_this_sample: new Set(sample.map((r) => r.wallet)).size,
+      wallets_proven_to_have_paid: prover.provenWallets.size,
+      mean_cu_per_candidate: (
+        (nativeOnly * 15 + neededReceipt * 30) / Math.max(1, nativeOnly + neededReceipt)
+      ).toFixed(1),
+    });
     log.info('cost actually consumed', {
+      transactions_fetched: prover.transactionsFetched,
       receipts_fetched: prover.receiptsFetched, traces_fetched: traces,
+      rule_only_cu: prover.cuSpent,
       cu_spent: rpc.cuSpent, dollars: ((rpc.cuSpent * 0.45) / 1e6).toFixed(4),
       ceiling, calls: rpc.callCounts(),
     });
