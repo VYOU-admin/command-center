@@ -8,7 +8,7 @@
  * transaction receipt in `src/intake/payment.ts`, which is the one
  * implementation the intake and the hourly job both use.
  *
- * It is kept only to read the 625,888 rows already in `token_payment_logs`.
+ * It is kept only to read the 813,458 rows already in `token_payment_logs`.
  * See docs/ROBINHOOD.md step 7.
  */
 /**

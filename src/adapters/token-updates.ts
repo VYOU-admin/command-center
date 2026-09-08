@@ -359,7 +359,7 @@ const adapter: SourceAdapter<WalletRow> = {
      * `token_payment_logs` is no longer written. It recorded the log-based
      * rule's evidence -- wallets that sent a pricing asset directly to a pool,
      * which is the minority path -- and the receipt rule does not need it. The
-     * TABLE and its 625,888 rows are deliberately kept: they are a measurement
+     * TABLE and its 813,458 rows are deliberately kept: they are a measurement
      * that was made, and this project does not delete history.
      */
     const priceWrites = p.prices

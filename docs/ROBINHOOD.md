@@ -543,7 +543,10 @@ transactions per block**, and PONS measures **1.22**. Using it costs 52,860 CU
 per slice against 48,285, which is 9% worse.
 
 **`token_payment_logs` is a free fast path where it already covers a wallet.**
-Its 625,888 rows name 9,875 payers who sent a pricing asset straight to a pool.
+As of 2026-09-08 its **813,458 rows (530 MB, blocks 15,115,287–56,693,145) name
+9,875 payers** who sent a pricing asset straight to a pool. It stopped growing
+when the hourly job was paused; a figure of 625,888 recorded earlier was taken
+seven cycles before that.
 Every wallet in it did pay, so it is sound as a shortcut and unsound as a test —
 which is exactly the distinction the rejected rule got wrong. Measured against
 PONS's 16,910 in-window candidate wallets it proves **2,166 of them, 12.8%, for
