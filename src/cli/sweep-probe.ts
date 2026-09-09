@@ -38,6 +38,10 @@ async function main(): Promise<void> {
   const to = num('--to', 0);
   const ceiling = num('--ceiling', 2000);
   const legacy = args.includes('--legacy');
+  const samples = num('--samples', 0);
+  const sampleSpan = num('--sample-span', 20000);
+  const tokenIdx = args.indexOf('--token');
+  const tokenOverride = tokenIdx >= 0 ? args[tokenIdx + 1] : undefined;
   if (!from || !to || to <= from) throw new Error('--from and --to are required');
 
   const cfg = await loadIntakeConfig(configPath);
@@ -47,7 +51,68 @@ async function main(): Promise<void> {
   const rpc = new RpcClient(cfg.rpcUrlTemplate.replace('{key}', key),
     cfg.requestTimeoutMs, ceiling);
 
-  const filter = { address: cfg.token, topics: [TOPICS.transfer] };
+  const token = tokenOverride ?? cfg.token;
+  const filter = { address: token, topics: [TOPICS.transfer] };
+
+  /*
+   * SAMPLING MODE. A sweep from the start of a range measures the density of
+   * its beginning, not of the range. To find where the dense regions are, take
+   * evenly spaced fixed-span probes across the whole span instead. Cost is
+   * exactly `samples` requests, so the ceiling is known before it starts.
+   */
+  if (samples > 0) {
+    const step = Math.floor((to - from + 1) / samples);
+    const points: unknown[] = [];
+    let probeLogs = 0;
+    let probeBlocks = 0;
+    let refusals = 0;
+    log.info('density sampling', {
+      token, blocks: `${from}..${to}`, span: to - from + 1,
+      samples, sample_span: sampleSpan, ceiling,
+      cost_if_no_refusals: `${samples * 60} CU`,
+    });
+    for (let i = 0; i < samples; i += 1) {
+      const start = from + i * step;
+      let width = Math.min(sampleSpan, to - start + 1);
+      for (;;) {
+        try {
+          const logs = await rpc.getLogs(filter, start, start + width - 1,
+            width, cfg.minLogSpanBlocks);
+          probeLogs += logs.length;
+          probeBlocks += width;
+          points.push({
+            sample: i + 1, from: start, to: start + width - 1, span: width,
+            logs: logs.length,
+            logs_per_block: Number((logs.length / width).toFixed(4)),
+            pct_through_window: `${Math.round((100 * i) / samples)}%`,
+          });
+          break;
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          if (SIZE_REFUSAL.test(m) && width > cfg.minLogSpanBlocks) {
+            refusals += 1;
+            width = Math.max(cfg.minLogSpanBlocks, Math.floor(width / 2));
+            continue;
+          }
+          throw err;
+        }
+      }
+    }
+    const densities = points.map((p) => (p as { logs_per_block: number }).logs_per_block);
+    const sorted = [...densities].sort((a, b) => a - b);
+    log.info('every sample', { points });
+    log.info('density summary', {
+      token, samples: points.length, size_refusals: refusals,
+      total_logs: probeLogs, total_blocks: probeBlocks,
+      mean_logs_per_block: Number((probeLogs / probeBlocks).toFixed(4)),
+      min: sorted[0], median: sorted[Math.floor(sorted.length / 2)],
+      max: sorted[sorted.length - 1],
+      spread: sorted[0] ? `${(sorted[sorted.length - 1] / sorted[0]).toFixed(1)}x` : 'MIN IS ZERO',
+      cu_spent: rpc.cuSpent,
+    });
+    await app.pool.end();
+    process.exit(0);
+  }
   const ceilingSpan = cfg.maxLogSpanBlocks;
   let cursor = from;
   let span = Math.min(cfg.maxLogSpanBlocks, to - from + 1);
