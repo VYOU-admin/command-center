@@ -58,36 +58,55 @@ async function main(): Promise<void> {
     if (pools.size === 0) throw new Error('no in-scope pools stored; run the scope phase');
 
     /* ---- sign conventions, from everything stored -------------------------- */
+    /*
+     * PAIR A SWAP WITH ITS OWN TRANSFER, OR PAIR NOTHING.
+     *
+     * A first attempt joined any transfer in the transaction whose sender was
+     * the counterparty. On v4 EVERY pool shares the PoolManager as its
+     * counterparty, so in a transaction holding two v4 swaps each swap joined
+     * both transfers, and a buy on one pool paired with a sell on another
+     * produced a false disagreement -- 5,426 of them, 8.3%.
+     *
+     * The pairing is only unambiguous where the transaction holds exactly one
+     * swap and exactly one qualifying transfer. That is a smaller sample and a
+     * sound one; the alternative is a large unsound one. Transactions with more
+     * are counted and reported, never silently dropped.
+     */
     const conv = await c.query<{
-      venue: string; region: string; agree: string; disagree: string;
+      venue: string; region: string; agree: string; disagree: string; ambiguous: string;
     }>(
       `with tok as (
          select s.venue, s.tx_hash, s.block_number,
                 -- pons_side, not token_side: named for the first token loaded,
-                -- like pons_usd in the price tables. Renaming either is a
-                -- migration, not a config change.
+                -- like pons_usd in the price tables.
                 case when m.pons_side = 0 then s.amount0 else s.amount1 end as tok_amt,
                 case when s.venue = 'v3' then m.pool else $3 end as counterparty
            from token_swap_logs s
            join pool_meta m on m.chain=s.chain and m.token=s.token
                            and m.venue=s.venue and m.pool=s.pool
           where s.chain=$1 and s.token=$2),
+       swaps_per_tx as (select tx_hash, count(*) n from tok group by 1),
        moved as (
          select t.tx_hash, t.from_addr, t.to_addr
-           from token_transfer_logs t where t.chain=$1 and t.token=$2)
-       select tok.venue,
-              case when tok.block_number between $4 and $5 then 'in-window'
-                   when tok.block_number < $4 then 'before' else 'after' end as region,
-              count(*) filter (where
-                (tok.venue='v3' and tok.tok_amt < 0) or (tok.venue='v4' and tok.tok_amt > 0)
-              )::text as agree,
-              count(*) filter (where
-                (tok.venue='v3' and tok.tok_amt > 0) or (tok.venue='v4' and tok.tok_amt < 0)
-              )::text as disagree
-         from tok
-         join moved on moved.tx_hash = tok.tx_hash
-                   and moved.from_addr = tok.counterparty
-                   and moved.to_addr <> tok.counterparty
+           from token_transfer_logs t where t.chain=$1 and t.token=$2),
+       paired as (
+         select tok.venue, tok.block_number, tok.tok_amt,
+                spt.n as swaps_in_tx,
+                count(*) over (partition by tok.tx_hash) as transfers_matched
+           from tok
+           join swaps_per_tx spt on spt.tx_hash = tok.tx_hash
+           join moved on moved.tx_hash = tok.tx_hash
+                     and moved.from_addr = tok.counterparty
+                     and moved.to_addr <> tok.counterparty)
+       select venue,
+              case when block_number between $4 and $5 then 'in-window'
+                   when block_number < $4 then 'before' else 'after' end as region,
+              count(*) filter (where swaps_in_tx = 1 and transfers_matched = 1 and (
+                (venue='v3' and tok_amt < 0) or (venue='v4' and tok_amt > 0)))::text as agree,
+              count(*) filter (where swaps_in_tx = 1 and transfers_matched = 1 and (
+                (venue='v3' and tok_amt > 0) or (venue='v4' and tok_amt < 0)))::text as disagree,
+              count(*) filter (where swaps_in_tx > 1 or transfers_matched > 1)::text as ambiguous
+         from paired
         group by 1, 2 order by 1, 2`,
       [cfg.chain, cfg.token, cfg.v4PoolManager.toLowerCase(),
         windows[0]!.startBlock, windows[0]!.endBlock],
@@ -95,6 +114,7 @@ async function main(): Promise<void> {
     log.info('sign conventions, measured on STORED data', {
       expectation: 'v3 = POOL perspective (pool sent the token => negative); '
         + 'v4 = SWAPPER perspective (swapper received => positive)',
+      paired_only_where_unambiguous: 'one swap and one qualifying transfer in the transaction',
       rows: conv.rows,
     });
     const bad = conv.rows.filter((r) => Number(r.disagree) > 0);
