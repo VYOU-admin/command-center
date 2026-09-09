@@ -1064,6 +1064,13 @@ figure was 10. A genuine catastrophe would have committed identically.
 **Costs:** no network.
 **Stops:** no.
 
+**Two columns are named for the first token loaded, and neither is
+configurable:** `pool_meta.pons_side` and `<token>_usd_prices.pons_usd`. The
+table NAMES are configured; the column names are not, so every token's price
+table carries a `pons_usd` column and every pool row a `pons_side`. Renaming
+them is a migration rather than a config change. Expect them; do not write
+`token_side`.
+
 **Write progressively**, per slice, not accumulated and flushed at the end, so a
 run that dies leaves a truthful partial record rather than nothing.
 

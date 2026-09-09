@@ -63,7 +63,10 @@ async function main(): Promise<void> {
     }>(
       `with tok as (
          select s.venue, s.tx_hash, s.block_number,
-                case when m.token_side = 0 then s.amount0 else s.amount1 end as tok_amt,
+                -- pons_side, not token_side: named for the first token loaded,
+                -- like pons_usd in the price tables. Renaming either is a
+                -- migration, not a config change.
+                case when m.pons_side = 0 then s.amount0 else s.amount1 end as tok_amt,
                 case when s.venue = 'v3' then m.pool else $3 end as counterparty
            from token_swap_logs s
            join pool_meta m on m.chain=s.chain and m.token=s.token
