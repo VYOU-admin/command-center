@@ -1156,6 +1156,17 @@ that separates almost nobody.
 **Does:** renders the token alongside the others.
 **Stops:** no.
 
+**A token loaded only to price another is not a tracked token.** `tokens.role`
+records which it is: `tracked` for a token with a window and a cohort, and
+`pricing-source` for a bridge asset loaded solely so another token can be priced
+through it. A pricing source has no window, no cohort and no rows, and the
+dashboard filters on the role rather than on a name the page knows.
+
+NVDA is the first. Loading it far enough to derive its own USD series put a row
+in `tokens`, and that row was immediately a dashboard tab for a token nobody is
+tracking, with nothing in it. **Every future bridge does the same**, which is why
+the distinction lives in the data.
+
 **A new chain needs entries in the explorer table and in the price adapter's
 pricing-quote set.** Both were Solana-only once, and both failed silently: a
 Solscan URL built from a hex address resolves to nothing without an error, and a

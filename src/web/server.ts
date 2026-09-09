@@ -272,8 +272,14 @@ export function createWebServer(opts: WebServerOptions): Server {
       // Aggregates, not rows: the table shows per-wallet totals, and a wallet's
       // individual transactions are fetched on demand when its row expands.
       const [toks, aggs, legend, tags, wins, prices, scores] = await Promise.all([
+        /*
+         * TRACKED TOKENS ONLY. A token loaded purely to price another -- a
+         * bridge asset such as NVDA -- has a row here but no window, no cohort
+         * and no rows, and rendering it produces an empty tab. The filter is on
+         * the token's recorded role, not on a name the page knows.
+         */
         pool.query(`select mint, chain, ticker, name, decimals, charted_pair
-                      from tokens order by chain, ticker`),
+                      from tokens where role = 'tracked' order by chain, ticker`),
         /*
          * WALLET AGGREGATES, NOT RAW ROWS.
          *

@@ -121,8 +121,29 @@ create table if not exists tokens (
   name          text,
   decimals      integer     not null,
   charted_pair  text,
+  /*
+   * WHAT THIS TOKEN IS FOR.
+   *
+   *   tracked         a token with a window and a cohort. The dashboard shows it.
+   *   pricing-source  loaded ONLY so another token can be priced through it --
+   *                   a bridge asset. It has no window, no cohort and no rows,
+   *                   and the dashboard does not show it.
+   *
+   * NVDA is the first of these: AI's charted market is AI/NVDA, 59.1% of its
+   * swaps, so NVDA had to be loaded far enough to derive its own USD series.
+   * Loading it put a row in this table, and without this column that row became
+   * a dashboard tab for a token nobody is tracking. A future bridge will do the
+   * same, so the distinction is data rather than a name the page knows about.
+   */
+  role          text        not null default 'tracked',
   created_at    timestamptz not null default now()
 );
+
+/*
+ * A create-table-if-not-exists is a no-op on an existing table and reconciles
+ * nothing, so a column added later needs its own statement.
+ */
+alter table tokens add column if not exists role text not null default 'tracked';
 
 /*
  * EVERY event for a wallet in a token, across the token's whole life.
