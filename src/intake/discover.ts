@@ -453,19 +453,31 @@ export async function scopePools(
 
   const meta = new Map<string, { symbol: string | null; decimals: number | null }>();
   for (const counter of toRead) {
-    // Read symbol BEFORE deciding. Of 48 unidentified counter assets on PONS
-    // all 48 resolved, four were tokenised equities, and none was a stablecoin.
+    /*
+     * A FAILED READ IS FATAL ONLY FOR A COUNTER WE INTEND TO VALUE.
+     *
+     * Step 4: "A counter whose decimals() cannot be read cannot be valued.
+     * Raise." That applies to the pricing and bridge assets, whose decimals are
+     * load-bearing -- treating an unreadable decimals as 18 is the factor-of-
+     * 10^12 error. It does NOT apply to the busiest-counter reads, which exist
+     * only so the rejection report can name what it rejected: those pools are
+     * out of scope whatever their decimals say, so killing the phase over one
+     * of them fails a run for a value nothing consumes.
+     */
+    const mustRead = alwaysRead.has(counter);
     let symbol: string | null = null;
     let decimals: number | null = null;
     try {
       symbol = decodeString(await rpc.ethCall(counter, SELECTORS.symbol));
     } catch (err) {
-      if (!(err instanceof RpcError)) throw err;
+      if (mustRead && !(err instanceof RpcError)) throw err;
+      if (!(err instanceof RpcError) && !mustRead) symbol = null;
     }
     try {
       decimals = await readDecimals((to, data) => rpc.ethCall(to, data), counter);
     } catch (err) {
-      if (!(err instanceof RpcError)) throw err;
+      if (mustRead) throw err;
+      decimals = null;
     }
     meta.set(counter, { symbol, decimals });
   }
