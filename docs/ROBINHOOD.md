@@ -1329,6 +1329,58 @@ came from it.
 
 **Not loaded.** Reconnaissance only; no sweep has run and no rows exist.
 
+**Window, bisected:** AI-P1 is blocks **18,275,461–32,206,441** (13,930,980).
+Deployed at 9,721,433; name "Artificial Inu", 18 decimals, supply
+991,382,832.598. **Derive window bounds by bisection, not from the nearest
+stored `block_times`** — doing the latter landed 12 blocks late at the start and
+217 early at the end, leaving a 229-block hole in a sweep that reported a clean
+gap check because it was checked against its own narrower range.
+
+**Enumeration and scope, measured against estimate:**
+
+```
+phase       actual      estimate    calls
+identity      816 CU       ~800      4 eth_call, 27 eth_getCode (bisect), 1 blockNumber
+windows     1,080 CU     ~1,040      54 eth_getBlockByNumber
+pools         480 CU       ~500      8 eth_getLogs, flow probe NOT RUN
+scope       2,184 CU     ~2,236      84 eth_call
+            --------
+             4,560 CU   ~$0.002 for the whole enumeration and scope
+```
+
+**Pools: 5,040 candidates — 5,023 v4 from `Initialize`, 17 v3 from the factory.**
+(Reconnaissance said 4,856; pools are created continuously, which is why the set
+is re-derived every run.) **337 in scope** — 332 v4 and 5 v3 — and 4,703
+rejected, **4,603 of them without their symbol being read**, which the persisted
+reason states rather than implying the symbol was checked and rejected.
+
+```
+in-scope pools by counter    USDG 180    native ETH 150    WETH 7
+```
+
+**NVDA is `0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec`, 18 decimals, 13 pools** —
+read from the chain, not inferred from a pool name.
+
+**A SECOND token also answers `symbol()` with "NVDA"**:
+`0xa90b49763f970d79d6772270c96ac02bc1b71e18`, one pool. Its address ends `1e18`,
+a vanity suffix shared by a crowd of junk counters here (`BABYAI`, `SHIB`, `INU`,
+`AICAT` all end the same way). **A symbol is a label, not an identity.** Match a
+bridge asset by address; never resolve one by symbol.
+
+**What the second pricing hop is worth, measured:**
+
+```
+                      pools   swaps in window        candidate wallets
+in-scope only           332            49,780  40.9%              694
+NVDA pools               12            71,836  59.1%            2,636
+other out-of-scope        1                 5   0.0%
+union (with the hop)                  121,621                  3,025
+```
+
+**The hop is worth 4.4x the cohort** — 694 wallets without it, 3,025 with it,
+2,331 wallets that bought AI only against NVDA. It also confirms the
+reconnaissance figure of ~56-59% of swaps on the charted pair.
+
 **Transfer density measured** across the AI-P1 window (blocks 18,275,473–
 32,206,224), ten evenly spaced 20,000-block samples, 600 CU, **0 size refusals**:
 
@@ -1359,7 +1411,15 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 
 ## 9. Rules here the code does not implement
 
-**Empty.** Every rule above is implemented.
+- **Router detection reported `probed: 0` on AI, and that is wrong.** The scope
+  phase ran `detectRouters` over AI-P1 and reported 0 probed, 0 identified, 0
+  rejected. Replicating its own `sends` query by hand over the same blocks and
+  the same counterparty list finds **16 senders at or above the 50-recipient
+  bar**, one of them reaching 9,764 recipients. So the phase is reporting a
+  clean pass where the rule finds candidates — the failure mode section 5 warns
+  about. **AI's router set is therefore unknown**, and step 7 is explicit that a
+  router the list misses gets the trade attributed to it instead of to the
+  buyer. Do not build AI's cohort until this is explained.
 
 One limitation is recorded here because it is a property of the chain rather
 than a gap in the code:
