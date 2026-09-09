@@ -44,6 +44,26 @@ async function main(): Promise<void> {
       `select decimals from tokens where mint=$1`, [cfg.token])).rows[0]?.decimals;
     if (typeof decimals !== 'number') throw new Error('token decimals unknown');
 
+    /*
+     * THE TOKEN'S USD TABLE IS PER TOKEN AND IS CREATED BY NOTHING. The schema
+     * hardcodes `pons_usd_prices`, named for the first token loaded, and the
+     * insert templates the configured name -- so a second token writes into a
+     * table that does not exist. The column is still `pons_usd` because
+     * renaming it is a migration, not a config change; step 12 records that.
+     */
+    if (!/^[a-z][a-z0-9_]*$/.test(cfg.tokenUsdTable)) {
+      throw new Error(`refusing to create a table named ${cfg.tokenUsdTable}`);
+    }
+    await c.query(
+      `create table if not exists ${cfg.tokenUsdTable} (
+         chain        text    not null,
+         bucket_block bigint  not null,
+         pons_usd     numeric not null,
+         ticks        integer not null,
+         primary key (chain, bucket_block)
+       )`,
+    );
+
     log.info('deriving', {
       token: cfg.token, ticker: cfg.ticker, blocks: `${from}..${to}`,
       bucket_blocks: cfg.bucketBlocks, bucket_origin: cfg.bucketOrigin,
