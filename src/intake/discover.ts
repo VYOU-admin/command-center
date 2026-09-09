@@ -384,6 +384,8 @@ export async function discoverPools(
 /* -------------------------------------------------------------------- scope */
 
 export interface CounterAsset {
+  /** False when the read bound skipped it; symbol and decimals are then unknown. */
+  symbolRead?: boolean;
   address: string;
   symbol: string | null;
   decimals: number | null;
@@ -531,11 +533,20 @@ export async function scopePools(
     });
   }
 
+  /*
+   * The counter census covers EVERY counter, including the tail the read bound
+   * skipped. Those carry a null symbol and decimals meaning "not read" -- the
+   * `symbolRead` flag on each rejection is what distinguishes that from a
+   * contract that was asked and did not answer.
+   */
   const counters: CounterAsset[] = [...counterPools.entries()].map(([address, pools]) => {
-    const m = meta.get(address)!;
+    const m = meta.get(address) ?? { symbol: null, decimals: null };
     const classification: CounterAsset['classification'] =
       address === usdAsset ? 'usd' : nativeAssets.has(address) ? 'native' : 'no-usd-reference';
-    return { address, symbol: m.symbol, decimals: m.decimals, classification, pools };
+    return {
+      address, symbol: m.symbol, decimals: m.decimals, classification, pools,
+      symbolRead: toRead.has(address),
+    };
   });
 
   const noUsdRoute = !inScope.some((p) => p.counter === usdAsset);
