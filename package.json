@@ -26,6 +26,7 @@
     "load-swaps": "npm run build && node dist/cli/load-swaps.js",
     "derive-prices": "npm run build && node dist/cli/derive-prices.js",
     "fill-timestamps": "npm run build && node dist/cli/fill-timestamps.js",
+    "build-cohort": "npm run build && node dist/cli/build-cohort.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },
