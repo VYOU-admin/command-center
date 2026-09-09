@@ -38,6 +38,14 @@ async function main(): Promise<void> {
   const to = num('--to', 0);
   const ceiling = num('--ceiling', 25000);
   const commit = args.includes('--commit');
+  /*
+   * A BRIDGE NEEDS ONLY ITS PRICEABLE POOLS. The default copies every pool of
+   * the token because router detection asks whether a send sat inside a
+   * transaction containing any swap of it. A bridge asset has no cohort and no
+   * router detection -- only a price series -- and copying every pool of a token
+   * that prices half the chain would pull in millions of rows nothing reads.
+   */
+  const inScopeOnly = args.includes('--in-scope-only');
   if (!from || !to || to <= from) throw new Error('--from and --to are required');
 
   const cfg = await loadIntakeConfig(configPath);
@@ -57,9 +65,11 @@ async function main(): Promise<void> {
      * distributor. The row writer joins pool_meta and ignores the rest.
      */
     const v4Pools = (await c.query<{ pool: string }>(
-      `select pool from pool_meta where chain=$1 and token=$2 and venue='v4'
-       union
-       select pool from pool_rejected where chain=$1 and token=$2 and venue='v4'`,
+      inScopeOnly
+        ? `select pool from pool_meta where chain=$1 and token=$2 and venue='v4'`
+        : `select pool from pool_meta where chain=$1 and token=$2 and venue='v4'
+           union
+           select pool from pool_rejected where chain=$1 and token=$2 and venue='v4'`,
       [cfg.chain, cfg.token],
     )).rows.map((r) => r.pool);
 
@@ -83,6 +93,7 @@ async function main(): Promise<void> {
 
     log.info('DRY RUN counts', {
       commit,
+      pool_selection: inScopeOnly ? 'in-scope only' : 'every pool of the token',
       rows_already_present: Number(already.rows[0]!.n),
       v4_pools_of_this_token: v4Pools.length,
       v4_rows_to_copy: Number(wouldCopy.rows[0]!.n),
