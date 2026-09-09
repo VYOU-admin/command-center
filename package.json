@@ -27,6 +27,7 @@
     "derive-prices": "npm run build && node dist/cli/derive-prices.js",
     "fill-timestamps": "npm run build && node dist/cli/fill-timestamps.js",
     "build-cohort": "npm run build && node dist/cli/build-cohort.js",
+    "decode-tx": "npm run build && node dist/cli/decode-tx.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },
