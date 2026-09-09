@@ -414,6 +414,9 @@ export interface ScopeReport {
  * PONS/STONKBROKER, pricing a memecoin against a tokenised equity through an
  * oracle nobody verified.
  */
+/** Native value's "address" on v4. It is not a contract and never will be. */
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
 export async function scopePools(
   rpc: RpcClient,
   cfg: IntakeConfig,
@@ -464,6 +467,20 @@ export async function scopePools(
      * out of scope whatever their decimals say, so killing the phase over one
      * of them fails a run for a value nothing consumes.
      */
+    /*
+     * NATIVE ETH HAS NO CONTRACT TO READ. The zero address is a real counter on
+     * v4 -- pools quote against native value directly -- and calling symbol()
+     * or decimals() on it returns no data, which `readDecimals` correctly
+     * refuses to call zero. Its decimals are a property of the chain, not of a
+     * contract, and step 4 lists them: native ETH, 18. This is the one counter
+     * whose metadata is declared rather than read, and it is declared because
+     * there is nothing to read it from.
+     */
+    if (counter === ZERO_ADDRESS) {
+      meta.set(counter, { symbol: 'ETH', decimals: 18 });
+      continue;
+    }
+
     const mustRead = alwaysRead.has(counter);
     let symbol: string | null = null;
     let decimals: number | null = null;
