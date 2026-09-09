@@ -29,15 +29,13 @@ id: token-updates
 name: PONS Cohort Updates
 source: token-updates
 
-# PAUSED 2026-09-07. It applies the log-based payment rule, which was measured
-# against 40 decoded transactions and rejected 39 real buyers (36 of them paid
-# in native ETH, which moves with no Transfer log). Every run it makes was
-# therefore writing an incomplete set of buys. Nothing it wrote is wrong, so
-# nothing it wrote is being deleted: re-running from an earlier cursor fills the
-# gaps, because wallet_transactions_event_idx makes the insert idempotent.
-#
-# Re-enable only once rows.ts proves payment from the receipt.
-enabled: false
+# RE-ENABLED 2026-09-09, after the payment rule was replaced. It was paused
+# because it applied the log-based rule, which rejected 39 of 40 real buyers;
+# the 191 rows that cost were recovered by re-running from an earlier cursor.
+# Rows are no longer payment-proven at all -- proof happens once per wallet at
+# cohort time -- so this job makes no payment call and is back to its measured
+# 430-714 CU per run.
+enabled: true
 
 schedule: 1h
 
