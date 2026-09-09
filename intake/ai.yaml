@@ -1,0 +1,88 @@
+# AI — configuration for the transfer sweep only.
+#
+# NOT A COMPLETE INTAKE CONFIG. The pool, scope and pricing sections are absent
+# because nothing here has read them from the chain yet, and ROBINHOOD.md is
+# explicit that a value asserted rather than read is how a figure ends up wrong
+# by a factor of 10^12. They get filled in when the pool and scope phases run
+# and report, not before.
+#
+# A transfer sweep needs none of them: the filter is this token's own Transfer
+# topic.
+
+chain: robinhood
+ticker: AI
+# Checksummed exactly as the chain returns it.
+token: "0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18"
+charted_pair: "0xcbdfea90"        # AI/NVDA, v4 — recorded, never used as a filter
+
+# 2026-07-24 12:00 -> 2026-08-09 16:00 Eastern, offset-qualified because a bare
+# local time is a different moment depending on who reads it.
+windows:
+  - label: AI-P1
+    start: "2026-07-24T12:00:00-04:00"
+    end:   "2026-08-09T16:00:00-04:00"
+
+rpc:
+  url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+  key_var: ALCHEMY_API_KEY
+  request_timeout_ms: 120000
+  max_log_span_blocks: 100000
+  sparse_log_span_blocks: 40000000
+  min_log_span_blocks: 25
+  # MEASURED for this token: 0.0308 logs/block mean across ten samples spanning
+  # the window, min 0.0066, max 0.0679, spread 10.3x, zero refusals. At this
+  # target the natural span is ~195,000 blocks, so max_log_span_blocks above --
+  # not density -- is what bounds the sweep.
+  target_logs_per_request: 6000
+
+routers:
+  min_recipients: 50
+  min_swap_share: 0.5
+
+venues:
+  v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+  v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+pricing:
+  assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+    - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+    - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+  usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+  native_assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+    - "0x0000000000000000000000000000000000000000"
+  bucket_blocks: 10000
+  # PLACEHOLDER. Buckets anchor at the token's FIRST SWAP BLOCK, which has not
+  # been read yet. Nothing may be priced until this is measured -- anchoring at
+  # the wrong offset matches no stored bucket and writes a second interleaved
+  # series.
+  bucket_origin: 0
+  tick_fence_multiple: 100
+  native_fence_multiple: 10
+
+floors:
+  token_raw_units: 1
+  paid_raw_units: 1
+  token_amount: 0.001
+  usd: 0.01
+
+tables:
+  token_usd: ai_usd_prices
+  native_usd: native_usd_prices
+
+# Only the transfer sweep is approved. Every other phase is zero so that running
+# the full intake against this file stops rather than spends.
+ceilings:
+  identity: 0
+  windows: 0
+  pools: 0
+  scope: 0
+  sweep: 25000
+  conventions: 0
+  cohort: 0
+  tags: 0
+  timestamps: 0
+  prices: 0
+  dryrun: 0
+  write: 0

@@ -22,6 +22,7 @@
     "payment-test": "npm run build && node dist/cli/payment-test.js",
     "dropped-buys": "npm run build && node dist/cli/dropped-buys.js",
     "sweep-probe": "npm run build && node dist/cli/sweep-probe.js",
+    "sweep-transfers": "npm run build && node dist/cli/sweep-transfers.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },
