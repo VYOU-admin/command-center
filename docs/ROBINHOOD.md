@@ -414,6 +414,20 @@ across the token's whole life.
 **Produces:** `token_swap_logs`, `token_transfer_logs`, `block_times`.
 **Stops:** no.
 
+**`token_swap_logs` is not created by any code in this repository.** Every
+reader assumes it exists because the first intake made it by hand. Its shape:
+`(chain, token, venue, pool, block_number, log_index, tx_hash, sender,
+recipient, amount0, amount1)`, unique on `(chain, token, block_number,
+log_index)`. A fresh database would fail at the first read.
+
+**v4 swaps can be copied from `v4_swaps_all` instead of swept — pure SQL, no
+RPC, no cost** — for the blocks it covers (15,115,267–42,695,454). It holds
+every v4 swap on the chain, so a token whose window sits inside that range needs
+no v4 sweep at all. **Copy every pool of the token, in scope or not**: router
+detection asks whether a send sat inside a transaction containing a swap of this
+token, and restricting to in-scope pools makes a router that routed through an
+out-of-scope pool look like a distributor.
+
 **Sweep full chain life, not the window.** The PONS cohort window held **772,131
 of 2,459,873 swaps — 31%**. The other 1.46M happened after it closed, and they
 are exactly the sell-side data that cost basis and realised PnL depend on.
@@ -771,6 +785,16 @@ its resolved blocks under `windows:resolved`; a resumed run reads them back and
 raises if any window still has no blocks; and **`detectRouters` refuses a range
 that contains nothing rather than reporting no routers**. An empty range is a
 defect, not an answer.
+
+**The behaviour-detected routers were never persisted for PONS, so its cohort
+never used them.** `effectiveExclusions` reads `token_intake_state` for
+`router:%` rows; PONS has **zero** of them, so the 13,095-wallet cohort was
+built against the **3 router addresses in `config/infrastructure.yaml`** and
+nothing else. The "30 routers where the list holds 3" recorded above came from
+an analysis that ran once and was never stored, so the pipeline never applied
+it. Over PONS-P1, **62 senders clear the 50-recipient bar**. This is a live
+discrepancy between what this section requires and what the stored cohort used;
+PONS is frozen and it has not been acted on.
 
 **The swap-share discriminator needs swaps to discriminate with.** Part 3 of the
 router rule divides by the transactions containing a `Swap`. With the swap table
