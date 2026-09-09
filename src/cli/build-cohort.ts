@@ -86,9 +86,15 @@ async function main(): Promise<void> {
      * check missed them because it reimplemented "who traded" instead of
      * sharing the rule. Legs are counted in BOTH directions here.
      */
+    /*
+     * NOT "on commit drop": this client autocommits, so the table would be
+     * created and dropped by the same statement. It dies with the session
+     * instead. The router path can use that clause only because its phase runs
+     * inside a transaction.
+     */
     await c.query(`create temp table if not exists _tok (
       venue text, tx_hash text, block_number bigint, tok_amt numeric, counterparty text
-    ) on commit drop`);
+    )`);
     await c.query('truncate _tok');
     await c.query(
       `insert into _tok
@@ -106,7 +112,7 @@ async function main(): Promise<void> {
 
     await c.query(`create temp table if not exists _legs (
       tx_hash text primary key, out_legs int, touching int
-    ) on commit drop`);
+    )`);
     await c.query('truncate _legs');
     await c.query(
       `insert into _legs
