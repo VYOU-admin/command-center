@@ -118,6 +118,23 @@ passed per command, which stopped working once the hourly job had to run inside
 the container. Do not conclude the key was wiped because a probe reports it
 missing — check `railway variables` first.
 
+**Pushed is not deployed, and a green deployment list is not proof either.**
+Confirm the running container actually carries the commit before running
+anything against it — `grep` the built file in `/app/dist` for a string that
+only this commit introduces. Two ways this went wrong in one session: a build
+sat in `BUILDING` for **41 minutes** with an empty log while the container
+served the previous build, so a fix silently never shipped; and a check that
+read the top row of `railway deployment list` passed against the *previous*
+deployment because the new one did not exist yet — the redeploy then landed
+mid-run and destroyed both the running process and its output file. An empty
+commit re-triggers a hung build, which succeeded in 90 seconds.
+
+**A long job must be launched detached, and even that does not survive a
+redeploy.** `setsid nohup … > file 2>&1 < /dev/null &` survives the SSH session
+ending; nothing survives the container being replaced. Also: `pgrep -f <name>`
+run inside `sh -c` matches its own command line and reports RUNNING forever —
+poll for a marker in the output file instead.
+
 **Do not change a Railway variable while a collection is running.** Setting one
 triggers a redeploy, the redeploy replaces the container filesystem, and every
 working file under `/app` is destroyed along with the process. Only what is
@@ -1037,6 +1054,29 @@ that writes the rows.** A run that dies leaves it where it was and the next run
 re-reads that range; re-reading is safe because the row key is unique, and
 skipping is impossible because the cursor never passes uncommitted data.
 
+**What the rejected rule actually cost, measured.** Over the 1,757,870 blocks
+the job covered in 47 cycles (54,935,280–56,693,149), replaying the same code
+path with the payment test removed:
+
+```
+buy rows the correct rule produces   1,410
+buy rows actually written            1,069
+DROPPED                                191   13.5%, across 82 distinct wallets
+sell rows produced / written    1,662 / 1,511
+SELLS DROPPED                            0   <- the control
+```
+
+**Sells are never payment-tested, so a non-zero sell figure means the comparison
+is wrong rather than the job.** It caught two errors before the buy number was
+believed: counting every tag on the token instead of the job's `cohort_tags`,
+and comparing raw `tradeLegs` output against written rows so that `buildRows`'
+floors read as losses. Any future version of this comparison keeps that control.
+
+**The 191 are recoverable and nothing needs deleting.** `wallet_transactions`
+has a unique key over the event and the insert is `on conflict do nothing`, so
+re-running from an earlier cursor inserts only what is missing. Cost is one
+re-read of the range, ~14,640 CU / **$0.007**, plus nothing for payment.
+
 **The hourly job and the intake share ONE buy rule, and a change to one is a
 change to both.** The hourly job is not a simplified version of the intake — it
 runs the same `tradeLegs`, so whatever decides who bought during a load also
@@ -1128,6 +1168,30 @@ investigation. A crash would have been strictly better.
 
 ---
 
+### Leftover tables from the first intake
+
+Fifteen tables survive from the scratchpad scripts that loaded PONS, holding
+**2,268 MB of a 21 GB database**. Nothing in the repository reads any of them —
+checked for `from`/`join`/`into`/`update`/`delete` against each name, not for
+the bare word. They are kept, not dropped: `cohort0` and `coh3` are the PONS
+cohort at two stages, and `need_blocks` at 1,379,236 rows is the timestamp
+overshoot step 9 records.
+
+```
+legs 845 MB / 215,177    swagg 735 MB / 2,250,043    p2pv 257 MB / 983,871
+p2p 212 MB / 983,871     need_blocks 77 MB           walleg 70 MB / 185,060
+wt_stage 54 MB           need2 8,336 kB              hops 5,056 kB
+coh3 1,920 kB            cohort0 1,920 kB            hop_contracts 688 kB
+h1set 288 kB             need3 272 kB                excl 32 kB
+```
+
+**`records` is NOT one of them — it is live**, written by `src/store/records.ts`
+and read by `registry.ts` for monitor counts. It was listed as debris once on
+the strength of a bare-word grep; matching a table name needs the SQL keyword
+in front of it.
+
+---
+
 ## 7. Rules that govern the code rather than the chain
 
 These are not about Robinhood Chain, but the code that loads it obeys them.
@@ -1198,6 +1262,19 @@ came from it.
 ### AI — `0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18`
 
 **Not loaded.** Reconnaissance only; no sweep has run and no rows exist.
+
+**Transfer density measured** across the AI-P1 window (blocks 18,275,473–
+32,206,224), ten evenly spaced 20,000-block samples, 600 CU, **0 size refusals**:
+
+```
+mean 0.0308 logs/block   min 0.0066   median 0.0216   max 0.0679   spread 10.3x
+```
+
+**AI is 15x sparser than PONS** (0.4669). At the 6,000-log target the natural
+span is ~195,000 blocks, so `max_log_span_blocks` at 100,000 — not density — is
+what will bound the sweep. The whole 13,930,752-block transfer sweep is
+therefore **~140 requests, ~8,400 CU, $0.004**, and the densest sampled region
+would still take ~88,000-block spans. There is no dense region to plan around.
 
 Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA, v4.
 
