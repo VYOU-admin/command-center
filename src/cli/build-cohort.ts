@@ -72,67 +72,72 @@ async function main(): Promise<void> {
      * sound one; the alternative is a large unsound one. Transactions with more
      * are counted and reported, never silently dropped.
      */
+    /*
+     * MATERIALISE, THEN JOIN -- the same lesson as router detection, which ran
+     * 19 minutes as one statement and 5 seconds once its inputs were indexed
+     * temp tables. Expressed as CTEs this ran 17 minutes and was cancelled.
+     *
+     * A ROUND TRIP IS NOT A TRADE, AND IT IS NOT A CONVENTION DIFFERENCE.
+     * Counting only transfers OUT of the counterparty made an arbitrage hop
+     * look unambiguous: the PoolManager sends the token to a bot and the
+     * identical amount comes straight back in the same transaction, so there is
+     * one outbound leg and the pairing looks clean while the swap being paired
+     * is the other side of the round trip. tradeLegs already drops these; this
+     * check missed them because it reimplemented "who traded" instead of
+     * sharing the rule. Legs are counted in BOTH directions here.
+     */
+    await c.query(`create temp table if not exists _tok (
+      venue text, tx_hash text, block_number bigint, tok_amt numeric, counterparty text
+    ) on commit drop`);
+    await c.query('truncate _tok');
+    await c.query(
+      `insert into _tok
+       select s.venue, s.tx_hash, s.block_number,
+              case when m.pons_side = 0 then s.amount0 else s.amount1 end,
+              case when s.venue = 'v3' then m.pool else $3 end
+         from token_swap_logs s
+         join pool_meta m on m.chain=s.chain and m.token=s.token
+                         and m.venue=s.venue and m.pool=s.pool
+        where s.chain=$1 and s.token=$2`,
+      [cfg.chain, cfg.token, cfg.v4PoolManager.toLowerCase()],
+    );
+    await c.query('create index if not exists _tok_tx on _tok (tx_hash)');
+    await c.query('analyze _tok');
+
+    await c.query(`create temp table if not exists _legs (
+      tx_hash text primary key, out_legs int, touching int
+    ) on commit drop`);
+    await c.query('truncate _legs');
+    await c.query(
+      `insert into _legs
+       select t.tx_hash,
+              count(*) filter (where m.from_addr = t.cp and m.to_addr <> t.cp),
+              count(*) filter (where m.from_addr = t.cp or m.to_addr = t.cp)
+         from (select distinct tx_hash, counterparty cp from _tok) t
+         join token_transfer_logs m on m.chain=$1 and m.token=$2 and m.tx_hash=t.tx_hash
+        group by t.tx_hash`,
+      [cfg.chain, cfg.token],
+    );
+    await c.query('analyze _legs');
+
     const conv = await c.query<{
       venue: string; region: string; agree: string; disagree: string; ambiguous: string;
     }>(
-      `with tok as (
-         select s.venue, s.tx_hash, s.block_number,
-                -- pons_side, not token_side: named for the first token loaded,
-                -- like pons_usd in the price tables.
-                case when m.pons_side = 0 then s.amount0 else s.amount1 end as tok_amt,
-                case when s.venue = 'v3' then m.pool else $3 end as counterparty
-           from token_swap_logs s
-           join pool_meta m on m.chain=s.chain and m.token=s.token
-                           and m.venue=s.venue and m.pool=s.pool
-          where s.chain=$1 and s.token=$2),
-       swaps_per_tx as (select tx_hash, count(*) n from tok group by 1),
-       moved as (
-         select t.tx_hash, t.from_addr, t.to_addr
-           from token_transfer_logs t where t.chain=$1 and t.token=$2),
-       /*
-        * A ROUND TRIP IS NOT A TRADE, AND IT IS NOT A CONVENTION DIFFERENCE.
-        *
-        * Counting only transfers OUT of the counterparty made an arbitrage hop
-        * look unambiguous: the PoolManager sends the token to a bot and the bot
-        * sends the identical amount straight back in the same transaction, so
-        * there is one outbound leg and the pairing looks clean while the swap
-        * being paired is the other side of the round trip. Every sampled v4
-        * residual was this, and so was the v3 one.
-        *
-        * tradeLegs already drops these -- a wallet that both receives from and
-        * sends to the counterparty inside ONE transaction is a fee recipient or
-        * an arbitrage hop. This check did not, because it reimplemented "who
-        * traded" instead of sharing that rule. Counting legs in BOTH directions
-        * restores it.
-        */
-       legs as (
-         select tx_hash, count(*) filter (where from_addr = cp or to_addr = cp) as touching
-           from (select m.tx_hash, m.from_addr, m.to_addr, t.counterparty as cp
-                   from moved m join (select distinct tx_hash, counterparty from tok) t
-                     on t.tx_hash = m.tx_hash) z
-          group by tx_hash),
-       paired as (
-         select tok.venue, tok.block_number, tok.tok_amt,
-                spt.n as swaps_in_tx,
-                legs.touching as transfers_matched
-           from tok
-           join swaps_per_tx spt on spt.tx_hash = tok.tx_hash
-           join legs on legs.tx_hash = tok.tx_hash
-           join moved on moved.tx_hash = tok.tx_hash
-                     and moved.from_addr = tok.counterparty
-                     and moved.to_addr <> tok.counterparty)
-       select venue,
-              case when block_number between $4 and $5 then 'in-window'
-                   when block_number < $4 then 'before' else 'after' end as region,
-              count(*) filter (where swaps_in_tx = 1 and transfers_matched = 1 and (
-                (venue='v3' and tok_amt < 0) or (venue='v4' and tok_amt > 0)))::text as agree,
-              count(*) filter (where swaps_in_tx = 1 and transfers_matched = 1 and (
-                (venue='v3' and tok_amt > 0) or (venue='v4' and tok_amt < 0)))::text as disagree,
-              count(*) filter (where swaps_in_tx > 1 or transfers_matched > 1)::text as ambiguous
-         from paired
-        group by 1, 2 order by 1, 2`,
-      [cfg.chain, cfg.token, cfg.v4PoolManager.toLowerCase(),
-        windows[0]!.startBlock, windows[0]!.endBlock],
+      `with spt as (select tx_hash, count(*) n from _tok group by 1)
+       select k.venue,
+              case when k.block_number between $1 and $2 then 'in-window'
+                   when k.block_number < $1 then 'before' else 'after' end as region,
+              count(*) filter (where spt.n = 1 and l.touching = 1 and l.out_legs = 1 and (
+                (k.venue='v3' and k.tok_amt < 0) or (k.venue='v4' and k.tok_amt > 0)))::text as agree,
+              count(*) filter (where spt.n = 1 and l.touching = 1 and l.out_legs = 1 and (
+                (k.venue='v3' and k.tok_amt > 0) or (k.venue='v4' and k.tok_amt < 0)))::text as disagree,
+              count(*) filter (where spt.n > 1 or l.touching > 1)::text as ambiguous
+         from _tok k
+         join spt on spt.tx_hash = k.tx_hash
+         join _legs l on l.tx_hash = k.tx_hash
+        where l.out_legs >= 1
+        group by 1,2 order by 1,2`,
+      [windows[0]!.startBlock, windows[0]!.endBlock],
     );
     log.info('sign conventions, measured on STORED data', {
       expectation: 'v3 = POOL perspective (pool sent the token => negative); '
