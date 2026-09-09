@@ -27,6 +27,14 @@ async function main(): Promise<void> {
   if (!configPath) throw new Error('usage: write-rows <config.yaml> [--commit]');
   const commit = args.includes('--commit');
   const reinsert = args.includes('--reinsert');
+  /*
+   * Step 8 comes before step 11: the row plan filters on the cohort as stored in
+   * wallet_tags, so with no tags written every wallet counts as outside the
+   * cohort and the dry run reports zero rows -- which reads like "there is
+   * nothing to write" rather than "the cohort is not tagged yet". Tags first,
+   * then review the plan, then write.
+   */
+  const tagsOnly = args.includes('--tags-only');
   const wi = args.indexOf('--window');
   const only = wi >= 0 ? args[wi + 1] : undefined;
 
@@ -59,12 +67,20 @@ async function main(): Promise<void> {
       const cohort = (cres.rows[0]?.detail ?? []) as string[];
       if (!cohort.length) throw new Error(`no reviewed cohort stored for ${w.label}`);
       log.info('cohort loaded from review', { window: w.label, wallets: cohort.length });
-      if (commit) {
+      if (commit || tagsOnly) {
         const t = await writeTags(c, cfg, w, cohort, true);
         log.info('tags written', { window: w.label, ...t });
       } else {
         log.info('tags NOT written (dry run)', { window: w.label, would_tag: cohort.length });
       }
+    }
+
+    if (tagsOnly) {
+      const n = await c.query<{ n: string }>(
+        `select count(*)::text n from wallet_tags where mint=$1`, [cfg.token]);
+      log.info('tags only; rows not touched', { tags_now: Number(n.rows[0]!.n) });
+      await app.pool.end();
+      process.exit(0);
     }
 
     /* ---- steps 11 and 12: the rows ----------------------------------------- */
