@@ -100,14 +100,17 @@ async function main(): Promise<void> {
     }
     const densities = points.map((p) => (p as { logs_per_block: number }).logs_per_block);
     const sorted = [...densities].sort((a, b) => a - b);
+    const lo = sorted[0] ?? 0;
+    const hi = sorted[sorted.length - 1] ?? 0;
     log.info('every sample', { points });
     log.info('density summary', {
       token, samples: points.length, size_refusals: refusals,
       total_logs: probeLogs, total_blocks: probeBlocks,
       mean_logs_per_block: Number((probeLogs / probeBlocks).toFixed(4)),
-      min: sorted[0], median: sorted[Math.floor(sorted.length / 2)],
-      max: sorted[sorted.length - 1],
-      spread: sorted[0] ? `${(sorted[sorted.length - 1] / sorted[0]).toFixed(1)}x` : 'MIN IS ZERO',
+      min: lo, median: sorted[Math.floor(sorted.length / 2)], max: hi,
+      // A zero minimum is a real answer -- a region with no transfers at all --
+      // and must be said rather than divided by.
+      spread: lo > 0 ? `${(hi / lo).toFixed(1)}x` : 'MINIMUM IS ZERO: a sampled region held no logs',
       cu_spent: rpc.cuSpent,
     });
     await app.pool.end();
