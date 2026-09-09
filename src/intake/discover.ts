@@ -507,7 +507,17 @@ export async function scopePools(
     const isToken0 = c.currency0 === token;
     const counter = isToken0 ? c.currency1 : c.currency0;
     const m = meta.get(counter) ?? { symbol: null, decimals: null };
-    if (!pricing.has(counter)) {
+    /*
+     * IN SCOPE MEANS A PRICING ASSET **OR A BRIDGE ASSET**. Step 4 has always
+     * said so; the code tested only the pricing set, so every bridge-quoted pool
+     * was rejected and produced no rows at all -- not null-priced rows, none.
+     *
+     * On AI that silently discarded 59.1% of its swaps: its charted market is
+     * AI/NVDA, NVDA was declared as a bridge and its USD series derived and
+     * stored, and the pools that series exists to price had already been
+     * rejected. A bridge asset with no pool in scope is a series nothing reads.
+     */
+    if (!pricing.has(counter) && !bridge.has(counter)) {
       rejected.push({
         venue: c.venue, pool: c.pool, counter,
         // Null symbol here means NOT READ, not "unnamed". The report says which.
@@ -516,7 +526,8 @@ export async function scopePools(
       continue;
     }
     if (m.decimals === null) {
-      // A counter whose decimals cannot be read cannot be valued. Treating an
+      // A counter whose decimals cannot be read cannot be valued -- and a bridge
+      // is valued like any other counter, one level deeper. Treating an
       // unreadable decimals as 18 is a factor-of-10^12 error waiting to happen.
       throw new Error(
         `counter asset ${counter} (${m.symbol ?? 'unknown symbol'}) did not answer ` +
