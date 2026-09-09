@@ -89,12 +89,35 @@ async function main(): Promise<void> {
        moved as (
          select t.tx_hash, t.from_addr, t.to_addr
            from token_transfer_logs t where t.chain=$1 and t.token=$2),
+       /*
+        * A ROUND TRIP IS NOT A TRADE, AND IT IS NOT A CONVENTION DIFFERENCE.
+        *
+        * Counting only transfers OUT of the counterparty made an arbitrage hop
+        * look unambiguous: the PoolManager sends the token to a bot and the bot
+        * sends the identical amount straight back in the same transaction, so
+        * there is one outbound leg and the pairing looks clean while the swap
+        * being paired is the other side of the round trip. Every sampled v4
+        * residual was this, and so was the v3 one.
+        *
+        * tradeLegs already drops these -- a wallet that both receives from and
+        * sends to the counterparty inside ONE transaction is a fee recipient or
+        * an arbitrage hop. This check did not, because it reimplemented "who
+        * traded" instead of sharing that rule. Counting legs in BOTH directions
+        * restores it.
+        */
+       legs as (
+         select tx_hash, count(*) filter (where from_addr = cp or to_addr = cp) as touching
+           from (select m.tx_hash, m.from_addr, m.to_addr, t.counterparty as cp
+                   from moved m join (select distinct tx_hash, counterparty from tok) t
+                     on t.tx_hash = m.tx_hash) z
+          group by tx_hash),
        paired as (
          select tok.venue, tok.block_number, tok.tok_amt,
                 spt.n as swaps_in_tx,
-                count(*) over (partition by tok.tx_hash) as transfers_matched
+                legs.touching as transfers_matched
            from tok
            join swaps_per_tx spt on spt.tx_hash = tok.tx_hash
+           join legs on legs.tx_hash = tok.tx_hash
            join moved on moved.tx_hash = tok.tx_hash
                      and moved.from_addr = tok.counterparty
                      and moved.to_addr <> tok.counterparty)
