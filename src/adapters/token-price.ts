@@ -140,7 +140,16 @@ const adapter: SourceAdapter<PriceRow> = {
     const cfg = parseConfig(ctx.options, ctx.monitorId);
 
     const tokens = await ctx.db.query<{ mint: string; ticker: string; chain: string }>(
-      `select mint, ticker, chain from tokens order by chain, ticker`,
+      /*
+       * TRACKED TOKENS ONLY. A pricing source -- a bridge asset loaded solely so
+       * another token can be priced through it -- has no pool with a recognised
+       * quote at the liquidity floor, so pricing it fails every minute and
+       * alerts on it. NVDA did exactly that: `tokens.role` was added for the
+       * dashboard and this reader was not changed with it, so the role existed
+       * in one place and was honoured in one place.
+       */
+      `select mint, ticker, chain from tokens
+        where role = 'tracked' order by chain, ticker`,
     );
     if (tokens.rowCount === 0) {
       // Not a failure: there is genuinely nothing to price yet.

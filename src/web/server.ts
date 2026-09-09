@@ -12,7 +12,7 @@ import type { DiscordSink } from '../sinks/discord.js';
 import type { Pool } from '../store/db.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard } from './views.js';
-import { renderTokensPage, type ChainGroup, type TokenGroup, type TokenPrice,
+import { renderTokensPage, type ChainGroup, type TokenGroup, type TokenIngest, type TokenPrice,
   type WalletRow, type WindowRow } from './tokens-page.js';
 
 export interface WebServerOptions {
@@ -271,7 +271,7 @@ export function createWebServer(opts: WebServerOptions): Server {
       // purchase for the tokens tracked so far, which is small enough to hand
       // Aggregates, not rows: the table shows per-wallet totals, and a wallet's
       // individual transactions are fetched on demand when its row expands.
-      const [toks, aggs, legend, tags, wins, prices, scores] = await Promise.all([
+      const [toks, aggs, legend, tags, wins, prices, ingest, scores] = await Promise.all([
         /*
          * TRACKED TOKENS ONLY. A token loaded purely to price another -- a
          * bridge asset such as NVDA -- has a row here but no window, no cohort
@@ -341,6 +341,17 @@ export function createWebServer(opts: WebServerOptions): Server {
          */
         pool.query(`select distinct on (mint) mint, price_usd, pool, source, observed_at
                       from token_prices order by mint, observed_at desc`),
+        /*
+         * WHEN THE TRANSACTION DATA LAST MOVED, per token, and whether the job
+         * that moves it is even running. A price timestamp says the price is
+         * fresh; it says nothing about the rows, and the two go stale
+         * independently. The hourly job sat paused for hours while the page
+         * showed a price from seconds ago.
+         */
+        pool.query(`select c.token as mint, c.cursor_block, c.head_block,
+                           c.last_run_at, c.last_status, m.enabled
+                      from token_ingest_cursor c
+                      left join monitors m on m.source = 'token-updates'`),
         /*
          * SCORE AND WEIGHT ONLY. The per-metric breakdown is deliberately NOT
          * sent here: sixteen numbers per wallet across 13,095 wallets is several
@@ -421,6 +432,17 @@ export function createWebServer(opts: WebServerOptions): Server {
         winsByMint.set(m, list);
       }
 
+      const ingestByMint = new Map<string, TokenIngest>();
+      for (const r of (ingest.rows as Record<string, unknown>[])) {
+        ingestByMint.set(String(r.mint), {
+          cursorBlock: r.cursor_block === null ? null : Number(r.cursor_block),
+          headBlock: r.head_block === null ? null : Number(r.head_block),
+          lastRunAt: r.last_run_at ? (r.last_run_at as Date).toISOString() : null,
+          lastStatus: r.last_status === null ? null : String(r.last_status),
+          enabled: r.enabled === null ? null : Boolean(r.enabled),
+        });
+      }
+
       const priceByMint = new Map<string, TokenPrice>();
       for (const r of prices.rows as Record<string, unknown>[]) {
         priceByMint.set(String(r.mint), {
@@ -441,6 +463,7 @@ export function createWebServer(opts: WebServerOptions): Server {
           decimals: Number(r.decimals),
           chartedPair: r.charted_pair === null ? null : String(r.charted_pair),
           price: priceByMint.get(mint) ?? null,
+          ingest: ingestByMint.get(mint) ?? null,
           windows: winsByMint.get(mint) ?? [],
           legend: legendByMint.get(mint) ?? [],
           wallets: [...(byToken.get(mint)?.values() ?? [])],

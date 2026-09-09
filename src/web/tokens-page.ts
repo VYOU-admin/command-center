@@ -110,11 +110,26 @@ export interface TokenGroup {
   chartedPair: string | null;
   /** Null when the token has never been priced; the page must render that. */
   price: TokenPrice | null;
+  /**
+   * Freshness of the ROWS, which is independent of the price. Null when the
+   * token has no ingest cursor at all -- meaning nothing advances it, which the
+   * page states rather than leaving blank.
+   */
+  ingest: TokenIngest | null;
   /** The windows as commissioned, ordered by start. Never derived from purchases. */
   windows: WindowRow[];
   /** Per-window wallet and transaction counts, computed in SQL for the legend. */
   legend: { tag: string; wallets: number; buys: number }[];
   wallets: WalletRow[];
+}
+
+export interface TokenIngest {
+  cursorBlock: number | null;
+  headBlock: number | null;
+  lastRunAt: string | null;
+  lastStatus: string | null;
+  /** Null when no monitor is registered for this source at all. */
+  enabled: boolean | null;
 }
 
 export interface ChainGroup { chain: string; tokens: TokenGroup[] }
@@ -415,6 +430,7 @@ function renderHeader(){
             ? '<a href="' + ds + '" target="_blank" rel="noopener noreferrer">DexScreener</a>'
             : '<span class="unk">no chart link for chain ' + chain + '</span>') + '</dd>'
         + '<dt>price</dt><dd>' + priceCell(t) + '</dd>'
+        + '<dt>rows</dt><dd>' + ingestCell(t) + '</dd>'
       + '</dl>'
     + '</div>'
     + '<div class="hcol">'
@@ -437,6 +453,38 @@ function renderHeader(){
  * with the pool it came from (price is per pool; this token's pools spanned
  * 0.2351 to 0.2494 at one instant).
  */
+// FRESHNESS OF THE ROWS, not of the price. The two go stale independently: the
+// hourly job can be paused for hours while the price monitor keeps ticking every
+// minute, and the page showed a price from seconds ago beside rows that had not
+// moved since. A paused job is stated, never left to be inferred from a date.
+function ingestCell(t){
+  const g = t.ingest;
+  if (!g) return '<span class="unk">no ingest cursor -- this token is not being advanced</span>';
+  const bits = [];
+  if (g.enabled === false) bits.push('<b class="unk">JOB PAUSED</b>');
+  else if (g.enabled === null) bits.push('<span class="unk">job not registered</span>');
+  if (g.lastRunAt){
+    const age = Math.round((Date.now() - Date.parse(g.lastRunAt)) / 1000);
+    const txt = age < 90 ? age + 's ago'
+      : age < 5400 ? Math.round(age / 60) + 'm ago'
+      : Math.round(age / 3600) + 'h ago';
+    // One hour is the schedule, so anything past two is behind.
+    const stale = age > 7200 || g.enabled === false ? ' class="unk"' : '';
+    bits.push('advanced <span' + stale + '>' + txt + '</span> (' + fmtTime(g.lastRunAt) + ')');
+  } else {
+    bits.push('<span class="unk">never advanced</span>');
+  }
+  if (g.lastStatus && g.lastStatus !== 'success'){
+    bits.push('<b class="unk">last run ' + g.lastStatus + '</b>');
+  }
+  if (g.cursorBlock !== null && g.headBlock !== null){
+    const behind = g.headBlock - g.cursorBlock;
+    bits.push('block ' + fmtNum(g.cursorBlock, 0)
+      + (behind > 0 ? ' · <span class="unk">' + fmtNum(behind, 0) + ' behind head</span>' : ' · at head'));
+  }
+  return '<span class="part">' + bits.join(' · ') + '</span>';
+}
+
 function priceCell(t){
   if (!t.price) return '<span class="unk">no price recorded</span>';
   const age = Math.round((Date.now() - Date.parse(t.price.observedAt)) / 1000);
