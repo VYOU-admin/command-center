@@ -75,6 +75,15 @@ export async function adaptiveSweep(
    * both is how pool enumeration ended up making 230x the calls it needed.
    */
   startSpan: number = cfg.maxLogSpanBlocks,
+  /**
+   * Per-request diagnostics. Off by default; a sweep that logs every request
+   * across 46 million blocks is unreadable. Used to measure span behaviour
+   * rather than reason about it.
+   */
+  onRequest?: (info: {
+    request: number; from: number; to: number; span: number; logs: number;
+    logsPerBlock: number; nextSpan: number; cap: number; refusal: string | null;
+  }) => void,
 ): Promise<SweepStats> {
   const stats: SweepStats = {
     requests: 0,
@@ -108,7 +117,13 @@ export async function adaptiveSweep(
               'would be a livelock, so the sweep stops.',
           );
         }
-        span = Math.max(cfg.minLogSpanBlocks, Math.floor(span / 2));
+        const narrowed = Math.max(cfg.minLogSpanBlocks, Math.floor(span / 2));
+        onRequest?.({
+          request: stats.requests, from: cursor, to: end, span: end - cursor + 1,
+          logs: 0, logsPerBlock: 0, nextSpan: narrowed, cap: narrowed,
+          refusal: 'size',
+        });
+        span = narrowed;
         cap = span; // the cap drops with the span, then recovers on success
         continue;
       }
@@ -121,6 +136,11 @@ export async function adaptiveSweep(
          * look identical and need opposite responses.
          */
         const kind = await rpc.diagnoseRefusal();
+        onRequest?.({
+          request: stats.requests, from: cursor, to: end, span: end - cursor + 1,
+          logs: 0, logsPerBlock: 0, nextSpan: span, cap,
+          refusal: kind === 'cap' ? 'account-cap' : 'rate',
+        });
         if (kind === 'cap') throw new CapReached(rpc.cuSpent);
         await new Promise((r) => setTimeout(r, 5_000));
         continue;
@@ -135,18 +155,27 @@ export async function adaptiveSweep(
     stats.blocksCovered += end - cursor + 1;
 
     await onBatch(logs, cursor, end);
-    cursor = end + 1;
 
     /*
      * Aim the next span at the target log count, then let the cap recover a
      * little. Recovery is what lets the sweep re-widen through a sparse region
      * after a dense one forced it small.
+     *
+     * DENSITY IS MEASURED OVER THE RANGE JUST READ, so it must be computed
+     * BEFORE the cursor advances past it.
      */
-    const density = logs.length / (end - cursor + 2);
+    const blocksRead = end - cursor + 1;
+    const density = logs.length / blocksRead;
     const wanted =
       density > 0 ? Math.floor(cfg.targetLogsPerRequest / density) : ceiling;
     cap = Math.min(ceiling, Math.max(cap, Math.floor(cap * 1.25) + 1));
-    span = Math.max(cfg.minLogSpanBlocks, Math.min(wanted, cap));
+    const nextSpan = Math.max(cfg.minLogSpanBlocks, Math.min(wanted, cap));
+    onRequest?.({
+      request: stats.requests, from: cursor, to: end, span: blocksRead,
+      logs: logs.length, logsPerBlock: density, nextSpan, cap, refusal: null,
+    });
+    cursor = end + 1;
+    span = nextSpan;
   }
 
   if (stats.smallestSpan === Number.MAX_SAFE_INTEGER) stats.smallestSpan = 0;
