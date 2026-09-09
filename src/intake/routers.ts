@@ -63,6 +63,19 @@ export async function detectRouters(
   toBlock: number,
   probeBlock: number,
 ): Promise<{ candidates: RouterCandidate[]; probed: number }> {
+  /*
+   * AN EMPTY RANGE IS A DEFECT, NOT AN ANSWER. Router detection over
+   * `between 0 and 0` returns no rows, which reads exactly like a token with no
+   * routers -- and that is what it reported for AI, where 16 senders clear the
+   * bar and one fronts 9,764 recipients. Refuse rather than report a clean pass.
+   */
+  if (!Number.isInteger(fromBlock) || !Number.isInteger(toBlock) || toBlock <= fromBlock) {
+    throw new Error(
+      `router detection was given the range ${fromBlock}..${toBlock}, which contains `
+        + 'nothing. That is an unresolved window, not a token without routers.',
+    );
+  }
+
   const counterparties = [...new Set([...poolAddresses, cfg.v4PoolManager.toLowerCase()])];
 
   const rows = await client.query<{

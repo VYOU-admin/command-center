@@ -236,9 +236,22 @@ async function main(): Promise<void> {
     }
 
     /* ---- 2. windows ----------------------------------------------------- */
-    const win = await run('windows', async (rpc) => {
+    const win = await run('windows', async (rpc, c) => {
       if (!head) head = await rpc.blockNumber();
       const resolved = await resolveWindows(rpc, cfg, firstBlock || 1, head);
+      /*
+       * PERSISTED, because a later phase may run in a LATER INVOCATION. Every
+       * STOP ends the process, so the phase after it starts with none of this
+       * in memory -- and a window whose blocks are undefined silently became
+       * `between 0 and 0` for router detection, which reported a clean pass
+       * over a range containing nothing. See section 9.
+       */
+      await c.query(
+        `insert into token_intake_state (chain, token, phase, status, detail)
+         values ($1, $2, 'windows:resolved', 'complete', $3::jsonb)
+         on conflict (chain, token, phase) do update set detail = excluded.detail`,
+        [cfg.chain, cfg.token, JSON.stringify(resolved)],
+      );
       return {
         report: {
           windows: resolved.map((w) => ({
@@ -250,7 +263,29 @@ async function main(): Promise<void> {
         value: resolved,
       };
     });
-    const windows = win ?? cfg.windows;
+    /*
+     * On a resumed run `win` is undefined because the phase was already
+     * complete, so the resolved blocks are read back rather than falling back
+     * to the raw config -- whose startBlock and endBlock are undefined.
+     */
+    let windows = win ?? cfg.windows;
+    if (!win) {
+      const stored = await withTransaction(app.pool, async (c) =>
+        c.query<{ detail: unknown }>(
+          `select detail from token_intake_state
+            where chain = $1 and token = $2 and phase = 'windows:resolved'`,
+          [cfg.chain, cfg.token],
+        ));
+      const detail = stored.rows[0]?.detail as typeof cfg.windows | undefined;
+      if (detail?.length) windows = detail;
+    }
+    if (windows.some((w) => !w.startBlock || !w.endBlock)) {
+      throw new Error(
+        'window blocks are unresolved. Re-run the windows phase rather than '
+          + 'continuing: a phase that filters on an unresolved window reads an '
+          + 'empty range and reports a clean pass over nothing.',
+      );
+    }
 
     /* ---- 3. pools ------------------------------------------- STOP ------ */
     await run('pools', async (rpc, c) => {
@@ -308,6 +343,7 @@ async function main(): Promise<void> {
 
     /* ---- 4. scope ------------------------------------------- STOP ------ */
     await run('scope', async (rpc, c) => {
+      if (!head) head = await rpc.blockNumber();
       const stored = await c.query<{ detail: unknown }>(
         `select detail from token_intake_state
           where chain = $1 and token = $2 and phase = 'pools:candidates'`,
