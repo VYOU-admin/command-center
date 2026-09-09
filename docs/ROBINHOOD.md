@@ -796,6 +796,13 @@ it. Over PONS-P1, **62 senders clear the 50-recipient bar**. This is a live
 discrepancy between what this section requires and what the stored cohort used;
 PONS is frozen and it has not been acted on.
 
+**Materialise the swap-transaction set before joining to it.** Written as one
+statement with the swap transactions in a CTE, router detection ran for **19
+minutes** on AI before being cancelled: the planner has no statistics for a CTE
+result and no index on it, so the join against a quarter of a million sends
+degenerates. Inserting them into an indexed temp table and analysing it turns
+the same work into a hash join. Identical result, different plan.
+
 **The swap-share discriminator needs swaps to discriminate with.** Part 3 of the
 router rule divides by the transactions containing a `Swap`. With the swap table
 empty for that token and range the share is 0.0% for everyone, and every

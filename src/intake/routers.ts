@@ -78,32 +78,45 @@ export async function detectRouters(
 
   const counterparties = [...new Set([...poolAddresses, cfg.v4PoolManager.toLowerCase()])];
 
+  /*
+   * TWO STEPS, NOT ONE STATEMENT. Expressed as a single query with the swap
+   * transactions in a CTE, this ran for 19 MINUTES on AI and had to be
+   * cancelled: the planner has no statistics for a CTE result and no index on
+   * it, so the join against a quarter of a million sends degenerates.
+   *
+   * Materialising the swap transactions into an indexed temporary table first,
+   * and analysing it, turns the same work into a hash join the planner can
+   * cost. The result is identical; only the plan changes.
+   */
+  await client.query('create temp table if not exists _swaptx (tx_hash text primary key) on commit drop');
+  await client.query('truncate _swaptx');
+  await client.query(
+    `insert into _swaptx (tx_hash)
+     select distinct tx_hash from token_swap_logs
+      where chain = $1 and token = $2 and block_number between $3 and $4`,
+    [cfg.chain, cfg.token, fromBlock, toBlock],
+  );
+  await client.query('analyze _swaptx');
+
   const rows = await client.query<{
     addr: string; recipients: number; sends: number; in_swap: number;
   }>(
-    `with sends as (
-       select t.from_addr addr, t.to_addr recipient, t.tx_hash
-         from token_transfer_logs t
-        where t.chain = $1 and t.token = $2
-          and t.block_number between $3 and $4
-          and t.from_addr <> all($5::text[])
-          and t.from_addr <> '0x0000000000000000000000000000000000000000'
-     ),
-     swaptx as (
-       select distinct tx_hash from token_swap_logs
-        where chain = $1 and token = $2 and block_number between $3 and $4
-     )
-     select s.addr,
-            count(distinct s.recipient)::int              as recipients,
+    `select t.from_addr as addr,
+            count(distinct t.to_addr)::int                as recipients,
             count(*)::int                                 as sends,
-            count(x.tx_hash)::int                         as in_swap
-       from sends s
-       left join swaptx x on x.tx_hash = s.tx_hash
-      group by s.addr
-     having count(distinct s.recipient) >= $6
-      order by count(distinct s.recipient) desc`,
+            count(*) filter (where x.tx_hash is not null)::int as in_swap
+       from token_transfer_logs t
+       left join _swaptx x on x.tx_hash = t.tx_hash
+      where t.chain = $1 and t.token = $2
+        and t.block_number between $3 and $4
+        and t.from_addr <> all($5::text[])
+        and t.from_addr <> '0x0000000000000000000000000000000000000000'
+      group by t.from_addr
+     having count(distinct t.to_addr) >= $6
+      order by count(distinct t.to_addr) desc`,
     [cfg.chain, cfg.token, fromBlock, toBlock, counterparties, cfg.routerMinRecipients],
   );
+
 
   /*
    * THE DISCRIMINATOR NEEDS DATA TO DISCRIMINATE WITH. Part 3 of the rule is
@@ -114,11 +127,7 @@ export async function detectRouters(
    * never copied into `token_swap_logs`. A denominator of zero is not evidence
    * that nobody traded.
    */
-  const swapTx = await client.query<{ n: string }>(
-    `select count(distinct tx_hash)::text n from token_swap_logs
-      where chain = $1 and token = $2 and block_number between $3 and $4`,
-    [cfg.chain, cfg.token, fromBlock, toBlock],
-  );
+  const swapTx = await client.query<{ n: string }>('select count(*)::text n from _swaptx');
   if (Number(swapTx.rows[0]?.n ?? 0) === 0 && rows.rowCount) {
     throw new Error(
       `router detection found ${rows.rowCount} candidate senders over `
