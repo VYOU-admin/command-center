@@ -1,0 +1,99 @@
+# NVDA — loaded as a PRICING SOURCE, not as a cohort.
+#
+# AI's charted market is AI/NVDA, which is 59.1% of its swaps and out of scope
+# on its own: NVDA is not a recognised pricing asset. ROBINHOOD.md step 4 gives
+# the route -- price AI through NVDA, provided NVDA itself has an on-chain USD
+# route derived from ITS pools against a recognised pricing asset.
+#
+# THE SCOPE RULE APPLIES RECURSIVELY, which is why this file lists no
+# bridge_assets of its own. NVDA's series may come only from NVDA/USDG,
+# NVDA/WETH and NVDA/native pools. Pools where NVDA is some third token's
+# pricing side are excluded -- including them would price NVDA against the thing
+# it is pricing.
+#
+# NO COHORT IS BUILT FROM THIS FILE. Every phase past scope has a zero ceiling.
+
+chain: robinhood
+ticker: NVDA
+# READ FROM THE CHAIN during AI's scope phase, not inferred from a pool name.
+# A SECOND token also answers symbol() with "NVDA", at
+# 0xa90b49763f970d79d6772270c96ac02bc1b71e18, and it has one AI pool against
+# this one's thirteen. Its address ends 1e18 like a crowd of junk counters here.
+# Everything below keys on the address; nothing resolves a token by symbol.
+token: "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+charted_pair: "0x0000000000000000000000000000000000000000"   # not applicable
+
+# NVDA is priced across AI's window. It is not a cohort window and no wallet is
+# tagged from it.
+windows:
+  - label: NVDA-PRICING
+    start: "2026-07-24T12:00:00-04:00"
+    end:   "2026-08-09T16:00:00-04:00"
+
+rpc:
+  url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+  key_var: ALCHEMY_API_KEY
+  request_timeout_ms: 120000
+  max_log_span_blocks: 100000
+  sparse_log_span_blocks: 40000000
+  min_log_span_blocks: 25
+  target_logs_per_request: 6000
+
+# NVDA is a pricing asset for other tokens, so it has many pools. Raised
+# deliberately, per token, as the cap intends.
+max_pools: 20000
+
+# Off. Enumeration finds every v4 pool from Initialize and every v3 pool from
+# the configured factory; the probe would sweep every NVDA transfer to find v3
+# pools from other factories, and a price series does not need them.
+flow_probe: false
+
+scope_max_counter_reads: 40
+
+routers:
+  min_recipients: 50
+  min_swap_share: 0.5
+
+venues:
+  v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+  v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+pricing:
+  assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+    - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+    - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+  usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+  native_assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+    - "0x0000000000000000000000000000000000000000"
+  # NO bridge_assets. The recursive scope rule: a bridge's own series comes only
+  # from pools pairing it with a recognised pricing asset.
+  bucket_blocks: 10000
+  bucket_origin: 0
+  tick_fence_multiple: 100
+  native_fence_multiple: 10
+
+floors:
+  token_raw_units: 1
+  paid_raw_units: 1
+  token_amount: 0.001
+  usd: 0.01
+
+tables:
+  token_usd: nvda_usd_prices
+  native_usd: native_usd_prices
+
+ceilings:
+  identity: 1500
+  windows: 5000
+  pools: 3000
+  scope: 25000
+  sweep: 0
+  conventions: 0
+  cohort: 0
+  tags: 0
+  timestamps: 0
+  prices: 0
+  dryrun: 0
+  write: 0
