@@ -115,18 +115,29 @@ async function main(): Promise<void> {
     );
     const buys = legs.filter((l) => l.side === 'buy' && cohort.has(l.wallet));
     const sells = legs.filter((l) => l.side === 'sell' && cohort.has(l.wallet));
-    const key2 = (l: { txHash: string; wallet: string }): string => `${l.txHash}:${l.wallet}`;
+    // The leg and the stored row spell these differently -- txHash vs tx_hash --
+    // so they get one key builder each rather than a cast. Getting this wrong
+    // matched nothing and read as "100% of rows were dropped", which is the
+    // failure mode ROBINHOOD.md section 5 warns about: a filter matching
+    // nothing looks exactly like a dramatic finding.
+    const legKey = (l: { txHash: string; wallet: string }): string =>
+      `${l.txHash.toLowerCase()}:${l.wallet.toLowerCase()}`;
+    const rowKey = (r: { tx_hash: string; wallet: string }): string =>
+      `${r.tx_hash.toLowerCase()}:${r.wallet.toLowerCase()}`;
 
     const stored = await c.query<{ side: string; tx_hash: string; wallet: string }>(
       `select side, tx_hash, wallet from wallet_transactions
         where chain=$1 and token=$2 and block_number between $3 and $4`,
       [cfg.chain, cfg.token, from, to],
     );
-    const storedBuys = new Set(stored.rows.filter((r) => r.side === 'buy').map(key2 as never));
-    const storedSells = new Set(stored.rows.filter((r) => r.side === 'sell').map(key2 as never));
+    const storedBuys = new Set(stored.rows.filter((r) => r.side === 'buy').map(rowKey));
+    const storedSells = new Set(stored.rows.filter((r) => r.side === 'sell').map(rowKey));
+    if (stored.rows.length > 0 && storedBuys.size === 0 && storedSells.size === 0) {
+      throw new Error(`${stored.rows.length} rows loaded but no keys built; refusing to report`);
+    }
 
-    const missingBuys = buys.filter((l) => !storedBuys.has(key2(l)));
-    const missingSells = sells.filter((l) => !storedSells.has(key2(l)));
+    const missingBuys = buys.filter((l) => !storedBuys.has(legKey(l)));
+    const missingSells = sells.filter((l) => !storedSells.has(legKey(l)));
 
     log.info('WHAT THE 47 CYCLES DROPPED', {
       blocks: `${from}..${to}`,
