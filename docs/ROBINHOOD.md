@@ -824,7 +824,23 @@ The window-level test flags 10,389 PONS wallets and would drop **8,220 of the
 13,095 genuine members**; the per-transaction test flags 512 and drops 3.
 
 **"Who traded" has exactly one implementation**, shared by this step and the row
-writer. Two implementations of one rule is a bug waiting to happen: the cohort
+writer. **A check that re-asks the same question is a second implementation, and
+it will drift.** The sign-convention check in `build-cohort.ts` was written
+fresh, and it paired a swap with any transfer leaving the counterparty. It
+reported a 1.4-2.0% convention disagreement on AI, which would have meant the
+venue conventions differ per token.
+
+They do not. Decoding settled it: in
+`0x0470cc5749d290c824d8bfafac3d990edb6b9bda84a5088d9786e0d711aa5d9e` the
+PoolManager sends **2,551.600644918571742165 AI** to `0x1521027b…` and the
+identical amount comes straight back in the same transaction — an arbitrage bot,
+and the transaction is addressed to it. The v3 case is the same shape: pool
+`0xc4a21f9d…` sends 57,289 to a router and 25,239 + 31,951 return.
+
+`tradeLegs` already drops these; the fresh check did not, because it counted
+legs in one direction only. Counting both ways gives **v3 15,279 agree / 0
+disagree, v4 7,511 / 0** — unanimous, matching PONS. **The residual was the rule
+that was not shared.** Two implementations of one rule is a bug waiting to happen: the cohort
 once read transfers alone and never joined the swap table, so a transfer out of
 the PoolManager with no swap qualified a wallet that produced no row.
 
@@ -1171,6 +1187,13 @@ rows" on a 4.92 MB page. Tokens are ordered by whether they have any rows, which
 keeps the default view populated without hiding anything or naming a token in the
 page.
 
+**A role added in one place is honoured in one place.** `tokens.role` was added
+for the dashboard and the price monitor was not changed with it, so NVDA stayed
+in that monitor's token list, had no pool with a recognised quote at the
+liquidity floor, and failed and alerted every minute. **Every reader of a table
+is a caller of the rule.** When a column decides what something is, grep for the
+table before assuming the change is done.
+
 **A token loaded only to price another is not a tracked token.** `tokens.role`
 records which it is: `tracked` for a token with a window and a cohort, and
 `pricing-source` for a bridge asset loaded solely so another token can be priced
@@ -1429,7 +1452,52 @@ came from it.
 
 ### AI — `0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18`
 
-**Not loaded.** Reconnaissance only; no sweep has run and no rows exist.
+**Loaded 2026-09-09.** Cohort `AI-P1`, **3,508 wallets**, window 2026-07-24
+12:00 → 2026-08-09 16:00 Eastern (blocks 18,275,461–32,206,441), **31,896 rows**,
+**$8,657,254** of USD volume. Name "Artificial Inu", 18 decimals, supply
+991,382,832.598, deployed at block 9,721,433.
+
+```
+                                measured        against estimate
+transfer sweep                8,820 CU          8,400   +5.0%
+v3 swaps                      8,400 CU          8,400    0.0%
+v4 swaps copied from v4_swaps_all   0 CU        -- pure SQL
+identity+windows+pools+scope  4,610 CU          4,576   +0.7%
+NVDA as a pricing source      4,610 CU          3,500  +32%  (missed its timestamps)
+block_times (237 + 23)        4,940 CU
+cohort, first build          73,733 CU        160,500   -54%  (round-trip filtering)
+cohort, rebuilt with NVDA   165,584 CU
+prices                            0 CU
+                            ----------
+                           ~271,000 CU  ~$0.12 for the whole token
+```
+
+- **The second hop is most of the token.** NVDA pools carry **15,031 of 31,896
+  rows, 2,549 wallets and $6,945,374 — 80% of AI's USD volume** — against WETH's
+  $870,922 and USDG's $840,348. Without the hop the cohort was 1,366 and the
+  volume $1,127,383.
+- **Two tokens answer `symbol()` with "NVDA".** The real one,
+  `0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec`, has 13 AI pools; the impostor at
+  `0xa90b49763f970d79d6772270c96ac02bc1b71e18` has one, and its address ends
+  `1e18` like a crowd of junk counters here. Match a bridge by address.
+- **NVDA/USD derived cleanly:** 1,368 of ~1,393 buckets, 0 fence discards,
+  $188.95–$225.91 — a plausible range for a tokenised NVIDIA share, from a
+  derivation that knows nothing about the real one.
+- **AI/USD** 1,375 buckets, $0.00133989–$0.00880391, 0 discards on any fence.
+- **Buckets anchored at the deployment block 9,721,433**, residue 1433, because
+  the first swap sits before `v4_swaps_all` and reading it costs ~32,400 CU.
+- **15 routers detected against 3 in the configured list**, 13 of them new. One
+  candidate at 0.1% swap share is a distributor; the rest run 90–100%.
+- **Scores:** 3,508 wallets, range 0.0385–0.7562, median 0.1427, mean 0.1627, 12
+  nulls. `inflated-pnl` 318 (9.1%), `low-weight` 8, both 0.
+- **The low-weight threshold could not be derived and 0.8 stands.** AI's weight
+  distribution has only one distinct partial weight (0.3), so there is no gap to
+  cut at — unlike PONS, which is bimodal. **Re-deriving it produced "do not
+  change it", which is a result and is recorded as one.**
+- **315 delegated EIP-7702 accounts kept**, 9.0% of the cohort.
+- Zero mints inside the window: AI's supply did not originate there.
+- The top two wallets score 0.7562 on 30% of the weight and are flagged
+  `low-weight`; the highest full-weight score is 0.6524.
 
 **Window, bisected:** AI-P1 is blocks **18,275,461–32,206,441** (13,930,980).
 Deployed at 9,721,433; name "Artificial Inu", 18 decimals, supply
@@ -1513,10 +1581,20 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 
 ## 9. Rules here the code does not implement
 
-**Empty.** Every rule above is implemented.
+- **`token_swap_logs` is created by no code in this repository.** Every reader
+  assumes it exists because the first intake made it by hand. A fresh database
+  fails at the first read. Its shape is recorded in step 5.
+- **One bridge cannot serve two tokens with different bucket anchors.**
+  `deriveBridgeUsd` runs on the grid of the token being priced, and
+  `bridge_usd_prices` is keyed `(chain, bridge, bucket_block)` with no room for a
+  second grid — so a second token pricing through NVDA on its own anchor would
+  interleave two series in one table. The same applies to `native_usd_prices`,
+  keyed `(chain, block_number)` with no token column, which already holds PONS's
+  buckets at residue 3150 and AI's at 1433. Both are correct today because each
+  reader finds its own; neither is correct once a third token arrives. Give the
+  shared series a chain-level anchor before that happens.
 
-One limitation is recorded here because it is a property of the chain rather
-than a gap in the code:
+One further limitation is a property of the chain rather than a gap in the code:
 
 - **A bucket median is still a median over ~17 minutes.** The window-median bias
   measured elsewhere (95.56 whole-window against 127.17 and 97.41 for the
