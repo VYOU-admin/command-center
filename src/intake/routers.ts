@@ -105,6 +105,29 @@ export async function detectRouters(
     [cfg.chain, cfg.token, fromBlock, toBlock, counterparties, cfg.routerMinRecipients],
   );
 
+  /*
+   * THE DISCRIMINATOR NEEDS DATA TO DISCRIMINATE WITH. Part 3 of the rule is
+   * the share of an address's sends that sit inside a transaction containing a
+   * Swap. If the swap table holds nothing for this token and range, every
+   * candidate scores 0.0% and is confidently labelled a distributor -- which is
+   * exactly what happened to AI, whose swaps live in `v4_swaps_all` and were
+   * never copied into `token_swap_logs`. A denominator of zero is not evidence
+   * that nobody traded.
+   */
+  const swapTx = await client.query<{ n: string }>(
+    `select count(distinct tx_hash)::text n from token_swap_logs
+      where chain = $1 and token = $2 and block_number between $3 and $4`,
+    [cfg.chain, cfg.token, fromBlock, toBlock],
+  );
+  if (Number(swapTx.rows[0]?.n ?? 0) === 0 && rows.rowCount) {
+    throw new Error(
+      `router detection found ${rows.rowCount} candidate senders over `
+        + `${fromBlock}..${toBlock} but NO swap transactions for this token in that `
+        + 'range, so the swap-share test has a zero denominator and would call every '
+        + 'one of them a distributor. Load the token\'s swaps first.',
+    );
+  }
+
   const candidates: RouterCandidate[] = [];
   let probed = 0;
   for (const r of rows.rows) {

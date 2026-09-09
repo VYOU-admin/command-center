@@ -772,6 +772,15 @@ raises if any window still has no blocks; and **`detectRouters` refuses a range
 that contains nothing rather than reporting no routers**. An empty range is a
 defect, not an answer.
 
+**The swap-share discriminator needs swaps to discriminate with.** Part 3 of the
+router rule divides by the transactions containing a `Swap`. With the swap table
+empty for that token and range the share is 0.0% for everyone, and every
+candidate is confidently labelled a distributor. AI hit exactly this: its swaps
+live in `v4_swaps_all` and were never copied into `token_swap_logs`, so all 16
+candidates — including one fronting 9,765 recipients — came back "moves tokens
+without trading them". **A zero denominator is not evidence that nobody traded**,
+and detection now raises rather than answering.
+
 **Apply the exclusion list at the candidate stage**, before the code check, so an
 excluded address never becomes a row. Report list entries that matched nothing —
 an entry silently matching nothing is indistinguishable from a check that never
