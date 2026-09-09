@@ -922,6 +922,24 @@ never been measured on this chain.** Measure it on a token that moved.
 had no USDG trade and 22 no trade at all. Those 62 are **not interpolated, not
 carried forward**, and swaps landing in them store a null USD.
 
+**Buckets are anchored at a fixed block tied to the token — its first swap
+block, or its DEPLOYMENT block where the first swap cannot be read.** The
+purpose is a fixed grid that a later run reproduces, so the anchor must be a
+figure nobody has to re-derive. AI's first swap sits at roughly 9,721,980, more
+than five million blocks before `v4_swaps_all` begins, so reading it would cost
+~32,400 CU of sweeping to name a boundary. **AI is therefore anchored at its
+deployment block, 9,721,433** — approved deliberately, strictly earlier than any
+swap it can ever have, and free. Its buckets satisfy `block % 10000 == 1433`.
+
+**A bridge's series is derived on the GRID OF THE TOKEN BEING PRICED**, because
+`deriveBridgeUsd` is called with that token's config. `bridge_usd_prices` is keyed
+`(chain, bridge, bucket_block)` with no room for two grids, so **two tokens with
+different anchors pricing through the same bridge would write interleaved series
+into one table** — the exact fault the anchor rule exists to prevent, one level
+up. Nothing has hit this yet: AI is the only token with a bridge. Before a second
+one gets one, either give the bridge its own fixed anchor or key the table by the
+grid.
+
 **Buckets are anchored at the token's first swap block, not at zero.** Every
 stored PONS bucket satisfies `block % 10000 == 3150` because the anchor is
 8,963,150. A function anchored at zero looks up 54930000 where the stored bucket

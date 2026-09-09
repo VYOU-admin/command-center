@@ -24,6 +24,7 @@
     "sweep-probe": "npm run build && node dist/cli/sweep-probe.js",
     "sweep-transfers": "npm run build && node dist/cli/sweep-transfers.js",
     "load-swaps": "npm run build && node dist/cli/load-swaps.js",
+    "derive-prices": "npm run build && node dist/cli/derive-prices.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },

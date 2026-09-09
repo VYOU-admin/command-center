@@ -70,17 +70,24 @@ pricing:
   native_assets:
     - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
     - "0x0000000000000000000000000000000000000000"
-  # NVDA is not listed as a bridge asset yet: its address has not been read from
-  # the chain, only inferred from a pool name. The scope run below reads the
-  # busiest counters' symbols, which is how NVDA gets identified before anything
-  # depends on it. No definition changes on a claim.
+  # THE SECOND HOP. NVDA is 59.1% of AI's swaps and unpriceable on its own, so
+  # AI is priced through it: AI -> NVDA -> USD. The address was READ FROM THE
+  # CHAIN during the scope phase, not inferred from a pool name -- a second
+  # token answers symbol() with "NVDA" at 0xa90b4976...1e18 and has one AI pool
+  # against this one's thirteen. NVDA's own series comes only from its pools
+  # against WETH, USDG or native; see intake/nvda.yaml.
+  bridge_assets:
+    - "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+
 
   bucket_blocks: 10000
-  # PLACEHOLDER. Buckets anchor at the token's FIRST SWAP BLOCK, which has not
-  # been read yet. Nothing may be priced until this is measured -- anchoring at
-  # the wrong offset matches no stored bucket and writes a second interleaved
-  # series.
-  bucket_origin: 0
+  # AI's DEPLOYMENT block, approved as the anchor in place of its first swap.
+  # The first swap sits around 9,721,980, over five million blocks before
+  # v4_swaps_all begins, so reading it would cost ~32,400 CU to name a boundary.
+  # The deployment block is fixed, tied to the token, strictly earlier than any
+  # swap, and free. Every AI bucket therefore satisfies `block % 10000 == 1433`.
+  # Changing this later invalidates every stored bucket.
+  bucket_origin: 9721433
   tick_fence_multiple: 100
   native_fence_multiple: 10
 

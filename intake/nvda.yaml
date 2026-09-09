@@ -70,7 +70,11 @@ pricing:
   # NO bridge_assets. The recursive scope rule: a bridge's own series comes only
   # from pools pairing it with a recognised pricing asset.
   bucket_blocks: 10000
-  bucket_origin: 0
+  # UNUSED for the bridge series. deriveBridgeUsd is called with the config of
+  # the token being priced, so NVDA's series lands on AI's grid (origin
+  # 9,721,433). Set to match so nothing derives NVDA on a second grid by
+  # accident; see step 10 on why one bridge cannot serve two anchors.
+  bucket_origin: 9721433
   tick_fence_multiple: 100
   native_fence_multiple: 10
 
