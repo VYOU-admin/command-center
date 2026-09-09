@@ -21,7 +21,8 @@ import { loadIntakeConfig } from '../intake/plan.js';
 import { RpcClient, type LogEntry } from '../adapters/token-updates/rpc.js';
 import { loadPools } from '../adapters/token-updates/pools.js';
 import { adaptiveSweep } from '../intake/sweep.js';
-import { tradeLegs } from '../adapters/token-updates/rows.js';
+import { buildRows, tradeLegs } from '../adapters/token-updates/rows.js';
+import { counterUsdResolver } from '../adapters/token-updates/prices.js';
 import { loadExclusions } from '../adapters/token-updates/exclusions.js';
 import {
   TOPICS, addressTopic, blockOf, decodeSwap, decodeTransfer,
@@ -66,9 +67,19 @@ async function main(): Promise<void> {
     const exclusions = new Set(
       (await loadExclusions(INFRA, cfg.chain)).map((e) => e.address),
     );
+    /*
+     * THE JOB'S COHORT, NOT EVERY TAG ON THE TOKEN. `monitors/token-updates.yaml`
+     * sets cohort_tags: [PONS-P1], and the 396 PONS-P1-T hop wallets are
+     * deliberately excluded from it. Including them here put wallets in the
+     * comparison that the job was never going to write, which showed up as
+     * phantom dropped SELLS -- and sells are never payment-tested, so that
+     * count is the control on whether this tool is comparable at all.
+     */
+    const tagIdx = args.indexOf('--tag');
+    const tag = tagIdx >= 0 ? args[tagIdx + 1] : 'PONS-P1';
     const cohort = new Set(
       (await c.query<{ wallet: string }>(
-        `select wallet from wallet_tags where mint = $1`, [cfg.token],
+        `select wallet from wallet_tags where mint = $1 and tag = $2`, [cfg.token, tag],
       )).rows.map((r) => r.wallet.toLowerCase()),
     );
 
@@ -110,11 +121,39 @@ async function main(): Promise<void> {
       cu_spent: rpc.cuSpent,
     });
 
-    const { legs, stats } = tradeLegs(
-      swaps, transfers, cfg, () => null, exclusions, knownPools,
+    /*
+     * THE SAME CODE PATH THE JOB USES. Comparing raw legs against written rows
+     * counts the floors as if they were losses: buildRows drops rows below the
+     * token-amount and USD floors, and tradeLegs does not. Prices come from the
+     * stored series so the USD floor lands where it landed for the job.
+     */
+    const nativeRows = await c.query<{ block_number: string; eth_usd: string }>(
+      `select block_number::text, eth_usd::text from ${cfg.nativeUsdTable}
+        where chain = $1`, [cfg.chain],
     );
-    const buys = legs.filter((l) => l.side === 'buy' && cohort.has(l.wallet));
-    const sells = legs.filter((l) => l.side === 'sell' && cohort.has(l.wallet));
+    const nativeUsd = new Map<number, { price: number }>();
+    for (const r of nativeRows.rows) {
+      const price = Number(r.eth_usd);
+      if (Number.isFinite(price) && price > 0) {
+        nativeUsd.set(Number(r.block_number), { price });
+      }
+    }
+    const decimals = (await c.query<{ decimals: number }>(
+      `select decimals from tokens where mint = $1`, [cfg.token])).rows[0]?.decimals;
+    if (typeof decimals !== 'number') throw new Error('token decimals unknown');
+    const resolver = counterUsdResolver(cfg, nativeUsd, new Map());
+
+    const { stats } = tradeLegs(swaps, transfers, cfg, resolver, exclusions, knownPools);
+    const { rows: builtRows } = buildRows(
+      swaps, transfers, cfg, decimals, resolver, exclusions, knownPools, cohort,
+    );
+    const buys = builtRows.filter((r) => r.side === 'buy');
+    const sells = builtRows.filter((r) => r.side === 'sell');
+    log.info('price coverage', {
+      native_buckets: nativeUsd.size,
+      note: 'a missing bucket leaves usd null, and a null-USD row is never '
+          + 'dropped by the USD floor -- so this cannot manufacture a loss',
+    });
     // The leg and the stored row spell these differently -- txHash vs tx_hash --
     // so they get one key builder each rather than a cast. Getting this wrong
     // matched nothing and read as "100% of rows were dropped", which is the
@@ -141,17 +180,22 @@ async function main(): Promise<void> {
 
     log.info('WHAT THE 47 CYCLES DROPPED', {
       blocks: `${from}..${to}`,
-      buy_legs_the_correct_rule_produces: buys.length,
+      cohort_tag: tag, cohort_size: cohort.size,
+      buy_rows_the_correct_rule_produces: buys.length,
       buy_rows_actually_written: storedBuys.size,
       BUYS_DROPPED: missingBuys.length,
       dropped_share: buys.length
         ? `${((100 * missingBuys.length) / buys.length).toFixed(1)}%` : 'NO BUY LEGS FOUND',
       distinct_wallets_affected: new Set(missingBuys.map((l) => l.wallet)).size,
-      sell_legs_the_correct_rule_produces: sells.length,
+      sell_rows_the_correct_rule_produces: sells.length,
       sell_rows_actually_written: storedSells.size,
       SELLS_DROPPED: missingSells.length,
-      note: 'sells were never payment-tested, so a non-zero sell figure means '
-          + 'something other than the payment rule is also dropping rows',
+      CONTROL_sells_must_be_zero: missingSells.length === 0
+        ? 'PASS -- sells were never payment-tested, and none are missing, so the '
+          + 'buy figure is attributable to the payment rule'
+        : 'FAIL -- sells were never payment-tested, so a non-zero sell figure '
+          + 'means this tool is not yet comparable to the job. Do not attribute '
+          + 'the buy figure to the payment rule until this reads PASS.',
     });
     log.info('leg stats', { ...stats });
     log.info('cost', {
