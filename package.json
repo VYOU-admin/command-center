@@ -20,6 +20,7 @@
     "payments": "npm run build && node dist/cli/payments.js",
     "payment-audit": "npm run build && node dist/cli/payment-audit.js",
     "payment-test": "npm run build && node dist/cli/payment-test.js",
+    "dropped-buys": "npm run build && node dist/cli/dropped-buys.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs"
   },
