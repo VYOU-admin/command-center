@@ -754,6 +754,24 @@ router into a wallet.
 > at all. A router the list misses gets the trade attributed to it instead of to
 > the buyer.
 
+**A STOP ends the process, so the phase after it starts with nothing in
+memory. Anything a later phase needs must be PERSISTED, not carried in a
+variable.** Router detection reported `probed: 0, identified: 0, rejected: 0`
+for AI — a clean pass — because the run that reached the scope phase had resumed
+with `--continue`: the windows phase was already complete so it returned
+nothing, `windows` fell back to the raw config whose `startBlock`/`endBlock` are
+undefined, and `head` was never fetched because every phase that fetches it had
+been skipped. Detection therefore ran over `block_number between 0 and 0`.
+
+Measured on the same data, same counterparty list: **0 senders over 0..0, and 16
+over the real window**, one of them fronting 9,764 recipients.
+
+The fix is three things, and the third generalises: the windows phase persists
+its resolved blocks under `windows:resolved`; a resumed run reads them back and
+raises if any window still has no blocks; and **`detectRouters` refuses a range
+that contains nothing rather than reporting no routers**. An empty range is a
+defect, not an answer.
+
 **Apply the exclusion list at the candidate stage**, before the code check, so an
 excluded address never becomes a row. Report list entries that matched nothing —
 an entry silently matching nothing is indistinguishable from a check that never
@@ -1411,15 +1429,7 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 
 ## 9. Rules here the code does not implement
 
-- **Router detection reported `probed: 0` on AI, and that is wrong.** The scope
-  phase ran `detectRouters` over AI-P1 and reported 0 probed, 0 identified, 0
-  rejected. Replicating its own `sends` query by hand over the same blocks and
-  the same counterparty list finds **16 senders at or above the 50-recipient
-  bar**, one of them reaching 9,764 recipients. So the phase is reporting a
-  clean pass where the rule finds candidates — the failure mode section 5 warns
-  about. **AI's router set is therefore unknown**, and step 7 is explicit that a
-  router the list misses gets the trade attributed to it instead of to the
-  buyer. Do not build AI's cohort until this is explained.
+**Empty.** Every rule above is implemented.
 
 One limitation is recorded here because it is a property of the chain rather
 than a gap in the code:
