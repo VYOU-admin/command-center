@@ -278,8 +278,20 @@ export function createWebServer(opts: WebServerOptions): Server {
          * and no rows, and rendering it produces an empty tab. The filter is on
          * the token's recorded role, not on a name the page knows.
          */
-        pool.query(`select mint, chain, ticker, name, decimals, charted_pair
-                      from tokens where role = 'tracked' order by chain, ticker`),
+        /*
+         * A TRACKED TOKEN WITH NO ROWS YET IS STILL SHOWN, BUT NEVER FIRST.
+         * The page opens on the first token it is given, so loading a new token
+         * -- which writes its `tokens` row long before its cohort exists --
+         * silently made the landing tab an empty one. Ordering by whether the
+         * token has any rows keeps the default view populated without hiding
+         * anything or naming a token in the page.
+         */
+        pool.query(`select t.mint, t.chain, t.ticker, t.name, t.decimals, t.charted_pair
+                      from tokens t
+                      left join (select token, count(*) n from wallet_transactions
+                                  group by token) w on w.token = t.mint
+                     where t.role = 'tracked'
+                     order by (coalesce(w.n, 0) = 0), t.chain, t.ticker`),
         /*
          * WALLET AGGREGATES, NOT RAW ROWS.
          *

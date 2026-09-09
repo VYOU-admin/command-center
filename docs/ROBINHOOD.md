@@ -1156,6 +1156,14 @@ that separates almost nobody.
 **Does:** renders the token alongside the others.
 **Stops:** no.
 
+**A tracked token with no rows yet is shown, but never first.** The page opens
+on the first token it is given, and a token's `tokens` row is written by the
+identity phase -- long before its cohort exists. Loading AI therefore made the
+landing tab an empty token, which the DOM harness caught as "rendered zero wallet
+rows" on a 4.92 MB page. Tokens are ordered by whether they have any rows, which
+keeps the default view populated without hiding anything or naming a token in the
+page.
+
 **A token loaded only to price another is not a tracked token.** `tokens.role`
 records which it is: `tracked` for a token with a window and a cohort, and
 `pricing-source` for a bridge asset loaded solely so another token can be priced
