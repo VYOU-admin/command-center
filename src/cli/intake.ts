@@ -327,7 +327,10 @@ async function main(): Promise<void> {
            on conflict (chain, token, venue, pool) do update
              set reason = excluded.reason, counter_sym = excluded.counter_sym`,
           [cfg.chain, cfg.token, r.venue, r.pool, r.counter, r.symbol,
-           `counter ${r.symbol ?? r.counter} is not a recognised pricing or bridge asset`],
+           r.symbolRead
+             ? `counter ${r.symbol ?? r.counter} is not a recognised pricing or bridge asset`
+             : `counter ${r.counter} is not a configured pricing or bridge asset; its `
+               + 'symbol was NOT READ -- it fell outside scope_max_counter_reads'],
         );
       }
 

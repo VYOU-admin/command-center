@@ -41,6 +41,12 @@ rpc:
 # that resolves to a very large pool set reports rather than spends.
 max_pools: 6000
 
+# Reading symbol() and decimals() for every distinct counter is 2 eth_call each,
+# and AI has ~4,481 of them -- 232,000 CU. The configured pricing and bridge
+# assets are always read; this caps the extra busiest counters read so the
+# rejection report can name what it rejected rather than list bare addresses.
+scope_max_counter_reads: 40
+
 # The v3 flow probe is OFF. It sweeps every transfer AI ever emitted and then
 # spends one eth_getCode per address that both sent and received: 14,034 such
 # addresses in the swept window alone, ~389,000 CU / ~$0.18, to find roughly 13
@@ -64,6 +70,11 @@ pricing:
   native_assets:
     - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
     - "0x0000000000000000000000000000000000000000"
+  # NVDA is not listed as a bridge asset yet: its address has not been read from
+  # the chain, only inferred from a pool name. The scope run below reads the
+  # busiest counters' symbols, which is how NVDA gets identified before anything
+  # depends on it. No definition changes on a claim.
+
   bucket_blocks: 10000
   # PLACEHOLDER. Buckets anchor at the token's FIRST SWAP BLOCK, which has not
   # been read yet. Nothing may be priced until this is measured -- anchoring at
@@ -89,7 +100,9 @@ ceilings:
   identity: 1000
   windows: 5000
   pools: 2000
-  scope: 0
+  # counters: (3 pricing + 40 busiest) x 2 eth_call x 26 CU  ~=  2,236 CU
+  # routers:   one eth_getCode per address above min_recipients, unknown count
+  scope: 25000
   sweep: 25000
   conventions: 0
   cohort: 0

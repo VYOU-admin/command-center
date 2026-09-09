@@ -393,7 +393,11 @@ export interface CounterAsset {
 
 export interface ScopeReport {
   inScope: PoolRow[];
-  rejected: { venue: string; pool: string; counter: string; symbol: string | null }[];
+  rejected: {
+    venue: string; pool: string; counter: string; symbol: string | null;
+    /** False when the counter was outside the read bound; symbol is then unknown. */
+    symbolRead: boolean;
+  }[];
   counters: CounterAsset[];
   /** True when the token has no USD-quoted pool at all. */
   noUsdRoute: boolean;
@@ -426,8 +430,29 @@ export async function scopePools(
     counterPools.set(counter, (counterPools.get(counter) ?? 0) + 1);
   }
 
+  /*
+   * WHICH COUNTERS ARE WORTH READING. docs/ROBINHOOD.md step 4: "Bound this:
+   * read the pricing assets and the busiest counters, not the tail." The rule
+   * was in the document and not in the code, which is a defect in the code.
+   *
+   * Always read the configured pricing and bridge assets -- their metadata
+   * decides real pools and their decimals are load-bearing. Then read the
+   * busiest remaining counters up to the cap, purely so the rejection report
+   * NAMES what it rejected instead of listing addresses. The tail is rejected
+   * on address alone and says so; it is never recorded as though its symbol had
+   * been read and found wanting.
+   */
+  const bridge = new Set(cfg.bridgeAssets.map((a) => a.toLowerCase()));
+  const alwaysRead = new Set([...pricing, ...bridge].filter((a) => counterPools.has(a)));
+  const busiest = [...counterPools.entries()]
+    .filter(([a]) => !alwaysRead.has(a))
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, cfg.scopeMaxCounterReads)
+    .map(([a]) => a);
+  const toRead = new Set([...alwaysRead, ...busiest]);
+
   const meta = new Map<string, { symbol: string | null; decimals: number | null }>();
-  for (const counter of counterPools.keys()) {
+  for (const counter of toRead) {
     // Read symbol BEFORE deciding. Of 48 unidentified counter assets on PONS
     // all 48 resolved, four were tokenised equities, and none was a stablecoin.
     let symbol: string | null = null;
@@ -450,9 +475,13 @@ export async function scopePools(
   for (const c of candidates) {
     const isToken0 = c.currency0 === token;
     const counter = isToken0 ? c.currency1 : c.currency0;
-    const m = meta.get(counter)!;
+    const m = meta.get(counter) ?? { symbol: null, decimals: null };
     if (!pricing.has(counter)) {
-      rejected.push({ venue: c.venue, pool: c.pool, counter, symbol: m.symbol });
+      rejected.push({
+        venue: c.venue, pool: c.pool, counter,
+        // Null symbol here means NOT READ, not "unnamed". The report says which.
+        symbol: m.symbol, symbolRead: toRead.has(counter),
+      });
       continue;
     }
     if (m.decimals === null) {

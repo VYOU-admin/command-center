@@ -113,6 +113,8 @@ export interface IntakeConfig {
   maxPools: number;
   /** Run the v3 flow probe. OFF unless a token's v3 share justifies it. */
   flowProbe: boolean;
+  /** How many counter assets to read symbol()/decimals() for, busiest first. */
+  scopeMaxCounterReads: number;
   /** An implied token price above this fails the USD-total sanity check. */
   impliedPriceCeiling: number;
 
@@ -288,6 +290,14 @@ export async function loadIntakeConfig(path: string): Promise<IntakeConfig> {
      * about 13 pools of 4,856. See step 3.
      */
     flowProbe: raw['flow_probe'] === true,
+    /*
+     * BOUND THE SCOPE READ. Reading every distinct counter is 2 eth_call each,
+     * and AI has 4,481 of them -- 232,000 CU to answer a question the pricing
+     * list already answers for all but a handful. The configured pricing and
+     * bridge assets are ALWAYS read; this caps the additional busiest counters
+     * read purely so the rejection report names what it rejected.
+     */
+    scopeMaxCounterReads: num(raw, 'scope_max_counter_reads', 50),
     impliedPriceCeiling: num(raw, 'implied_price_ceiling', 1_000_000),
     routerMinRecipients: num(obj(raw, 'routers'), 'min_recipients', 50),
     routerMinSwapShare: num(obj(raw, 'routers'), 'min_swap_share', 0.5),
