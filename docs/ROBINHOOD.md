@@ -380,6 +380,38 @@ because its 2,000-block floor could not satisfy a 10,000-log cap. Throw instead.
 maximum after every success made the first sweep thrash; a ratchet that only
 narrowed starved its sparse middle at 47,000 blocks per minute.
 
+**Density is measured over the range just read, and must be computed BEFORE the
+cursor advances past it.** This was wrong for the whole first intake:
+`logs / (end - cursor + 2)` was evaluated after `cursor = end + 1`, so the
+denominator was always **1** and "density" was the raw log count. `wanted =
+6000 / density` then floored to **0** for any request returning more than 6,000
+logs, and the next span became the 25-block minimum.
+
+Measured on PONS transfers, blocks 54,935,280–55,235,279, both denominators over
+the same blocks:
+
+```
+                       requests   blocks covered   smallest span   size refusals
+defective denominator     24         105,270            25              0
+corrected denominator     17         300,000         2,916              0
+```
+
+The defective run oscillated — 100,000 → 25 → 1,000 → 25 → 400 → 40 — and never
+settled; the corrected one converged on 6,000–19,000 blocks and held there,
+which is the target working as designed. Projected over 1,757,870 blocks that is
+**100 requests against 401**, and the 401 is optimistic because the oscillation
+had not converged.
+
+**Zero size refusals in either run. The span collapse was arithmetic, not the
+endpoint.** Do not attribute a collapsing span to result-cap refusals without
+checking the refusal count first — that hypothesis was recorded here and was
+wrong. `npm run sweep-probe` prints span, range, log count, density and next
+span per request, and takes `--legacy` to reproduce the defect for comparison.
+
+**Measured PONS transfer density**, blocks 54,935,280–55,235,279: mean **0.4669
+logs per block**, per-request range 0.31–0.96, 140,078 logs over 300,000 blocks.
+At the 6,000-log target that is a natural span of roughly **13,000 blocks**.
+
 **Commit progress per range, and gap-check on a fresh connection when it
 finishes.** `sum(to_block - from_block + 1)` must equal the span exactly **and**
 a window function over the ranges must find zero gaps. The sum alone is not
