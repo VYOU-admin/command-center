@@ -111,6 +111,8 @@ export interface IntakeConfig {
   sliceBlocks: number;
   /** Stop and report above this many pools rather than reading them all. */
   maxPools: number;
+  /** Run the v3 flow probe. OFF unless a token's v3 share justifies it. */
+  flowProbe: boolean;
   /** An implied token price above this fails the USD-total sanity check. */
   impliedPriceCeiling: number;
 
@@ -277,6 +279,15 @@ export async function loadIntakeConfig(path: string): Promise<IntakeConfig> {
     })(),
     sliceBlocks: num(rpc, 'slice_blocks', 500_000),
     maxPools: num(raw, 'max_pools', 2_000),
+    /*
+     * THE FLOW PROBE IS THE EXCEPTION, NOT THE NORM, so it defaults to off.
+     * Enumeration finds every v4 pool from `Initialize` and every v3 pool from
+     * the configured factory; the probe adds only v3 pools from OTHER
+     * factories, and it costs one `eth_getCode` per address that both sent and
+     * received the token. On AI that is 14,034 addresses -- ~$0.18 -- to find
+     * about 13 pools of 4,856. See step 3.
+     */
+    flowProbe: raw['flow_probe'] === true,
     impliedPriceCeiling: num(raw, 'implied_price_ceiling', 1_000_000),
     routerMinRecipients: num(obj(raw, 'routers'), 'min_recipients', 50),
     routerMinSwapShare: num(obj(raw, 'routers'), 'min_swap_share', 0.5),

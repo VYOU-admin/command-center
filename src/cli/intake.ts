@@ -292,7 +292,11 @@ async function main(): Promise<void> {
           candidates: found.candidates.length,
           v4_from_initialize: found.v4FromInitialize,
           v3_from_factory: found.v3FromFactory,
-          v3_from_flow_probe: found.v3FromFlowProbe,
+          flow_probe_ran: found.flowProbeRan,
+          v3_from_flow_probe: found.flowProbeRan
+            ? found.v3FromFlowProbe
+            : 'NOT RUN -- flow_probe is off for this token; v3 pools from '
+              + 'factories other than the configured one were not looked for',
           transfers_scanned: found.transfersScanned,
           flow_addresses_tested: found.flowAddressesTested,
           flow_not_contracts: found.flowNotContracts,

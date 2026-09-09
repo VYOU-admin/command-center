@@ -35,6 +35,18 @@ rpc:
   # not density -- is what bounds the sweep.
   target_logs_per_request: 6000
 
+# AI has ~4,856 pools and the global default cap is 2,000, which stops the pools
+# phase rather than reading them all. Raised DELIBERATELY and per token -- the
+# cap is a per-token setting with a global default, and it exists so a token
+# that resolves to a very large pool set reports rather than spends.
+max_pools: 6000
+
+# The v3 flow probe is OFF. It sweeps every transfer AI ever emitted and then
+# spends one eth_getCode per address that both sent and received: 14,034 such
+# addresses in the swept window alone, ~389,000 CU / ~$0.18, to find roughly 13
+# v3 pools out of 4,856. AI is 99.7% v4 and Initialize is complete for v4.
+flow_probe: false
+
 routers:
   min_recipients: 50
   min_swap_share: 0.5
@@ -74,9 +86,9 @@ tables:
 # Only the transfer sweep is approved. Every other phase is zero so that running
 # the full intake against this file stops rather than spends.
 ceilings:
-  identity: 0
-  windows: 0
-  pools: 0
+  identity: 1000
+  windows: 5000
+  pools: 2000
   scope: 0
   sweep: 25000
   conventions: 0

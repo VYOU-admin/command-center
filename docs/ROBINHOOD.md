@@ -237,8 +237,34 @@ only v3 pools from *other* factories. For AI that is roughly 13 pools of 4,856,
 so the probe costs ~$0.17 to find 0.3% of the pool set. Decide it per token
 rather than running it by default.
 
-**`max_pools` defaults to 2,000 and AI has ~4,856**, so the phase raises before
-it finishes unless the cap is lifted deliberately. That is the cap working.
+**`max_pools` is PER TOKEN, with a global default of 2,000.** AI has ~4,856, so
+the phase raises before it finishes until the cap is lifted in that token's own
+config — `max_pools: 6000` for AI. It belongs per token because the right answer
+is a property of the token, and a global raise would silently remove the guard
+for every future one. That is the cap working, not failing.
+
+**The flow probe is OFF by default — `flow_probe: false`.** Turn it on per
+token, never globally, and price it first.
+
+> **When the flow probe IS worth running.** Decide before spending, in this
+> order, and none of it costs a probe:
+>
+> 1. **Price it.** One `eth_getCode` per address that both sent and received the
+>    token, at 26 CU. Get that count from transfers already stored:
+>    `select count(*) from (select to_addr intersect select from_addr) t`. AI:
+>    14,034 → ~$0.18. **Never quote it from a per-token constant** — it scales
+>    with address count, not pool count.
+> 2. **Ask what it can add.** Only v3 pools from factories other than the
+>    configured one. `Initialize` is complete for v4 and `PoolCreated` is
+>    authoritative for the configured factory, so if enumeration already shows
+>    v4 dominating, the probe is buying a rounding error. AI is 99.7% v4.
+> 3. **Weigh it by swaps, not by pool count.** Sweep `Swap` on the enumerated v3
+>    pools — cheap when the v3 set is small — and take v3's share of the token's
+>    swaps. A token where v3 carries a material share is one where a missing v3
+>    pool drops real buyers, and that is what the probe is for.
+>
+> Skipping it is recorded in the phase report as **"NOT RUN"**, never as a zero:
+> a zero would say the probe ran and found nothing.
 **Produces:** the candidate pool list.
 **Stops:** yes — the pool set decides what is swept and what is missed.
 

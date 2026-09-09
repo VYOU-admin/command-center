@@ -142,9 +142,11 @@ export interface DiscoveryReport {
   candidates: PoolCandidate[];
   v4FromInitialize: number;
   v3FromFactory: number;
-  v3FromFlowProbe: number;
+  /** Null when the probe did not run. Null is 'not looked', never 'none found'. */
+  v3FromFlowProbe: number | null;
   /** Transfers streamed through the probe. Never held in memory at once. */
   transfersScanned: number;
+  flowProbeRan: boolean;
   flowAddressesTested: number;
   flowNotContracts: number;
   flowReverted: number;
@@ -239,15 +241,45 @@ export async function discoverPools(
   /*
    * v3 -- flow probe, for pools from any other factory.
    *
+   * OFF BY DEFAULT. It sweeps every transfer the token ever emitted and then
+   * spends one `eth_getCode` per address that both sent and received, so its
+   * cost scales with the token's ADDRESS count, not its pool count. Measured on
+   * AI: 14,034 two-way addresses in the window alone, ~389,000 CU, to find
+   * roughly 13 v3 pools out of 4,856. Enumeration above already found every v4
+   * pool and every v3 pool from the configured factory.
+   *
+   * Turn it on for a token where v3 carries a material share of swaps. See
+   * docs/ROBINHOOD.md step 3 for how to decide that before spending.
+   */
+  if (!cfg.flowProbe) {
+    return {
+      candidates: [...found.values()],
+      v4FromInitialize,
+      v3FromFactory,
+      // NOT zero. Zero would say the probe ran and found nothing.
+      v3FromFlowProbe: null,
+      flowProbeRan: false,
+      transfersScanned: 0,
+      flowAddressesTested: 0,
+      flowNotContracts: 0,
+      flowReverted: 0,
+      emptyVenues: v4FromInitialize === 0 ? ['v4'] : [],
+    };
+  }
+
+  /*
    * Take every address that BOTH received and sent the token: a pool does both,
    * but so does a router, so flow alone does not identify one. Each candidate is
    * then tested on-chain.
+   *
+   * STREAMS, never buffers. This reads every transfer the token has emitted --
+   * 5.76M log objects for PONS -- and collecting them into one array to look at
+   * two address fields would exhaust memory long before it produced a pool list.
+   * Only the two address SETS survive each batch.
    */
   const received = new Set<string>();
   const sent = new Set<string>();
   let transfersSeen = 0;
-  // DENSE filter: every transfer of the token. Default span, and only the two
-  // address sets survive each batch.
   await sweepStream(
     { address: cfg.token, topics: [TOPICS.transfer] }, firstBlock, head,
     (logs) => {
@@ -340,6 +372,7 @@ export async function discoverPools(
     v4FromInitialize,
     v3FromFactory,
     v3FromFlowProbe,
+    flowProbeRan: true,
     transfersScanned: transfersSeen,
     flowAddressesTested: twoWay.length,
     flowNotContracts,
