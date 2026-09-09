@@ -205,8 +205,40 @@ configuration mistake, so they raise rather than proceed.
 ### Step 3 — Pool enumeration — **STOP**
 
 **Does:** finds every pool the token has ever had, on both venues.
-**Costs:** ~8 `eth_getLogs` for enumeration, plus one `eth_getCode` per
-flow-probe candidate. ~1,300 CU for a token like AI.
+**Costs:** ~8 `eth_getLogs` for enumeration — and then the flow probe, which
+dominates and was badly under-quoted here once. **The ~1,300 CU figure this
+document used to carry for "a token like AI" is wrong by roughly 300x.**
+Enumeration is cheap because both `Initialize` and `PoolCreated` are sparse
+filters. The flow probe is not: it sweeps *every transfer the token has ever
+emitted* and then spends one `eth_getCode` on every address that both sent and
+received.
+
+Measured for AI, from its swept window rather than estimated:
+
+```
+enumeration, 4 sparse filters                              ~8 calls      480 CU
+flow probe, transfer sweep 18,275,473..58,182,616
+  39.9M blocks at 0.0255 logs/block, span capped 100,000   ~399 calls 23,940 CU
+flow probe, eth_getCode per two-way address
+  14,034 candidates IN THE WINDOW ALONE x 26 CU                       364,884 CU
+                                                                   ------------
+                                                                    ~389,000 CU
+                                                                        ~$0.175
+```
+
+**The `eth_getCode` count is the whole cost, and it scales with the token's
+address count, not its pool count.** Quote it from the two-way address count,
+never from a per-token constant.
+
+**Enumeration alone is often enough, and is ~500 CU.** `Initialize` is complete
+for v4 — the PoolManager emits it for every pool, hooked or not — and
+`PoolCreated` is authoritative for the configured factory. The flow probe adds
+only v3 pools from *other* factories. For AI that is roughly 13 pools of 4,856,
+so the probe costs ~$0.17 to find 0.3% of the pool set. Decide it per token
+rather than running it by default.
+
+**`max_pools` defaults to 2,000 and AI has ~4,856**, so the phase raises before
+it finishes unless the cap is lifted deliberately. That is the cap working.
 **Produces:** the candidate pool list.
 **Stops:** yes — the pool set decides what is swept and what is missed.
 
@@ -932,6 +964,14 @@ figure was 10. A genuine catastrophe would have committed identically.
 
 **Write progressively**, per slice, not accumulated and flushed at the end, so a
 run that dies leaves a truthful partial record rather than nothing.
+
+**Bound a catch-up run to the range, and do not overshoot.** `catch-up` stops
+when the cursor stops advancing, a cycle fails, or the cycle limit is reached —
+so a limit set above what the range needs keeps going into fresh blocks. A
+recovery of 1,757,870 blocks needed 44 cycles of 40,000; `--max-cycles 50` ran
+six more, wrote 220 rows nobody had asked for and moved the cursor 240,000
+blocks past where the operator left it. Nothing was corrupted, and that is not
+the point: derive the cycle count from the range before starting.
 
 **Correcting a run is a scoped delete and reinsert** — `(chain, token, tag)`,
 never wider — with dry-run counts reported first, including the zeros. Neither
