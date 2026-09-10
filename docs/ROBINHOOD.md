@@ -66,6 +66,14 @@ instant with no offset rather than guessing.
 Deriving the bounds back from the rows would silently redefine the period as
 whatever happened to trade, and shrink a quiet window to nothing.
 
+**Each window is scored separately, and the score-quality thresholds are
+properties of the WINDOW, not of the token.** INDEX is the first token to prove
+it: the `low-weight` threshold **derived to 0.625 for INDEX-P1**, from a real gap
+across two distinct partial weights, and **could not be derived for INDEX-P2**,
+which has no partial weights at all and kept the 0.8 default. One token, one
+scoring run per tag, two different thresholds — and reporting a single
+token-level threshold would have been wrong for one of them.
+
 **A wallet that bought in two windows belongs to both cohorts.** It gets **two
 tag rows and one set of rows**: `wallet_transactions` is not window-scoped and
 deliberately has no tag column, because which window a transaction falls in is
@@ -1472,6 +1480,52 @@ came from it.
 - No bonding curve: the first pool `Initialize` is in the same block as the token
   deployment.
 - Scoring: 70% of the weight contributes 0.8% of the median score.
+
+### INDEX — `0x56910D4409F3a0C78C64DD8D0545FF0705389870`
+
+**Loaded 2026-09-10.** "The Index", 18 decimals, supply 1,000,000,000, deployed
+at block **1,670,725** — earlier than any token loaded before, and thirteen
+million blocks before `v4_swaps_all` begins. **First token through this runner
+with two windows.**
+
+```
+INDEX-P1  2026-07-03 00:00 -> 07-14 16:00 ET   blocks 1,693,406..9,800,208    3,316 wallets
+INDEX-P2  2026-08-01 12:00 -> 08-23 12:00 ET  blocks 25,165,577..44,130,852   4,267 wallets
+rows 152,302 for 7,230 wallets    $40,162,847    pools 196 in scope of 317
+```
+
+```
+phase                     measured    estimate
+identity                     816 CU       800
+windows (two windows)      2,240 CU     2,100    exactly 2x one window
+pools                        480 CU       500
+scope (x2 runs)            5,428 CU     4,200
+transfer sweep, full life 38,220 CU    30,000   +27.4%  A FINDING
+v4 copy + gap sweep + v3  54,300 CU    ~48,000
+block_times                    0 CU              carried by the sweeps
+cohort, two windows      362,811 CU     unknown
+prices                         0 CU
+                        -----------
+                          ~464,000 CU   ~$0.21
+```
+
+- **The density probe missed the token's early life.** I probed 8,963,150
+  onward, but INDEX starts at 1,670,725; the unsampled 7.3M blocks are denser
+  than the probe suggested and the sweep came in **27.4% over**. **Probe from the
+  deployment block, not from where another token started.**
+- **My P1 span estimate was ~10x low** for the same reason: I assumed 07-03 sat
+  near PONS's origin. It is block 1,693,406, so P1 is 8,106,802 blocks, not
+  ~840,000. Resolve the window before costing anything that depends on it.
+- **The bucket anchor reused PONS's grid and the reuse is measurable**: of 5,234
+  native buckets derived, **4,936 were already present and only 298 were new**.
+  INDEX read the chain's existing ETH/USD series instead of forking it.
+- **Sign conventions unanimous across both windows and outside them**: v3
+  22,838/0 and 62,550/0; v4 142/0, 24,937/0, 71,522/0.
+- **19 routers identified of 40 probed**, against 3 in the configured list. Seven
+  configured entries matched nothing for P1 and three for P2, all reported.
+- **762 delegated EIP-7702 accounts kept** (192 in P1, 570 in P2).
+- Price fences caught 9 USD ticks and 29 native ticks of 557,188; the derived
+  native fence caught **0**, the signal the derivation is sound.
 
 ### AI — `0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18`
 
