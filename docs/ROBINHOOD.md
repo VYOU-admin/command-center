@@ -766,7 +766,17 @@ router into a wallet.
 > The ones at 0.0% move comparable volume to comparable numbers of wallets and
 > are distributors. Real routers run 53–98.8%.
 >
-> **Identify them by behaviour, not from a list.** For PONS, behaviour finds
+> **ROUTER DETECTION MUST RUN AFTER THE SWEEP, NOT IN THE SCOPE PHASE.** It reads
+`token_transfer_logs` and `token_swap_logs`, and the scope phase runs before
+either exists — so on a token loaded in phase order it probes **0 candidates and
+reports no routers**, which is indistinguishable from a token that has none.
+INDEX did exactly that: 0 probed inside scope, and **40 probed / 19 identified**
+when scope was re-run after the sweep. AI only ever worked because its transfers
+had been swept by hand first. Re-run scope after the sweep, or move detection to
+the cohort step; until that is done, check the probed count is non-zero before
+trusting an empty router set.
+
+**Identify them by behaviour, not from a list.** For PONS, behaviour finds
 > **30 routers where the configured list holds 3**, of which only 2 are routers
 > at all. A router the list misses gets the trade attributed to it instead of to
 > the buyer.

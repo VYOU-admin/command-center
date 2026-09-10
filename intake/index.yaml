@@ -98,7 +98,9 @@ ceilings:
   # CU. Doubled for headroom.
   sweep: 60000
   conventions: 0
-  cohort: 0         # raised after the cohort is costed from real candidates
+  # Two windows, so every candidate is code-checked once PER WINDOW. Bounded
+  # generously and reported against actual.
+  cohort: 500000
   tags: 0
   timestamps: 20000
   prices: 0
