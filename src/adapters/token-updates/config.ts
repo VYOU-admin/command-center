@@ -53,6 +53,8 @@ export interface UpdateConfig {
   nativeAssets: string[];
   /** Second-hop assets. The hourly job does not derive these; it reads them. */
   bridgeAssets: string[];
+  /** Does this monitor OWN the chain's ETH/USD series? Exactly one may. */
+  derivesNativeUsd: boolean;
 
   bucketBlocks: number;
   /**
@@ -146,6 +148,16 @@ export function parseConfig(
     pricingAssets: requireStringArray(pricing, 'assets', monitorId),
     usdAsset: requireString(pricing, 'usd_asset', monitorId),
     nativeAssets: requireStringArray(pricing, 'native_assets', monitorId),
+    /*
+     * ETH/USD IS A PROPERTY OF THE CHAIN, NOT OF A TOKEN, so exactly one monitor
+     * per chain derives it and the rest read it. Before this flag, PONS and
+     * INDEX both derived it forward every hour into the same
+     * native_usd_prices rows; the insert is on-conflict-do-nothing, so whichever
+     * reached a bucket first won and the other's derivation was discarded with
+     * nothing raised. 4,644 buckets had swaps from both, and two independent
+     * derivations ~14 minutes apart differ by a median 0.52% and up to 11.5%.
+     */
+    derivesNativeUsd: pricing['derives_native_usd'] === true,
     bridgeAssets: Array.isArray(pricing['bridge_assets'])
       ? (pricing['bridge_assets'] as unknown[]).map((x) => String(x).trim())
       : [],

@@ -507,7 +507,15 @@ const adapter: SourceAdapter<WalletRow> = {
      * that was made, and this project does not delete history.
      */
     const priceWrites = p.prices
-      ? await persistPrices(client, p.cfg, p.prices)
+      ? await persistPrices(client, p.cfg, {
+        ...p.prices,
+        /*
+         * ONLY THE OWNER WRITES ETH/USD. A non-owner still DERIVES it -- it
+         * needs the series to value its own rows this slice -- but persists
+         * nothing, so two monitors can no longer race for the same bucket.
+         */
+        nativeUsd: p.cfg.derivesNativeUsd ? p.prices.nativeUsd : new Map(),
+      })
       : { tokenUsdInserted: 0, tokenUsdAlreadyPresent: 0,
           nativeUsdInserted: 0, nativeUsdAlreadyPresent: 0 };
 

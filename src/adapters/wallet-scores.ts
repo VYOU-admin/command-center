@@ -26,15 +26,30 @@ const pending = new Map<string, ScoreResult[]>();
 const adapter: SourceAdapter<ScoreResult> = {
   type: 'wallet-scores',
 
-  /* Nothing to configure: it scores every token and window it finds. A typo in
-   * options would otherwise pass silently, so unknown keys are rejected. */
+  /*
+   * CHAIN IS REQUIRED, NOT DEFAULTED.
+   *
+   * The first version scored every token that had a cohort and a window row,
+   * with `coalesce(tk.chain, 'robinhood')` -- so it scored MOS and USELESS,
+   * which are SOLANA tokens, from a Robinhood monitor. They raised for want of
+   * pump points and that was recorded as "correct". It was not: line 7 of
+   * ROBINHOOD.md says Solana is a different chain and nothing here applies to
+   * it. A scoping defect had been written down as correct behaviour.
+   *
+   * The chain is now explicit, so a Solana scoring monitor is a second config
+   * rather than an accident of a default.
+   */
   validate(options, monitorId) {
-    const keys = Object.keys(options ?? {});
-    if (keys.length > 0) {
+    const chain = options?.['chain'];
+    if (typeof chain !== 'string' || chain.trim() === '') {
       throw new Error(
-        `${monitorId}: wallet-scores takes no options, got ${keys.join(', ')}. `
-        + 'It scores every token and window that has both a cohort and a window row.',
+        `${monitorId}: wallet-scores requires a "chain" option. Scoring every token `
+        + 'that happens to have a cohort crosses chains silently.',
       );
+    }
+    const extra = Object.keys(options ?? {}).filter((k) => k !== 'chain');
+    if (extra.length > 0) {
+      throw new Error(`${monitorId}: unexpected option(s) ${extra.join(', ')}`);
     }
   },
 
@@ -49,6 +64,7 @@ const adapter: SourceAdapter<ScoreResult> = {
      * bounds -- and a window row with no tagged wallet is a cohort that matched
      * nothing. Both are reported rather than skipped silently.
      */
+    const chain = String(ctx.options['chain']);
     const client = await ctx.db.connect();
     let targets: { chain: string; token: string; tag: string; wallets: number }[];
     let orphanTags: string[];
@@ -57,15 +73,16 @@ const adapter: SourceAdapter<ScoreResult> = {
       const rows = await client.query<{
         chain: string; token: string; tag: string; wallets: string; has_window: boolean;
       }>(
-        `select coalesce(tk.chain, 'robinhood') as chain,
-                g.mint as token, g.tag,
+        `select tk.chain as chain, g.mint as token, g.tag,
                 count(*)::text as wallets,
                 (w.tag is not null) as has_window
            from wallet_tags g
+           join tokens tk on tk.mint = g.mint
            left join token_windows w on w.mint = g.mint and w.tag = g.tag
-           left join tokens tk on tk.mint = g.mint
+          where tk.chain = $1
           group by 1, 2, 3, 5
           order by 2, 3`,
+        [chain],
       );
       targets = rows.rows.filter((r) => r.has_window).map((r) => ({
         chain: r.chain, token: r.token, tag: r.tag, wallets: Number(r.wallets),
@@ -73,8 +90,11 @@ const adapter: SourceAdapter<ScoreResult> = {
       orphanTags = rows.rows.filter((r) => !r.has_window).map((r) => `${r.token}/${r.tag}`);
       const wins = await client.query<{ mint: string; tag: string }>(
         `select w.mint, w.tag from token_windows w
-          where not exists (select 1 from wallet_tags g
+           join tokens tk on tk.mint = w.mint
+          where tk.chain = $1
+            and not exists (select 1 from wallet_tags g
                              where g.mint = w.mint and g.tag = w.tag)`,
+        [chain],
       );
       orphanWindows = wins.rows.map((r) => `${r.mint}/${r.tag}`);
     } finally {
@@ -82,6 +102,7 @@ const adapter: SourceAdapter<ScoreResult> = {
     }
 
     ctx.log.info('scoring targets', {
+      chain,
       windows: targets.length,
       tokens: new Set(targets.map((t) => t.token)).size,
       tags_without_a_window_row: orphanTags.length,
@@ -138,12 +159,24 @@ const adapter: SourceAdapter<ScoreResult> = {
       failures,
     });
     if (failures.length > 0) {
+      /*
+       * AND THE RUN FAILS. Queueing an alert and returning normally left
+       * last_status = "success" while windows went unscored -- the comment above
+       * said the run fails and the code did not, which is the same
+       * document-says-one-thing shape this file exists to avoid. The successful
+       * windows are already written; throwing after them loses nothing.
+       */
       ctx.queueAlert({
         title: `${ctx.monitorName}: ${failures.length} window(s) could not be scored`,
         description: failures.map((f) => `${f.token} / ${f.tag}: ${f.error}`).join('\n\n')
           + `\n\n${out.length} window(s) scored successfully and were written.`,
         level: 'warning',
       }, 'system');
+      throw new Error(
+        `${failures.length} of ${targets.length} window(s) could not be scored: `
+        + failures.map((f) => `${f.token}/${f.tag}`).join(', ')
+        + `. ${out.length} were scored and written.`,
+      );
     }
     pending.set(ctx.monitorId, out);
     return out;

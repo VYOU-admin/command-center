@@ -26,5 +26,9 @@ alerts:
   channel: system
   discord_on_consecutive_failures: 3
 
-# No options. It discovers its own work.
-options: {}
+options:
+  # REQUIRED AND EXPLICIT. Without it this scored MOS and USELESS -- Solana
+  # tokens -- from a Robinhood monitor, and their raising for want of pump points
+  # was written down as correct behaviour. It was a scoping defect. A Solana
+  # scoring monitor is a second config, not a default.
+  chain: robinhood

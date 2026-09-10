@@ -109,6 +109,11 @@ options:
 
     # 10,000 blocks is about 17 minutes here. The cursor always lands on one of
     # these boundaries so no row is priced from a partially-seen bucket.
+    # READS the chain's ETH/USD series, never writes it. token-updates (PONS)
+    # owns it. This monitor still derives it in memory to value its own rows for
+    # the slice; it just persists nothing, so no two monitors race for a bucket.
+    derives_native_usd: false
+
     bucket_blocks: 10000
     # BUCKETS ARE NOT ANCHORED AT ZERO. The intake anchored them at this token's
     # first swap block, so all 4,528 stored buckets satisfy
