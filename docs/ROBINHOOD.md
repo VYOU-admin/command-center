@@ -66,8 +66,11 @@ instant with no offset rather than guessing.
 Deriving the bounds back from the rows would silently redefine the period as
 whatever happened to trade, and shrink a quiet window to nothing.
 
-**A wallet that bought in two windows belongs to both cohorts.** It gets rows
-under both tags and two tag rows. That is correct, not a duplicate.
+**A wallet that bought in two windows belongs to both cohorts.** It gets **two
+tag rows and one set of rows**: `wallet_transactions` is not window-scoped and
+deliberately has no tag column, because which window a transaction falls in is
+derivable from its timestamp and a stored copy of that answer can go stale. That
+is correct, not a duplicate.
 
 ---
 
@@ -939,7 +942,17 @@ had no USDG trade and 22 no trade at all. Those 62 are **not interpolated, not
 carried forward**, and swaps landing in them store a null USD.
 
 **Buckets are anchored at a fixed block tied to the token — its first swap
-block, or its DEPLOYMENT block where the first swap cannot be read.** The
+block, its DEPLOYMENT block where the first swap cannot be read, or AN EXISTING
+GRID where the token shares a series with tokens already loaded.**
+
+`native_usd_prices` is keyed `(chain, block_number)` with **no token column**: it
+is the chain's ETH/USD series and every token writes into it. PONS anchored it at
+8,963,150 (residue 3150) and AI at 9,721,433 (residue 1433), so it already holds
+two interleaved samplings of one quantity. **INDEX was anchored at 8,963,150 to
+reuse PONS's grid rather than add a third** — it is ETH-quoted and leans on that
+series hardest, and PONS's 4,943 buckets already span 9,143,150–58,993,150, the
+whole of INDEX's life. It reads them and adds none. Prefer an existing grid over
+a new one whenever the token shares a series. The
 purpose is a fixed grid that a later run reproduces, so the anchor must be a
 figure nobody has to re-derive. AI's first swap sits at roughly 9,721,980, more
 than five million blocks before `v4_swaps_all` begins, so reading it would cost

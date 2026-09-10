@@ -126,13 +126,29 @@ async function main(): Promise<void> {
     );
     await c.query('analyze _legs');
 
+    await c.query('create temp table if not exists _wins (lo bigint, hi bigint)');
+    await c.query('truncate _wins');
+    for (const w of windows) {
+      await c.query('insert into _wins values ($1,$2)', [w.startBlock, w.endBlock]);
+    }
+    await c.query('analyze _wins');
+
     const conv = await c.query<{
       venue: string; region: string; agree: string; disagree: string; ambiguous: string;
     }>(
       `with spt as (select tx_hash, count(*) n from _tok group by 1)
        select k.venue,
-              case when k.block_number between $1 and $2 then 'in-window'
-                   when k.block_number < $1 then 'before' else 'after' end as region,
+              /*
+               * Regions are labelled against EVERY window, not just the first.
+               * With one window "before/in-window/after" is exact; with two it
+               * was labelling P2's swaps "after" because it compared against
+               * P1's bounds alone. Step 6 wants the check measured inside and
+               * outside the windows, so a swap inside ANY window is in-window.
+               */
+              case when exists (select 1 from _wins w
+                                 where k.block_number between w.lo and w.hi) then 'in-window'
+                   when k.block_number < (select min(lo) from _wins) then 'before'
+                   else 'outside-a-window' end as region,
               count(*) filter (where spt.n = 1 and l.touching = 1 and l.out_legs = 1 and (
                 (k.venue='v3' and k.tok_amt < 0) or (k.venue='v4' and k.tok_amt > 0)))::text as agree,
               count(*) filter (where spt.n = 1 and l.touching = 1 and l.out_legs = 1 and (
@@ -143,7 +159,7 @@ async function main(): Promise<void> {
          join _legs l on l.tx_hash = k.tx_hash
         where l.out_legs >= 1
         group by 1,2 order by 1,2`,
-      [windows[0]!.startBlock, windows[0]!.endBlock],
+      [],
     );
     log.info('sign conventions, measured on STORED data', {
       expectation: 'v3 = POOL perspective (pool sent the token => negative); '

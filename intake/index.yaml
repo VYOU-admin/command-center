@@ -1,0 +1,101 @@
+# INDEX — first token loaded through this runner with MORE THAN ONE WINDOW.
+#
+# The multi-window path exists in data (USELESS has three tags, MOS four) but
+# every one of those was written by the scratchpad scripts that were lost. Each
+# window gets its own tag, its own cohort, its own token_windows row and its own
+# scoring run; `wallet_transactions` is NOT window-scoped and deliberately has no
+# tag column, so a wallet in both cohorts has two tag rows and one set of rows.
+
+chain: robinhood
+ticker: INDEX
+token: "0x56910D4409F3a0C78C64DD8D0545FF0705389870"
+# The charted pair, recorded and never used as a filter.
+charted_pair: "0x00dd2df2f17d431cf3a0938f06c9cf9abc5e9643b6cc466ca3f71f3af246edf3"
+
+# Eastern is -04:00 in July and August. A bare local time is a different moment
+# depending on who reads it.
+#
+# P1 STARTS BEFORE DEPLOYMENT, deliberately: the window is what was
+# commissioned, not what was observed, and no trade can precede the token's own
+# creation. Deriving the bound back from the first trade would silently redefine
+# the period as whatever happened to trade.
+windows:
+  - label: INDEX-P1
+    start: "2026-07-03T00:00:00-04:00"
+    end:   "2026-07-14T16:00:00-04:00"
+  - label: INDEX-P2
+    start: "2026-08-01T12:00:00-04:00"
+    end:   "2026-08-23T12:00:00-04:00"
+
+rpc:
+  url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+  key_var: ALCHEMY_API_KEY
+  request_timeout_ms: 120000
+  max_log_span_blocks: 100000
+  sparse_log_span_blocks: 40000000
+  min_log_span_blocks: 25
+  target_logs_per_request: 6000
+
+max_pools: 6000
+flow_probe: false
+scope_max_counter_reads: 40
+
+routers:
+  min_recipients: 50
+  min_swap_share: 0.5
+
+venues:
+  v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+  v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+pricing:
+  assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+    - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+    - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+  usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+  native_assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+    - "0x0000000000000000000000000000000000000000"
+  # INDEX is ETH-quoted and needs no bridge.
+
+  bucket_blocks: 10000
+  # ANCHORED ON PONS'S GRID, NOT INDEX'S OWN FIRST SWAP.
+  #
+  # native_usd_prices is keyed (chain, block_number) with NO token column -- it
+  # is the chain's ETH/USD series, shared by every token. PONS anchored it at
+  # 8,963,150 (residue 3150) and AI at 9,721,433 (residue 1433), so it already
+  # holds two interleaved samplings of one quantity. A third would make it
+  # three. INDEX is ETH-quoted, so it leans on that series harder than either.
+  #
+  # Reusing PONS's anchor means INDEX reads the 4,943 ETH/USD buckets already
+  # derived, spanning 9,143,150-58,993,150 -- its whole life -- and adds none.
+  # Approved deliberately as a departure from anchoring at the token's first
+  # swap. Changing it later invalidates every stored INDEX bucket.
+  bucket_origin: 8963150
+  tick_fence_multiple: 100
+  native_fence_multiple: 10
+
+floors:
+  token_raw_units: 1
+  paid_raw_units: 1
+  token_amount: 0.001
+  usd: 0.01
+
+tables:
+  token_usd: index_usd_prices
+  native_usd: native_usd_prices
+
+ceilings:
+  identity: 1500
+  windows: 8000
+  pools: 3000
+  scope: 25000
+  sweep: 0          # raised once the density probe has measured it
+  conventions: 0
+  cohort: 0         # raised after the cohort is costed from real candidates
+  tags: 0
+  timestamps: 20000
+  prices: 0
+  dryrun: 0
+  write: 0
