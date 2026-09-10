@@ -1461,6 +1461,22 @@ has a unique key over the event and the insert is `on conflict do nothing`, so
 re-running from an earlier cursor inserts only what is missing. Cost is one
 re-read of the range, ~14,640 CU / **$0.007**, plus nothing for payment.
 
+**THE HOURLY JOB WRITES TRADES BUT NOT TRANSFERS.** The intake calls
+`buildTransferRows`; the adapter calls `buildRows` alone. So a token's
+`transfer_in`/`transfer_out` coverage stops dead where the intake stopped, while
+buys and sells keep arriving — and `inflated-pnl`, which exists to flag a
+position the transfers would explain, drifts further from the truth every hour.
+AI's backlog held **13,893 trade rows and zero transfers**; rebuilding the same
+range produced **12,608 transfers** the job had never written. Not fixed: the
+adapter needs the transfer pass, and until it has one every token's transfer
+coverage has an end date.
+
+**COPYING SWAPS COSTS TIMESTAMPS LATER.** `v4_swaps_all` carries no
+`blockTimestamp`, so a copied swap in a block with no swept transfer has no time
+and the row writer refuses it. AI needed **7,945 blocks filled at 158,900 CU
+($0.07)** before its reinsert would run — more than the swap copy saved. Copying
+is still right; just carry the timestamp cost in the estimate.
+
 **The hourly job and the intake share ONE buy rule, and a change to one is a
 change to both.** The hourly job is not a simplified version of the intake — it
 runs the same `tradeLegs`, so whatever decides who bought during a load also
