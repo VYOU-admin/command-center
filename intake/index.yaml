@@ -91,7 +91,12 @@ ceilings:
   windows: 8000
   pools: 3000
   scope: 25000
-  sweep: 0          # raised once the density probe has measured it
+  # MEASURED: 0.025 logs/block mean across ten samples spanning the token's life
+  # (min 0.0052, max 0.0479, spread 9.2x, zero refusals). At the 6,000-log target
+  # the natural span is ~240,000 blocks, so max_log_span_blocks at 100,000 bounds
+  # the sweep, not density: 49,936,851 blocks / 100,000 = ~500 requests, 30,000
+  # CU. Doubled for headroom.
+  sweep: 60000
   conventions: 0
   cohort: 0         # raised after the cohort is costed from real candidates
   tags: 0
