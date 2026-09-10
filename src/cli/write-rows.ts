@@ -36,6 +36,21 @@ async function main(): Promise<void> {
    * then review the plan, then write.
    */
   const tagsOnly = args.includes('--tags-only');
+  /*
+   * AN EXPLICIT RANGE, so a correction can be scoped to the blocks that need it
+   * rather than the token's whole life. --reinsert DELETES the range before
+   * rewriting it, and rewriting 45,794 rows to repair 5,398 is a destructive
+   * operation on rows nobody asked to change.
+   *
+   * The range must not exceed the blocks actually covered by stored swaps AND
+   * transfers, or the delete removes rows the rewrite cannot reproduce.
+   */
+  const num = (f: string): number | undefined => {
+    const i = args.indexOf(f);
+    return i >= 0 ? Number.parseInt(args[i + 1] ?? '', 10) : undefined;
+  };
+  const fromArg = num('--from');
+  const toArg = num('--to');
   const wi = args.indexOf('--window');
   const only = wi >= 0 ? args[wi + 1] : undefined;
 
@@ -102,11 +117,17 @@ async function main(): Promise<void> {
     const cohortSet = new Set(cohortRows.rows.map((r) => r.wallet.toLowerCase()));
     log.info('cohort as stored in wallet_tags', { wallets: cohortSet.size });
 
-    const first = Math.min(...windows.map((w) => w.startBlock!));
+    const first = fromArg ?? Math.min(...windows.map((w) => w.startBlock!));
     const last = await c.query<{ hi: string }>(
       `select max(block_number)::text hi from token_swap_logs where chain=$1 and token=$2`,
       [cfg.chain, cfg.token]);
-    const head = Number(last.rows[0]!.hi);
+    const head = toArg ?? Number(last.rows[0]!.hi);
+    if (toArg !== undefined && toArg > Number(last.rows[0]!.hi)) {
+      throw new Error(
+        `--to ${toArg} is beyond the last stored swap ${last.rows[0]!.hi}. The delete `
+        + 'would remove rows the rewrite cannot reproduce.',
+      );
+    }
     const bridgeUsd = await loadBridgeUsd(c, cfg);
     const configured = (await loadExclusions(INFRA, cfg.chain)).map((e) => e.address);
     const eff = await effectiveExclusions(c, cfg.chain, cfg.token, configured);
