@@ -1071,6 +1071,26 @@ stored PONS bucket satisfies `block % 10000 == 3150` because the anchor is
 is 54933150 — matching nothing, pricing every row null, and writing a second
 series interleaved with the first.
 
+**ETH/USD IS A PROPERTY OF THE CHAIN, SO EXACTLY ONE MONITOR PER CHAIN DERIVES
+IT.** `native_usd_prices` is keyed `(chain, block_number)` with no token column.
+PONS and INDEX both anchored at 8,963,150 and both derived it forward every
+hour into the same rows; the insert is `on conflict do nothing`, so whichever
+reached a bucket first stored its derivation and the other's was discarded with
+nothing raised. **4,644 buckets had swaps from both tokens**, and two
+independent derivations ~14 minutes apart differ by a **median 0.52%, mean
+0.79%, maximum 11.5%** — small enough that no figure is badly wrong, large
+enough that the stored value there was an accident of scheduling.
+
+`pricing.derives_native_usd` now names the owner: **`token-updates` (PONS) owns
+this chain's series**, because it is the deepest and longest-running token here.
+Every other monitor still *derives* the series in memory — it needs it to value
+its own rows for the slice — and **persists nothing**.
+
+**The buckets already written by the race are left alone.** Each is a real
+derivation from real trades; only which token's trades produced it is arbitrary.
+Rewriting them would replace reviewed history to gain at most half a percent,
+and the rule below forbids it. Going forward only the owner writes.
+
 **Never rewrite a bucket that is already stored.** A stored bucket was computed
 by a run that saw the whole bucket; recomputing gains nothing and silently
 replaces reviewed history. Three were rewritten before this was caught.
@@ -1858,18 +1878,6 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database
   fails at the first read. Its shape is recorded in step 5.
-- **Two tokens on the same grid contend for the same `native_usd_prices`
-  buckets, and the first writer wins.** PONS and INDEX both anchor at 8,963,150
-  and both derive ETH/USD forward every hour into the same rows. `persistPrices`
-  is `on conflict do nothing`, so whichever monitor reaches a bucket first
-  stores its derivation and the other's is discarded with nothing raised.
-  **Measured: 4,644 buckets have swaps from both tokens**, so the stored value
-  there is an accident of scheduling. Measured divergence between two
-  independent derivations of ETH/USD ~14 minutes apart is **mean 0.79%, median
-  0.52%, max 11.5%, mean $16.56** — small enough that no figure is badly wrong
-  and large enough that the same bucket has two defensible answers. Not fixed:
-  the fix is a chain-level derivation owned by one job rather than a race
-  between token monitors.
 - **One bridge cannot serve two tokens with different bucket anchors.**
   `deriveBridgeUsd` runs on the grid of the token being priced, and
   `bridge_usd_prices` is keyed `(chain, bridge, bucket_block)` with no room for a
