@@ -1177,6 +1177,34 @@ wallet rests on 17.5% of it, its 22 buys all unpriced, ranked on hold time alone
 **A metric whose range is degenerate across the cohort is dropped for everyone
 and reported**, rather than dividing by a zero range.
 
+**SCORING IS RECURRING, AND IT IS ITS OWN MONITOR.** Every input moves with
+every new row — PnL, hold time, buy count, total USD in — so a score computed
+once at intake is stale the moment the next row lands. Every token was scored
+exactly once, by hand, while rows arrived hourly: **PONS's scores were three
+days old, AI's a day, and rescoring moved 12,385 of 13,095 PONS wallets and
+3,496 of 3,508 AI wallets.**
+
+It is a separate monitor rather than part of the hourly job because:
+
+- the hourly job is per TOKEN and cursor-driven; scoring is per (token, window)
+  and has no cursor. A token-scoped job leaves a token with no hourly monitor
+  unscored — which is how AI went a month without one;
+- scoring must cover **every** window, and a token-scoped job cannot see the
+  others;
+- it reads the database only, so coupling it to a job that spends compute units
+  means a ceiling or a rate limit stops scoring too, and a scoring bug fails row
+  ingestion.
+
+**One unscoreable window must not block the rest, and must not be swallowed.**
+MOS and USELESS carry cohorts and window rows from the first intake but no pump
+points, so they raise — correctly, since metrics 5 and 6 are defined against
+pump points. Each window is scored independently, every failure is recorded with
+its reason and alerted, and **the run still fails if any did.**
+
+**There is ONE implementation of a score.** It lived inside the CLI's `main()`,
+which is why the only way to score was to run it by hand. It now lives in
+`src/scoring/run.ts`; the CLI and the monitor both call it.
+
 **Two score-quality flags, derived on every run and stored as an array:**
 
 - **`low-weight`** — the score rests on less than 0.8 of the weight. **Re-derive
@@ -1703,6 +1731,18 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database
   fails at the first read. Its shape is recorded in step 5.
+- **Two tokens on the same grid contend for the same `native_usd_prices`
+  buckets, and the first writer wins.** PONS and INDEX both anchor at 8,963,150
+  and both derive ETH/USD forward every hour into the same rows. `persistPrices`
+  is `on conflict do nothing`, so whichever monitor reaches a bucket first
+  stores its derivation and the other's is discarded with nothing raised.
+  **Measured: 4,644 buckets have swaps from both tokens**, so the stored value
+  there is an accident of scheduling. Measured divergence between two
+  independent derivations of ETH/USD ~14 minutes apart is **mean 0.79%, median
+  0.52%, max 11.5%, mean $16.56** — small enough that no figure is badly wrong
+  and large enough that the same bucket has two defensible answers. Not fixed:
+  the fix is a chain-level derivation owned by one job rather than a race
+  between token monitors.
 - **One bridge cannot serve two tokens with different bucket anchors.**
   `deriveBridgeUsd` runs on the grid of the token being priced, and
   `bridge_usd_prices` is keyed `(chain, bridge, bucket_block)` with no room for a
