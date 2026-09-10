@@ -56,7 +56,9 @@ import {
   persistPrices,
   type PriceSeries,
 } from './token-updates/prices.js';
-import { buildRows, type RowStats, type WalletRow } from './token-updates/rows.js';
+import {
+  buildRows, buildTransferRows, tradeLegs, type RowStats, type WalletRow,
+} from './token-updates/rows.js';
 import { loadExclusions } from './token-updates/exclusions.js';
 import { loadBridgeUsd, persistBridgeUsd } from '../intake/write.js';
 import type { PoolClient } from '../store/db.js';
@@ -77,6 +79,7 @@ interface Pending {
   callCounts: Record<string, number>;
   swapCounts: { v3: number; v4: number };
   transferCount: number;
+  transferRowsBuilt: number;
   poolsRejected: number;
   idle: boolean;
 }
@@ -229,7 +232,7 @@ const adapter: SourceAdapter<WalletRow> = {
       pending.set(ctx.monitorId, {
         cfg, from, to: cursor, head, newPools: [], prices: null, priceError: null,
         stats: emptyStats(), cuSpent: rpc.cuSpent, callCounts: rpc.callCounts(),
-        swapCounts: { v3: 0, v4: 0 }, transferCount: 0,
+        swapCounts: { v3: 0, v4: 0 }, transferCount: 0, transferRowsBuilt: 0,
         poolsRejected: 0, idle: true,
       });
       return [];
@@ -446,6 +449,26 @@ const adapter: SourceAdapter<WalletRow> = {
       }
     }
     const resolver = counterUsdResolver(cfg, pricingMap, bridgeUsd);
+
+    /*
+     * TRANSFERS TOO, NOT JUST TRADES.
+     *
+     * The intake writes `transfer_in`/`transfer_out` rows for movements that are
+     * not trades; this job wrote only buys and sells, so every token's transfer
+     * coverage stopped dead at whatever block its intake reached while trades
+     * kept arriving hourly. AI's backlog held 13,893 trade rows and ZERO
+     * transfers; rebuilding the same range produced 12,608.
+     *
+     * That is not cosmetic. `inflated-pnl` flags a wallet whose sales exceed its
+     * purchases, and the acquisition that explains it is usually a transfer --
+     * so the flag drifted further from the truth every hour the job ran. See
+     * step 11 and step 13.
+     */
+    const { legs } = tradeLegs(swaps, transfers, cfg, resolver, exclusions, knownPools);
+    const transferRows = buildTransferRows(
+      transfers, legs, cfg, tokenDecimals, exclusions, knownPools, cohort,
+    );
+
     const { rows, stats } = buildRows(
       swaps,
       transfers,
@@ -456,6 +479,8 @@ const adapter: SourceAdapter<WalletRow> = {
       knownPools,
       cohort,
     );
+    /* Trades and transfers are one record set; the writer must see both. */
+    const allRows = rows.concat(transferRows.rows);
 
     ctx.log.info('slice read', {
       blocks: `${from}..${to}`,
@@ -465,7 +490,11 @@ const adapter: SourceAdapter<WalletRow> = {
       swaps_v4: v4Count,
       transfers: transfers.length,
       bridges: bridgeReport,
-      rows_built: rows.length,
+      rows_built: allRows.length,
+      trade_rows: rows.length,
+      transfer_rows: transferRows.rows.length,
+      transfers_skipped_as_trades: transferRows.skippedBecauseTraded,
+      transfers_below_floor: transferRows.skippedBelowFloor,
       price_buckets_partial_skipped: prices?.stats.bucketsPartial ?? 0,
       price_buckets_reused_from_store: storedBucketsUsed,
       cu_spent: rpc.cuSpent,
@@ -483,9 +512,10 @@ const adapter: SourceAdapter<WalletRow> = {
       swapCounts: { v3: v3Count, v4: v4Count },
       transferCount: transfers.length,
       poolsRejected: scan.rejected.length,
+      transferRowsBuilt: transferRows.rows.length,
       idle: false,
     });
-    return rows;
+    return allRows;
   },
 
   /**

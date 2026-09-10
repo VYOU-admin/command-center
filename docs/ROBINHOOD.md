@@ -1461,15 +1461,22 @@ has a unique key over the event and the insert is `on conflict do nothing`, so
 re-running from an earlier cursor inserts only what is missing. Cost is one
 re-read of the range, ~14,640 CU / **$0.007**, plus nothing for payment.
 
-**THE HOURLY JOB WRITES TRADES BUT NOT TRANSFERS.** The intake calls
-`buildTransferRows`; the adapter calls `buildRows` alone. So a token's
-`transfer_in`/`transfer_out` coverage stops dead where the intake stopped, while
-buys and sells keep arriving — and `inflated-pnl`, which exists to flag a
-position the transfers would explain, drifts further from the truth every hour.
-AI's backlog held **13,893 trade rows and zero transfers**; rebuilding the same
-range produced **12,608 transfers** the job had never written. Not fixed: the
-adapter needs the transfer pass, and until it has one every token's transfer
-coverage has an end date.
+**THE HOURLY JOB WRITES TRADES AND TRANSFERS. It used to write only trades.**
+The intake calls `buildTransferRows`; the adapter called `buildRows` alone, so a
+token's `transfer_in`/`transfer_out` coverage stopped dead where its intake
+stopped while buys and sells kept arriving. AI's backlog held **13,893 trade rows
+and zero transfers**; rebuilding the same range produced **12,608 transfers** the
+job had never written.
+
+That was never cosmetic. `inflated-pnl` flags a wallet whose sales exceed its
+purchases, and the acquisition that explains it is usually a transfer — so **the
+flag drifted further from the truth every hour the job ran**, on every token.
+The adapter now runs `tradeLegs` once, hands the legs to `buildTransferRows`, and
+returns both row kinds as one record set.
+
+**Rows already written before this fix are still missing their transfers.** The
+job only advances forward; closing the gap for a token means a scoped reinsert
+over the blocks its hourly job covered, exactly as AI's repair did.
 
 **COPYING SWAPS COSTS TIMESTAMPS LATER.** `v4_swaps_all` carries no
 `blockTimestamp`, so a copied swap in a block with no swept transfer has no time
