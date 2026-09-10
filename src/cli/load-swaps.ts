@@ -145,10 +145,33 @@ async function main(): Promise<void> {
         blocks: gaps.reduce((n, [a, b]) => n + (b - a + 1), 0),
         pools_in_topic_array: v4Pools.length,
       });
+      /*
+       * THE POOL-ID TOPIC ARRAY IS CHUNKED. ROBINHOOD.md step 5 records that a
+       * 540-entry array is accepted; AI has 5,024 v4 pools and passing them all
+       * in one filter HUNG -- 57 minutes with no range recorded and no error,
+       * which is the shape the wall-clock rule exists to catch. The endpoint
+       * neither refused nor answered.
+       *
+       * Chunking multiplies the request count by the number of chunks, so the
+       * ceiling must be sized for that; it is the only way to sweep a token with
+       * thousands of pools at all.
+       */
+      const CHUNK = 500;
+      const chunks: string[][] = [];
+      for (let i = 0; i < v4Pools.length; i += CHUNK) {
+        chunks.push(v4Pools.slice(i, i + CHUNK));
+      }
+      if (chunks.length > 1) {
+        log.info('pool-id topic array chunked', {
+          pools: v4Pools.length, chunks: chunks.length, per_chunk: CHUNK,
+          note: 'request count is multiplied by the chunk count',
+        });
+      }
       for (const [gFrom, gTo] of gaps) {
+       for (const chunk of chunks) {
         const st = await adaptiveSweep(
           rpc, cfg,
-          { address: cfg.v4PoolManager.toLowerCase(), topics: [TOPICS.swapV4, v4Pools] },
+          { address: cfg.v4PoolManager.toLowerCase(), topics: [TOPICS.swapV4, chunk] },
           gFrom, gTo,
           async (logs, rangeFrom, rangeTo) => {
             await withTransaction(app.pool, async (t) => {
@@ -165,11 +188,19 @@ async function main(): Promise<void> {
                 );
                 v4SweptRows += r.rowCount ?? 0;
               }
-              await recordSweepRange(t, cfg, 'swap-v4', rangeFrom, rangeTo, logs.length);
+              /*
+               * Chunks share a block range, so they would collide on the
+               * progress key. Only the LAST chunk records it: the range is not
+               * fully read until every chunk has been.
+               */
+              if (chunk === chunks[chunks.length - 1]) {
+                await recordSweepRange(t, cfg, 'swap-v4', rangeFrom, rangeTo, logs.length);
+              }
             });
           },
         );
         v4Requests += st.requests;
+       }
       }
       log.info('v4 gaps swept', { rows: v4SweptRows, requests: v4Requests });
     } else if (!gaps.length) {

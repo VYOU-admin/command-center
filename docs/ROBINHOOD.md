@@ -526,9 +526,18 @@ v3   address = the in-scope pool addresses, topic0 = Swap_v3
 v4   address = the PoolManager, topic0 = Swap_v4, topics[1] = the pool ids
 ```
 
-**Filter v4 by pool id.** An unfiltered PoolManager sweep returns every v4 swap
-on the chain — 33.2M rows and 14 GB for one month. A 540-entry topic array is
-accepted.
+**Filter v4 by pool id, and CHUNK the array.** An unfiltered PoolManager sweep
+returns every v4 swap on the chain — 33.2M rows and 14 GB for one month. A
+540-entry topic array is accepted; **5,024 entries HANGS.** AI has 5,024 v4
+pools, and passing them in one filter produced **57 minutes with no range
+recorded, no refusal and no error** — the endpoint neither answered nor refused.
+Chunk at **500 ids per request**. That multiplies the request count by the chunk
+count, so size the ceiling for it, and let only the last chunk record the range:
+the blocks are not fully read until every chunk has been.
+
+This is the wall-clock rule earning its place. A sweep that records nothing for
+an hour is not slow, it is stuck, and no amount of waiting was going to change
+it.
 
 **Span sizing belongs to the filter, not to the endpoint.** A *sparse* filter —
 one token's pool creations — returned 4,615 logs across **40,000,000 blocks in a
