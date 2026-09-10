@@ -1,0 +1,30 @@
+# Recurring wallet scoring, every token and every window.
+#
+# ITS OWN MONITOR, NOT PART OF THE HOURLY JOB. The hourly job is per token and
+# cursor-driven; scoring is per (token, window), has no cursor, reads the
+# database only, and must cover windows a token-scoped job cannot see. Coupling
+# them would mean a token with no hourly monitor is also never scored -- which is
+# how AI went a month without one -- and a rate limit on ingestion would stop
+# scoring too.
+#
+# EVERY SCORE WAS FROZEN AT INTAKE before this existed: scored once, by hand,
+# while rows kept arriving hourly. PnL, hold time, buy count and total USD in all
+# move with every new row.
+
+id: wallet-scores
+name: Wallet Scoring
+source: wallet-scores
+
+enabled: true
+
+# Every 30 minutes. The hourly jobs land rows on the hour; this runs often
+# enough that a score is never more than one cycle behind the rows it describes,
+# and it costs no compute units at all -- it reads the database only.
+schedule: 30m
+
+alerts:
+  channel: system
+  discord_on_consecutive_failures: 3
+
+# No options. It discovers its own work.
+options: {}
