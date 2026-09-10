@@ -192,9 +192,26 @@ export async function recordSweepRange(
   to: number,
   logs: number,
 ): Promise<void> {
+  /*
+   * A RE-SWEEP MUST NOT CRASH. This was a bare insert, and the table's primary
+   * key is (chain, token, kind, from_block) -- so re-running a sweep over a
+   * range already recorded raised a duplicate-key error and killed the job.
+   *
+   * That made every "resume by re-running the same range" recovery impossible,
+   * which is exactly what recovery needs: the row inserts are all
+   * `on conflict do nothing` and idempotent, and only this bookkeeping insert
+   * was not. Three separate resumptions died here.
+   *
+   * The later record wins: a re-sweep of the same start block has read the range
+   * again and its log count is the current one.
+   */
   await client.query(
     `insert into token_sweep_progress (chain, token, kind, from_block, to_block, logs, swept_at)
-     values ($1, $2, $3, $4, $5, $6, now())`,
+     values ($1, $2, $3, $4, $5, $6, now())
+     on conflict (chain, token, kind, from_block) do update
+       set to_block = excluded.to_block,
+           logs     = excluded.logs,
+           swept_at = excluded.swept_at`,
     [cfg.chain, cfg.token, kind, from, to, logs],
   );
 }

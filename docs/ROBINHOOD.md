@@ -590,6 +590,23 @@ span per request, and takes `--legacy` to reproduce the defect for comparison.
 logs per block**, per-request range 0.31–0.96, 140,078 logs over 300,000 blocks.
 At the 6,000-log target that is a natural span of roughly **13,000 blocks**.
 
+**A RE-SWEEP MUST NOT CRASH, and for a long time it did.**
+`recordSweepRange` was a bare insert against a table keyed
+`(chain, token, kind, from_block)`, so re-running a sweep over a range already
+recorded raised a duplicate key and killed the job. Every row insert in the
+system is `on conflict do nothing` and idempotent; only the bookkeeping was not,
+and **three separate attempts to resume an interrupted sweep died on it.** The
+later record now wins — a re-sweep has read the range again and its count is the
+current one.
+
+**A TOKEN'S DENSITY IS NOT CONSTANT OVER ITS LIFE, so probe the range you will
+actually sweep.** AI measured **0.0255 logs per block** across its window and
+**0.417 across the 3.7M blocks before the current head — 16x denser.** A ceiling
+derived from the window's density stopped the sweep at 37% of the range. The
+same mistake, in the other direction, made INDEX's estimate 27% low: its probe
+started at another token's origin and never sampled its early life. Sample the
+blocks you are about to read, not the blocks you happen to have.
+
 **Commit progress per range, and gap-check on a fresh connection when it
 finishes.** `sum(to_block - from_block + 1)` must equal the span exactly **and**
 a window function over the ranges must find zero gaps. The sum alone is not
