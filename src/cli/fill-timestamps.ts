@@ -91,6 +91,16 @@ async function main(): Promise<void> {
         fetched, still_missing: Number(left.rows[0]!.n),
         cu_spent: rpc.cuSpent, dollars: ((rpc.cuSpent * 0.45) / 1e6).toFixed(4),
       });
+      /*
+       * RELEASE THE CLIENT BEFORE ENDING THE POOL. This branch returned early
+       * without releasing `c`, so `pool.end()` waited for a checked-out client
+       * that would never come back: the job printed its result, reported
+       * still_missing 0, and then hung forever -- blocking the next job chained
+       * behind it for twenty minutes with no error and nothing in its log.
+       *
+       * A process that has printed its answer has not necessarily exited.
+       */
+      c.release();
       await app.pool.end();
       process.exit(0);
     }
