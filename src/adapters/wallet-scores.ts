@@ -96,7 +96,19 @@ const adapter: SourceAdapter<ScoreResult> = {
       );
     }
 
+    /*
+     * ONE UNSCOREABLE WINDOW MUST NOT BLOCK THE REST, AND MUST NOT BE SWALLOWED.
+     * MOS and USELESS carry cohorts and window rows from the first intake but no
+     * pump points, so scoreWindow raises for them -- correctly, since metrics 5
+     * and 6 are defined against pump points. Letting that abort the pass left
+     * every other token stale, which is the fault this monitor exists to fix.
+     *
+     * So: each window is scored independently, every failure is recorded with
+     * its reason, and the RUN still fails at the end if any did. Nothing is
+     * counted as zero and nothing is hidden.
+     */
     const out: ScoreResult[] = [];
+    const failures: { token: string; tag: string; error: string }[] = [];
     for (const t of targets) {
       /*
        * The threshold is RE-DERIVED per window on every run, and both quality
@@ -104,14 +116,34 @@ const adapter: SourceAdapter<ScoreResult> = {
        * holds has to disappear: `inflated-pnl` must clear itself once the
        * transfers that explain a negative position are collected.
        */
-      const r = await scoreWindow(ctx.db as never, t.chain, t.token, t.tag,
-        { write: true, top: 0 });
-      out.push(r);
-      ctx.log.info('scored', {
-        token: t.token, tag: t.tag, cohort: r.cohort, written: r.written,
-        low_weight_threshold: r.lowWeightThreshold, derived: r.lowWeightDerived,
-        flags: r.flags,
-      });
+      try {
+        const r = await scoreWindow(ctx.db as never, t.chain, t.token, t.tag,
+          { write: true, top: 0 });
+        out.push(r);
+        ctx.log.info('scored', {
+          token: t.token, tag: t.tag, cohort: r.cohort, written: r.written,
+          low_weight_threshold: r.lowWeightThreshold, derived: r.lowWeightDerived,
+          flags: r.flags,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failures.push({ token: t.token, tag: t.tag, error: message });
+        ctx.log.error('window could not be scored', { token: t.token, tag: t.tag, error: message });
+      }
+    }
+
+    ctx.log.info('scoring pass complete', {
+      windows_scored: out.length,
+      windows_failed: failures.length,
+      failures,
+    });
+    if (failures.length > 0) {
+      ctx.queueAlert({
+        title: `${ctx.monitorName}: ${failures.length} window(s) could not be scored`,
+        description: failures.map((f) => `${f.token} / ${f.tag}: ${f.error}`).join('\n\n')
+          + `\n\n${out.length} window(s) scored successfully and were written.`,
+        level: 'warning',
+      }, 'system');
     }
     pending.set(ctx.monitorId, out);
     return out;
