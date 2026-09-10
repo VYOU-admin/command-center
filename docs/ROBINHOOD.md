@@ -1503,6 +1503,11 @@ recoverable, and the count is reported.
 
 ### Step 16 — Findings
 
+**A FINDINGS SECTION RECORDS WHAT WAS TRUE AT LOAD. Current counts live in
+section 0 and nowhere else.** Three findings sections carried row counts that
+read as current and were stale within the hour, because the hourly job never
+stops adding rows. Write "at load" or do not write the number.
+
 **Append this token's section to the findings at the end of this document before
 calling it done.** What surprised you, what the numbers were, what turned out not
 to be true. That is what the next token reads.
@@ -1517,7 +1522,7 @@ to be true. That is what the next token reads.
 |---|---|
 | `wallet_transactions.usd_amount` | the swap's price bucket had no derivable rate |
 | `wallet_transactions.price_usd` | the same |
-| `wallet_transactions.counterparty` | not recorded — every PONS trade row, all 182,616 of them as of 2026-09-07 |
+| `wallet_transactions.counterparty` | not recorded — every PONS trade row without exception. Current counts live in section 0, never here |
 | `wallet_scores.score` | every one of the eight metrics was null |
 | a metric inside `metrics.raw` | uncomputable for this wallet; it drops out and the weights renormalise |
 | a missing price bucket | no trade on both sides in that bucket; gaps stay gaps |
@@ -1633,8 +1638,8 @@ These are not about Robinhood Chain, but the code that loads it obeys them.
 ### PONS — `0x39dBED3a2bd333467115dE45665cC57F813C4571`
 
 Cohort `PONS-P1`, 13,095 wallets, window 2026-07-21 → 2026-08-21 (blocks
-15,115,285–42,691,407). **179,736 rows at intake; 182,616 as of 2026-09-07**, the
-difference written by the hourly job. (An earlier figure of 181,477 appeared here
+15,115,285–42,691,407). **179,736 rows at intake.** Every later count is in section 0 and nowhere
+else — a snapshot written into a findings section is stale the next hour. (An earlier figure of 181,477 appeared here
 and reconciles with nothing in the database; it has been removed rather than
 explained.) First EVM intake; most of the rules above
 came from it.
@@ -1669,7 +1674,8 @@ with two windows.**
 ```
 INDEX-P1  2026-07-03 00:00 -> 07-14 16:00 ET   blocks 1,693,406..9,800,208    3,316 wallets
 INDEX-P2  2026-08-01 12:00 -> 08-23 12:00 ET  blocks 25,165,577..44,130,852   4,267 wallets
-rows 152,302 for 7,230 wallets    $40,162,847    pools 196 in scope of 317
+rows 152,302 AT LOAD for 7,230 wallets   $40,162,847   pools 196 in scope of 317
+(the hourly job has added rows since -- section 0 carries the current count)
 ```
 
 ```
@@ -1747,7 +1753,8 @@ decided explicitly.
 ### AI — `0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18`
 
 **Loaded 2026-09-09.** Cohort `AI-P1`, **3,508 wallets**, window 2026-07-24
-12:00 → 2026-08-09 16:00 Eastern (blocks 18,275,461–32,206,441), **31,896 rows**,
+12:00 → 2026-08-09 16:00 Eastern (blocks 18,275,461–32,206,441), **31,896 rows AT
+LOAD** (section 0 carries the current count; the hourly job has added more),
 **$8,657,254** of USD volume. Name "Artificial Inu", 18 decimals, supply
 991,382,832.598, deployed at block 9,721,433.
 
