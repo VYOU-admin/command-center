@@ -49,6 +49,7 @@ import { loadPools, persistPools, poolKey, scanForPools, type PoolRow } from './
 import {
   bucketOf,
   counterUsdResolver,
+  deriveBridgeUsd,
   derivePrices,
   loadNativeForRange,
   loadNativeReference,
@@ -57,7 +58,7 @@ import {
 } from './token-updates/prices.js';
 import { buildRows, type RowStats, type WalletRow } from './token-updates/rows.js';
 import { loadExclusions } from './token-updates/exclusions.js';
-import { loadBridgeUsd } from '../intake/write.js';
+import { loadBridgeUsd, persistBridgeUsd } from '../intake/write.js';
 import type { PoolClient } from '../store/db.js';
 
 const INFRASTRUCTURE_PATH = 'config/infrastructure.yaml';
@@ -86,6 +87,73 @@ interface Pending {
  * always calls persist immediately after a successful fetch.
  */
 const pending = new Map<string, Pending>();
+
+
+/**
+ * A BRIDGE'S SWAPS ARE NOT THIS TOKEN'S, so they are swept per slice rather
+ * than read from token_swap_logs, which only ever holds the token being loaded.
+ * One eth_getLogs per venue per slice: v3 filtered by pool address, v4 by pool
+ * id on the PoolManager.
+ *
+ * Every in-scope pool of the bridge is swept even though only USD-quoted ones
+ * produce a tick, because which are USD-quoted is a property of pool_meta and
+ * not of the filter.
+ */
+async function sweepBridgeSwaps(
+  rpc: RpcClient,
+  cfg: UpdateConfig,
+  pools: Map<string, PoolRow>,
+  from: number,
+  to: number,
+): Promise<{ swap: SwapLog; pool: PoolRow }[]> {
+  const out: { swap: SwapLog; pool: PoolRow }[] = [];
+  const byPool = new Map<string, PoolRow>();
+  for (const p of pools.values()) byPool.set(p.pool.toLowerCase(), p);
+
+  const v3 = [...new Set([...pools.values()].filter((p) => p.venue === 'v3')
+    .map((p) => p.pool.toLowerCase()))];
+  const v4 = [...new Set([...pools.values()].filter((p) => p.venue === 'v4')
+    .map((p) => p.pool.toLowerCase()))];
+
+  if (v3.length > 0) {
+    const logs = await rpc.getLogs(
+      { address: v3, topics: [TOPICS.swapV3] }, from, to,
+      cfg.logSpanBlocks, cfg.minLogSpanBlocks,
+    );
+    for (const l of logs) {
+      const sw = decodeSwap(l, 'v3');
+      const p = byPool.get(sw.pool.toLowerCase());
+      if (p) out.push({ swap: sw, pool: p });
+    }
+  }
+  if (v4.length > 0) {
+    const logs = await rpc.getLogs(
+      { address: cfg.v4PoolManager.toLowerCase(), topics: [TOPICS.swapV4, v4] }, from, to,
+      cfg.logSpanBlocks, cfg.minLogSpanBlocks,
+    );
+    for (const l of logs) {
+      const sw = decodeSwap(l, 'v4');
+      const p = byPool.get(sw.pool.toLowerCase());
+      if (p) out.push({ swap: sw, pool: p });
+    }
+  }
+  return out;
+}
+
+/** A bridge is valued like any counter; an unreadable decimals raises. */
+async function readBridgeDecimals(client: PoolClient, bridge: string): Promise<number> {
+  const r = await client.query<{ decimals: number }>(
+    `select decimals from tokens where mint = $1`, [bridge],
+  );
+  const d = r.rows[0]?.decimals;
+  if (typeof d !== 'number') {
+    throw new Error(
+      `bridge ${bridge} has no decimals recorded in tokens; it cannot be valued, and ` +
+      'assuming 18 is a factor-of-10^12 error waiting to happen.',
+    );
+  }
+  return d;
+}
 
 const adapter: SourceAdapter<WalletRow> = {
   type: 'token-updates',
@@ -315,19 +383,67 @@ const adapter: SourceAdapter<WalletRow> = {
      *
      * On AI that is 80% of its volume. See docs/ROBINHOOD.md step 15.
      */
+    /*
+     * EACH BRIDGE'S SERIES IS DERIVED FORWARD TOO, not just the token's own.
+     *
+     * The job derived `<token>_usd_prices` every cycle and left the bridge
+     * series exactly where the intake stopped -- so once the cursor passed the
+     * bridge's last bucket, every bridge-quoted row priced null. AI's backlog
+     * wrote 5,033 NVDA-quoted rows and priced ONE: the boundary bucket.
+     *
+     * The bridge's swaps are not this token's, so they are swept per slice from
+     * ITS in-scope pools. One getLogs per venue per slice.
+     */
     const bridgeClient = await ctx.db.connect();
     let bridgeUsd: Map<string, Map<number, { price: number }>>;
+    const bridgeReport: Record<string, unknown> = {};
     try {
+      for (const bridge of cfg.bridgeAssets) {
+        const bPools = await loadPools(bridgeClient, cfg.chain, bridge);
+        if (bPools.size === 0) {
+          throw new Error(
+            `bridge ${bridge} has no in-scope pools stored, so its USD series cannot be `
+              + 'extended and every pool quoted in it would price null.',
+          );
+        }
+        const bSwaps = await sweepBridgeSwaps(rpc, cfg, bPools, from, to);
+        const bDec = await readBridgeDecimals(bridgeClient, bridge);
+        const d = deriveBridgeUsd(bSwaps, cfg, bDec, firstCompleteBucket);
+        const w = await persistBridgeUsd(bridgeClient, cfg as never, bridge, d.series);
+        bridgeReport[bridge] = {
+          swaps_read: bSwaps.length, buckets_priced: d.series.size,
+          ticks_discarded: d.discarded, ...w,
+        };
+      }
       bridgeUsd = await loadBridgeUsd(bridgeClient, cfg as never);
     } finally {
       bridgeClient.release();
     }
-    if (cfg.bridgeAssets.length > 0 && bridgeUsd.size === 0) {
-      throw new Error(
-        `${cfg.bridgeAssets.length} bridge asset(s) are configured but bridge_usd_prices `
-          + 'holds no series for any of them. Every bridge-quoted pool would price null. '
-          + 'Derive the bridge series before running this job.',
-      );
+
+    /*
+     * A STALE SERIES IS NOT A PRESENT ONE. Checking only that the map is
+     * non-empty passes a series that stops before this slice begins, which is
+     * exactly how 5,032 rows came out null with the run reporting success.
+     */
+    if (cfg.bridgeAssets.length > 0) {
+      const lastBucket = bucketOf(to, cfg.bucketBlocks, cfg.bucketOrigin);
+      for (const bridge of cfg.bridgeAssets) {
+        const series = bridgeUsd.get(bridge.toLowerCase());
+        const hi = series && series.size > 0 ? Math.max(...series.keys()) : null;
+        if (hi === null) {
+          throw new Error(
+            `bridge ${bridge} has no stored series at all; every pool quoted in it `
+              + 'would price null.',
+          );
+        }
+        if (hi < lastBucket - cfg.bucketBlocks) {
+          throw new Error(
+            `bridge ${bridge}'s series ends at bucket ${hi} but this slice reaches `
+              + `${lastBucket}. A stale series prices every bridge-quoted row null while `
+              + 'the run reports success. Derive it forward before continuing.',
+          );
+        }
+      }
     }
     const resolver = counterUsdResolver(cfg, pricingMap, bridgeUsd);
     const { rows, stats } = buildRows(
@@ -348,6 +464,7 @@ const adapter: SourceAdapter<WalletRow> = {
       swaps_v3: v3Count,
       swaps_v4: v4Count,
       transfers: transfers.length,
+      bridges: bridgeReport,
       rows_built: rows.length,
       price_buckets_partial_skipped: prices?.stats.bucketsPartial ?? 0,
       price_buckets_reused_from_store: storedBucketsUsed,

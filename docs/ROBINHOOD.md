@@ -1329,6 +1329,20 @@ every row null, and a missing `bridge_assets` drops every pool quoted in that
 bridge. PONS and INDEX share 8,963,150; **AI's is 9,721,433** and a copy would
 have been wrong.
 
+**The hourly job must DERIVE each bridge forward, not merely load it.** It
+derived the token's own series every cycle and left the bridge series exactly
+where the intake stopped, so once the cursor passed the bridge's last bucket
+every bridge-quoted row priced null. **AI's backlog wrote 5,033 NVDA-quoted rows
+and priced one** — the boundary bucket — while all 672 cycles reported success.
+The bridge's swaps are not the token's, so they are swept per slice from its own
+in-scope pools: one `eth_getLogs` per venue per slice.
+
+**A STALE SERIES IS NOT A PRESENT ONE.** Checking only that the loaded map is
+non-empty passes a series that ends before the slice begins, which is exactly how
+those 5,032 nulls were written with nothing raised. The job now fails when a
+bridge's last bucket falls behind the slice it is pricing. **Every "is it there"
+check on a series needs to be "does it reach here".**
+
 **The hourly job must load the bridge series too.** `counterUsdResolver` takes
 `bridgeUsd` as an optional third argument and the adapter omitted it, so every
 bridge-quoted pool priced null on every hourly run while the intake priced the
