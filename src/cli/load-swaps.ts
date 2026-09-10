@@ -125,6 +125,57 @@ async function main(): Promise<void> {
     );
     log.info('v4 copied', { rows_inserted: copied.rowCount ?? 0 });
 
+    /*
+     * v4 OUTSIDE v4_swaps_all MUST STILL BE SWEPT. That table covers a fixed
+     * block range; a token older or newer than it has swaps outside, and
+     * copying alone would leave them missing with nothing to say so. INDEX is
+     * the first such token -- deployed at block 1,670,725, more than thirteen
+     * million blocks before the table begins.
+     */
+    let v4SweptRows = 0;
+    let v4Requests = 0;
+    const covLo = Number(v4Span.rows[0]!.lo);
+    const covHi = Number(v4Span.rows[0]!.hi);
+    const gaps: [number, number][] = [];
+    if (from < covLo) gaps.push([from, Math.min(to, covLo - 1)]);
+    if (to > covHi) gaps.push([Math.max(from, covHi + 1), to]);
+    if (gaps.length && v4Pools.length) {
+      log.info('v4 ranges outside v4_swaps_all, sweeping', {
+        gaps: gaps.map(([a, b]) => `${a}..${b}`),
+        blocks: gaps.reduce((n, [a, b]) => n + (b - a + 1), 0),
+        pools_in_topic_array: v4Pools.length,
+      });
+      for (const [gFrom, gTo] of gaps) {
+        const st = await adaptiveSweep(
+          rpc, cfg,
+          { address: cfg.v4PoolManager.toLowerCase(), topics: [TOPICS.swapV4, v4Pools] },
+          gFrom, gTo,
+          async (logs, rangeFrom, rangeTo) => {
+            await withTransaction(app.pool, async (t) => {
+              for (const l of logs) {
+                const sw = decodeSwap(l, 'v4');
+                const r = await t.query(
+                  `insert into token_swap_logs
+                     (chain, token, venue, pool, block_number, log_index, tx_hash,
+                      sender, recipient, amount0, amount1)
+                   values ($1,$2,'v4',$3,$4,$5,$6,null,null,$7,$8)
+                   on conflict do nothing`,
+                  [cfg.chain, cfg.token, sw.pool, sw.block, sw.logIndex, sw.txHash,
+                    sw.amount0.toString(), sw.amount1.toString()],
+                );
+                v4SweptRows += r.rowCount ?? 0;
+              }
+              await recordSweepRange(t, cfg, 'swap-v4', rangeFrom, rangeTo, logs.length);
+            });
+          },
+        );
+        v4Requests += st.requests;
+      }
+      log.info('v4 gaps swept', { rows: v4SweptRows, requests: v4Requests });
+    } else if (!gaps.length) {
+      log.info('no v4 range outside v4_swaps_all', { covered: `${covLo}..${covHi}` });
+    }
+
     let v3Rows = 0;
     let stats = null;
     if (v3Pools.length > 0) {
@@ -164,6 +215,7 @@ async function main(): Promise<void> {
 
     log.info('loaded', {
       by_venue: after.rows,
+      v4_swept_rows: v4SweptRows, v4_sweep_requests: v4Requests,
       v3_rows_inserted: v3Rows,
       v3_requests: stats?.requests ?? 0,
       v3_size_refusals: stats?.sizeRefusals ?? 0,
