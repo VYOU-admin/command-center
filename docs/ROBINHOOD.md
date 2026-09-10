@@ -27,6 +27,47 @@ built on it.
 
 ---
 
+## 0. What is loaded right now
+
+*Updated whenever a token is loaded or a defect is found. Last: 2026-09-10.*
+**This is the first thing a session needs.** Everything below it is procedure;
+this is state.
+
+| token | role | cohorts | rows | wallets | cursor | monitor | last scored |
+|---|---|---|---|---|---|---|---|
+| **PONS** `0x39dBED…4571` | tracked | `PONS-P1` 13,095 · `PONS-P1-T` 396 | 185,189 | 12,636 | 59,183,149 | `token-updates` ✅ | 2026-09-10 |
+| **INDEX** `0x56910D…9870` | tracked | `INDEX-P1` 3,316 · `INDEX-P2` 4,267 | 152,369 | 7,230 | 59,183,149 | `index-updates` ✅ | 2026-09-10 |
+| **AI** `0x2E8c31…1e18` | tracked | `AI-P1` 3,508 | 45,794 | 3,507 | 59,181,432 | `ai-updates` ✅ | 2026-09-10 |
+| **NVDA** `0xd0601c…9eec` | **pricing-source** | none | 0 | 0 | none | none — correct | never |
+| **MOS** `4ChT49…91ZT` | tracked (**Solana**) | `MOS-P1..P4` 519 | 1,534 | 486 | none | none | never |
+| **USELESS** `Dz9mQ9…bonk` | tracked (**Solana**) | `USELESS-P1..P3` 1,615 | 10,458 | 1,462 | none | none | never |
+
+```
+price series   pons 4,952   index 5,252   ai 3,973   native 9,231   bridge(NVDA) 4,065
+monitors       token-updates, index-updates, ai-updates, token-price,
+               wallet-scores, oil-prices, postgres-disk        all enabled
+```
+
+**What is known incomplete, per token:**
+
+- **PONS** — built under **different rules** from AI and INDEX, and frozen. Its
+  cohort excluded 2,001 EIP-7702 delegated accounts that the current rule keeps;
+  it used the 3 configured router addresses where behaviour finds 62 candidates
+  over its window; and it has **no `transfer_in`/`transfer_out` rows** while AI
+  and INDEX do. **Any comparison across tokens has to account for this.** See
+  step 7 and the PONS findings.
+- **AI** — 14,135 rows carry a null USD. ~5,032 of those are NVDA-quoted rows
+  written by the hourly job before the bridge series was extended; the series
+  now reaches them and the repair is a scoped reinsert of the backlog range,
+  outstanding.
+- **INDEX** — 71,518 rows carry a null USD, expected: 66,682 are transfers,
+  which are always unpriced by definition.
+- **MOS, USELESS** — **Solana**, loaded by the scratchpad scripts that were
+  lost. Nothing in this document applies to them. No pump points, so they cannot
+  be scored; no monitor, so they do not advance. They are frozen history.
+
+---
+
 ## 1. What this system is for
 
 Given a token and a period of time, find every wallet that bought it in that
@@ -166,7 +207,44 @@ Steps marked **STOP** end by reporting and waiting for review. They sit where a
 wrong answer is cheap to correct and expensive to carry forward — scope, cohort
 membership and pricing each propagate into everything downstream.
 
-Every step has a **compute-unit ceiling set before it starts**, inside the job.
+**Every step has an expected WALL-CLOCK duration as well as a CU cost.** Cost
+was recorded for every phase and duration for none, so "this is taking too long"
+was an opinion rather than a number. Measured on the three loads:
+
+| phase | PONS | AI | INDEX | expected |
+|---|---|---|---|---|
+| identity | not measured¹ | 0.9 s | 0.7 s | **seconds** |
+| windows | not measured¹ | 1.0 s | 0.9 s (two windows) | **~1 s per bound** |
+| pools | not measured¹ | 3.7 s | 3.7 s | **seconds** |
+| scope | not measured¹ | 3.6–16.4 s² | 4.8 s | **under a minute** |
+| transfer sweep | not measured¹ | ~9 min (13.9M blocks) | ~40 min (57.4M blocks) | **~1 min per 1.5M blocks** |
+| swap load | not measured¹ | ~4 min | ~35 min | scales with blocks not in `v4_swaps_all` |
+| cohort | not measured¹ | ~2 min | ~6 min (two windows) | **minutes** |
+| prices | not measured¹ | seconds | seconds | **seconds — no network** |
+| rows (dry run + write) | not measured¹ | ~1 min | ~8 min | scales with rows |
+| scoring, all windows | — | — | ~60 s for 24,186 wallets | **seconds to a minute** |
+
+¹ PONS was loaded by the scratchpad scripts that were lost; no phase timing
+survives. ² 16.4 s when router detection ran with data present.
+
+**A phase running materially over these is a HANG, not slowness — check for one
+rather than waiting.** Two measured cases, both of which looked like patience
+being required and were not:
+
+- **A 19-minute router query and a 17-minute convention query.** Both were
+  single statements whose inputs were CTEs, which the planner has no statistics
+  or index for. Both became **~5 seconds** once the inputs were materialised into
+  indexed temp tables. Neither was ever going to finish usefully.
+- **A 41-minute "build".** The deployment sat in `BUILDING` with an empty log
+  while the container went on serving the previous build, so a fix silently
+  never shipped. An empty commit re-triggered it and it succeeded in **90
+  seconds**.
+
+The rule: if a phase passes roughly **3x** its expected duration, stop and look
+at `pg_stat_activity` for a running query and at the deployment list for a stuck
+build. Waiting longer has never once been the answer here.
+
+Every step also has a **compute-unit ceiling set before it starts**, inside the job.
 An account-level cap protects the wallet; only an in-job ceiling protects
 against a step whose scope was wrong from its first request. A step that reaches
 its ceiling stops and says where it stopped.
@@ -1195,11 +1273,21 @@ It is a separate monitor rather than part of the hourly job because:
   means a ceiling or a rate limit stops scoring too, and a scoring bug fails row
   ingestion.
 
-**One unscoreable window must not block the rest, and must not be swallowed.**
-MOS and USELESS carry cohorts and window rows from the first intake but no pump
-points, so they raise — correctly, since metrics 5 and 6 are defined against
-pump points. Each window is scored independently, every failure is recorded with
-its reason and alerted, and **the run still fails if any did.**
+**THE SCORING MONITOR IS SCOPED TO ONE CHAIN, and this was recorded wrongly
+once.** Its first version scored every token that had a cohort, defaulting the
+chain, so it scored **MOS and USELESS — Solana tokens — from a Robinhood
+monitor**. They raised for want of pump points and that was written down here as
+"correct". It was not: line 7 says Solana is a different chain and nothing here
+applies to it. **A scoping defect had been documented as correct behaviour**,
+which is precisely the failure this document exists to catch, and it survived a
+review that claimed to find no contradictions. The chain is now a required
+option with no default.
+
+**One unscoreable window must still not block the rest, and must not be
+swallowed.** Each window is scored independently and every failure is recorded
+with its reason and alerted — and **the run fails if any did**. That last clause
+was also written before it was true: the code queued the alert and returned
+success, so `last_status` read green while windows went unscored.
 
 **There is ONE implementation of a score.** It lived inside the CLI's `main()`,
 which is why the only way to score was to run it by hand. It now lives in
@@ -1446,7 +1534,7 @@ investigation. A crash would have been strictly better.
 | per-item errors begin | ~13 req/s × 100 sub-calls | **measured** — 2.4–2.5 req/s with batch 100 gave 0 errors in 51,475 sub-calls |
 | public RPC pacing | 4,000 ms clean, 800 ms gave 15/20 refusals | **measured** |
 | price bucket | 10,000 blocks (~17 min) | derived from the measured block time |
-| bucket anchor | the token's first swap block | **measured** per token |
+| bucket anchor | a fixed block tied to the token: an EXISTING grid if it shares a series, else the first swap block, else the deployment block | **measured** per token; INDEX deliberately reused PONS's 8,963,150 and added only 298 of 5,234 native buckets |
 | tick fence | 100× the bucket median | **guessed**, then validated — caught 46 and 9,129 on PONS |
 | native fence | 10× | **guessed**, then validated — caught 0 on PONS |
 | target logs/request | 6,000 | **never measured** — would be measured by sweeping one range at several targets and comparing calls and refusals |
@@ -1596,6 +1684,45 @@ prices                         0 CU
 - **762 delegated EIP-7702 accounts kept** (192 in P1, 570 in P2).
 - Price fences caught 9 USD ticks and 29 native ticks of 557,188; the derived
   native fence caught **0**, the signal the derivation is sound.
+
+**PONS IS FROZEN, AND IT WAS BUILT UNDER DIFFERENT RULES FROM AI AND INDEX.**
+State this wherever PONS is compared with another token. Three known
+differences, none of them acted on:
+
+1. **2,001 EIP-7702 delegated accounts were excluded** that the current rule
+   keeps. The cohort would be **15,096 rather than 13,095, a 15.3% increase.**
+2. **The cohort used the 3 configured router addresses.** Behaviour finds **62
+   senders clearing the 50-recipient bar** over PONS-P1, and none was ever
+   persisted, so `effectiveExclusions` returned the config list alone. A router
+   the list misses gets the trade attributed to it instead of to the buyer.
+3. **No `transfer_in`/`transfer_out` rows.** 185,189 rows, all buys and sells.
+   AI and INDEX both have transfers, which is why PONS's `inflated-pnl` count
+   cannot clear itself: 2,122 wallets show a negative position because the
+   acquisitions that explain them are not collected.
+
+**What a rebuild would cost, measured:**
+
+```
+transfers already stored to block 54,935,932       no re-sweep needed for the window
+cohort step   16,910 candidate wallets in-window
+              x 26 CU code check + ~17.1 CU payment   ~727,000 CU    ~$0.33
+router detection, 62 candidates x 26 CU                 ~1,600 CU
+transfer rows: sweep 54,935,932 -> head, ~4.2M blocks   ~2,600 CU
+rows: delete and rewrite 185,189 rows                        0 CU
+re-score                                                     0 CU
+                                                       -----------
+                                                       ~731,000 CU    ~$0.33
+```
+
+**What would change:** the cohort grows by up to 2,001 wallets; up to 62 router
+addresses are excluded, removing rows currently attributed to them; transfer
+rows appear and `inflated-pnl` falls from 2,122 toward the residue; every PONS
+score moves because the cohort and the rows underneath it move.
+
+**THE DECISION IS THE OPERATOR'S AND HAS NOT BEEN MADE.** PONS is the reference
+cohort every rule in this document was derived from, and rebuilding it changes
+the numbers those rules were measured against. It stays as it is until that is
+decided explicitly.
 
 ### AI — `0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18`
 
