@@ -57,6 +57,7 @@ import {
 } from './token-updates/prices.js';
 import { buildRows, type RowStats, type WalletRow } from './token-updates/rows.js';
 import { loadExclusions } from './token-updates/exclusions.js';
+import { loadBridgeUsd } from '../intake/write.js';
 import type { PoolClient } from '../store/db.js';
 
 const INFRASTRUCTURE_PATH = 'config/infrastructure.yaml';
@@ -302,7 +303,33 @@ const adapter: SourceAdapter<WalletRow> = {
     const exclusions = new Set(exclusionList.map((e) => e.address));
     const knownPools = new Set([...scan.all.values()].map((p) => p.pool));
 
-    const resolver = counterUsdResolver(cfg, pricingMap);
+    /*
+     * THE BRIDGE SERIES MUST BE LOADED HERE TOO.
+     *
+     * `counterUsdResolver` takes bridgeUsd as an OPTIONAL third argument
+     * defaulting to an empty Map, and this call omitted it -- so every
+     * bridge-quoted pool priced null on every hourly run while the intake, which
+     * passes it, priced the same pools correctly. The config parser reads
+     * `bridge_assets` and always has, so the option was accepted and silently
+     * did nothing: worse than not supporting it.
+     *
+     * On AI that is 80% of its volume. See docs/ROBINHOOD.md step 15.
+     */
+    const bridgeClient = await ctx.db.connect();
+    let bridgeUsd: Map<string, Map<number, { price: number }>>;
+    try {
+      bridgeUsd = await loadBridgeUsd(bridgeClient, cfg as never);
+    } finally {
+      bridgeClient.release();
+    }
+    if (cfg.bridgeAssets.length > 0 && bridgeUsd.size === 0) {
+      throw new Error(
+        `${cfg.bridgeAssets.length} bridge asset(s) are configured but bridge_usd_prices `
+          + 'holds no series for any of them. Every bridge-quoted pool would price null. '
+          + 'Derive the bridge series before running this job.',
+      );
+    }
+    const resolver = counterUsdResolver(cfg, pricingMap, bridgeUsd);
     const { rows, stats } = buildRows(
       swaps,
       transfers,

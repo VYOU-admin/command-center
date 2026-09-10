@@ -17,6 +17,7 @@
  */
 
 import { bootstrap } from '../bootstrap.js';
+import { requireMonitorFor } from '../intake/monitor-check.js';
 import { errorFields, log } from '../logger.js';
 import { withTransaction } from '../store/db.js';
 import type { PoolClient } from '../store/db.js';
@@ -761,7 +762,18 @@ async function main(): Promise<void> {
     });
 
     /* ---- 10. write ------------------------------------------------------ */
+    /*
+     * A LOADED TOKEN WITHOUT A MONITOR MUST NOT LOOK COMPLETE. Checked before
+     * the write so the failure lands while the operator is still here, not a
+     * month later when the token has quietly stopped advancing.
+     */
     await run('write', async (_rpc, c) => {
+      const monitor = await requireMonitorFor('monitors', cfg.ticker, cfg.token, {
+        bucketOrigin: cfg.bucketOrigin,
+        bridgeAssets: cfg.bridgeAssets,
+        tokenUsdTable: cfg.tokenUsdTable,
+      });
+      log.info('hourly monitor found', { id: monitor.id, file: monitor.file });
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
       const decimals = (await c.query<{ decimals: number }>(
         `select decimals from tokens where mint=$1`, [cfg.token])).rows[0]?.decimals;

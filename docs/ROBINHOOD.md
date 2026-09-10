@@ -1309,6 +1309,34 @@ incomplete set of buys with nothing raised. Whenever the definition of a buy
 moves, both callers move with it, and the hourly job is re-run from a cursor
 early enough to cover what the old rule dropped.
 
+**A LOADED TOKEN WITHOUT A MONITOR MUST NOT LOOK COMPLETE.** The intake writes
+rows up to wherever it swept and stops; nothing in it required a monitor, so a
+token could pass every phase, score, and render on the dashboard while never
+advancing again. **AI did exactly that — loaded, scored, verified, and then
+26,883,347 blocks behind head a month later, with no error anywhere because
+there was no error to raise.** The write phase now refuses to run for a token
+with no monitor, and names the file to add.
+
+It cannot CREATE one: monitors are YAML in the repository, read at boot, and a
+file written by a container survives neither the container nor git. So the gate
+is the other half — fail loudly, before the rows are written, while the operator
+is still there.
+
+**The monitor's pricing values must MATCH the intake config, and the gate checks
+them.** Copying another token's monitor is the natural shortcut and is silently
+wrong: `bucket_origin` from the wrong token matches no stored bucket and prices
+every row null, and a missing `bridge_assets` drops every pool quoted in that
+bridge. PONS and INDEX share 8,963,150; **AI's is 9,721,433** and a copy would
+have been wrong.
+
+**The hourly job must load the bridge series too.** `counterUsdResolver` takes
+`bridgeUsd` as an optional third argument and the adapter omitted it, so every
+bridge-quoted pool priced null on every hourly run while the intake priced the
+same pools correctly. The config parser read `bridge_assets` and always had, so
+the option was accepted and silently did nothing — worse than not supporting it.
+On AI that is 80% of its volume. The adapter now loads the series and **raises if
+a bridge is configured and no series exists for it**.
+
 **Seed the cursor where the intake stopped, never at the head.** Seeding at the
 head skips the backlog permanently and silently.
 

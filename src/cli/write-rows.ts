@@ -18,6 +18,7 @@ import { loadExclusions } from '../adapters/token-updates/exclusions.js';
 import { effectiveExclusions } from '../intake/routers.js';
 import { writeTags } from '../intake/cohort.js';
 import { loadBridgeUsd, planOrWrite } from '../intake/write.js';
+import { requireMonitorFor } from '../intake/monitor-check.js';
 
 const INFRA = 'config/infrastructure.yaml';
 
@@ -82,6 +83,18 @@ async function main(): Promise<void> {
       await app.pool.end();
       process.exit(0);
     }
+
+    /*
+     * THE MONITOR GATE. Checked before the rows are written, not after: a token
+     * that finishes with rows and no monitor looks complete and silently stops
+     * advancing. See intake/monitor-check.ts.
+     */
+    const monitor = await requireMonitorFor('monitors', cfg.ticker, cfg.token, {
+      bucketOrigin: cfg.bucketOrigin,
+      bridgeAssets: cfg.bridgeAssets,
+      tokenUsdTable: cfg.tokenUsdTable,
+    });
+    log.info('hourly monitor found', { id: monitor.id, file: monitor.file });
 
     /* ---- steps 11 and 12: the rows ----------------------------------------- */
     const cohortRows = await c.query<{ wallet: string }>(

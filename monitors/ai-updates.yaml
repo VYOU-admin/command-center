@@ -1,0 +1,141 @@
+# Hourly incremental update of AI cohort wallet rows.
+#
+# CREATED LATE, AND THAT IS THE POINT. AI was loaded, scored, verified on the
+# dashboard and then left with no monitor at all for a month -- 26,883,347 blocks
+# behind head, with no error anywhere because nothing required one. The intake
+# now refuses to write rows for a token that has no monitor; see
+# src/intake/monitor-check.ts.
+#
+# EVERY VALUE BELOW THAT MIRRORS intake/ai.yaml MUST MATCH IT. bucket_origin is
+# 9,721,433 -- AI's own deployment block, NOT the 8,963,150 that PONS and INDEX
+# share. Copying another token's monitor is the natural shortcut and would have
+# priced every AI row null against buckets that do not exist.
+#
+id: ai-updates
+name: AI Cohort Updates
+source: token-updates
+
+# RE-ENABLED 2026-09-09, after the payment rule was replaced. It was paused
+# because it applied the log-based rule, which rejected 39 of 40 real buyers;
+# the 191 rows that cost were recovered by re-running from an earlier cursor.
+# Rows are no longer payment-proven at all -- proof happens once per wallet at
+# cohort time -- so this job makes no payment call and is back to its measured
+# 430-714 CU per run.
+enabled: true
+
+schedule: 1h
+
+alerts:
+  channel: system
+  # Red after three consecutive failures, as designed. Every failure alert goes
+  # to the system channel regardless of this block.
+  discord_on_consecutive_failures: 3
+
+options:
+  chain: robinhood
+  # Checksummed exactly as the chain returns it and as `tokens.mint` and
+  # `wallet_tags.mint` store it. Lowercasing it here would match no cohort.
+  token: "0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18"
+
+  # Cohort only. The 396 PONS-P1-T hop wallets are deliberately NOT here: they
+  # are a separate, un-approved collection.
+  cohort_tags:
+    - AI-P1
+
+  # The highest block already covered by wallet_transactions. The first runs
+  # work through the ~875,000-block backlog between here and the head.
+  seed_cursor_block: 32206252
+
+  rpc:
+    url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+    # Read from the process environment, never interpolated into this file --
+    # monitor options are persisted into monitors.config, and a key in YAML is
+    # a key in the database. ALCHEMY_API_KEY is a Railway service variable: it
+    # was kept off the service and passed per command for the whole intake, but
+    # a scheduled run happens inside the container and cannot see a per-command
+    # variable.
+    key_var: ALCHEMY_API_KEY
+    request_timeout_ms: 60000
+
+    # Blocks left unread behind the head so a tip reorg cannot strand rows for
+    # blocks that later change. ~20 seconds at 0.1s blocks. This chain's actual
+    # reorg depth has not been measured; the figure is a margin, not a finding.
+    lag_blocks: 200
+
+    # One hour is 35,622 blocks, measured. 40,000 leaves headroom so a late run
+    # catches up rather than falling permanently behind, and during the backlog
+    # each run takes a full slice.
+    max_blocks_per_run: 40000
+
+    # HARD CEILING PER RUN. A typical run spends 430 CU and a busy one 714, so
+    # this is roughly 7x headroom -- enough for heavy result-cap splitting, and
+    # far below anything that could quietly drain the month. The run stops and
+    # fails when it is reached, and says where it stopped.
+    cu_ceiling: 5000
+
+    # Starting span for the TRANSFER query, the one stream measured to exceed
+    # the result cap: 36,000 blocks of PONS transfers is refused by Alchemy
+    # ("Log response size exceeded"), 18,000 returns 7,113 logs. Pool
+    # enumeration and both swap queries start at the full range instead, because
+    # each was measured to fit in one request. The span halves on a refusal.
+    log_span_blocks: 18000
+    # Below this, a size refusal is a livelock rather than something to retry.
+    min_log_span_blocks: 25
+
+  venues:
+    # Read from a pool's own factory() rather than recalled.
+    v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+    v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+  pricing:
+    # A pool is in scope only when the counter side is a recognised pricing
+    # asset. Everything else prices this token against another memecoin, or
+    # against a tokenised equity through an oracle nobody has verified.
+    assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+      - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+      - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+    usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    native_assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+      - "0x0000000000000000000000000000000000000000"
+
+    # THE SECOND HOP, and it must be here as well as in intake/ai.yaml. NVDA
+    # pools are 80% of AI's USD volume; without this every one of them prices
+    # null on every hourly run. The adapter now raises if a bridge is configured
+    # and bridge_usd_prices holds no series for it.
+    bridge_assets:
+      - "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+
+    # 10,000 blocks is about 17 minutes here. The cursor always lands on one of
+    # these boundaries so no row is priced from a partially-seen bucket.
+    bucket_blocks: 10000
+    # BUCKETS ARE NOT ANCHORED AT ZERO. The intake anchored them at this token's
+    # first swap block, so all 4,528 stored buckets satisfy
+    # `bucket_block % 10000 == 3150`. Anchoring at zero would look up 54930000
+    # where the stored bucket is 54933150, match nothing, price every row null,
+    # and write a second series interleaved with the first.
+    bucket_origin: 9721433
+    # A tick outside this multiple of its bucket's median is discarded.
+    tick_fence_multiple: 100
+    # A derived native price outside this multiple of the reference median is
+    # discarded. Across PONS's whole life this caught zero, which is the signal
+    # the derivation is sound.
+    native_fence_multiple: 10
+
+  floors:
+    # Raw integer units, applied per swap.
+    token_raw_units: 1
+    paid_raw_units: 1
+    # Whole tokens. THIS IS THE ONE THAT IS EASY TO OMIT: a USD-only floor let
+    # through a row of 1.7e-6 tokens carrying $980,393.99 of allocated USD.
+    token_amount: 0.001
+    # Applies ONLY to rows that have a USD value. A null-USD row is unpriced,
+    # not small, and is never dropped by this.
+    usd: 0.01
+
+  tables:
+    # Named for the first token loaded. Renaming them is a migration, not a
+    # config change, so the names are configured rather than assumed.
+    token_usd: ai_usd_prices
+    native_usd: native_usd_prices
