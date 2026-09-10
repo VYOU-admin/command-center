@@ -110,6 +110,26 @@ async function main(): Promise<void> {
     await c.query('create index if not exists _tok_tx on _tok (tx_hash)');
     await c.query('analyze _tok');
 
+    /*
+     * THE "ONE SWAP" TEST MUST COUNT EVERY SWAP OF THE TOKEN, not only the
+     * in-scope ones. A multi-hop router transaction can swap the token on an
+     * in-scope pool AND on a rejected one; counting only the first makes the
+     * transaction look unambiguous while the single transfer out of the
+     * counterparty belongs to the other swap. That produced INDEX's two
+     * remaining disagreements out of 96,459 -- both multi-hop, both on pool
+     * 0x51d1a403..., both pairing a transfer that was never that swap's output.
+     */
+    await c.query(`create temp table if not exists _alltok (tx_hash text, n int)`);
+    await c.query('truncate _alltok');
+    await c.query(
+      `insert into _alltok
+       select tx_hash, count(*) from token_swap_logs
+        where chain=$1 and token=$2 group by tx_hash`,
+      [cfg.chain, cfg.token],
+    );
+    await c.query('create index if not exists _alltok_tx on _alltok (tx_hash)');
+    await c.query('analyze _alltok');
+
     await c.query(`create temp table if not exists _legs (
       tx_hash text primary key, out_legs int, touching int
     )`);
@@ -136,7 +156,7 @@ async function main(): Promise<void> {
     const conv = await c.query<{
       venue: string; region: string; agree: string; disagree: string; ambiguous: string;
     }>(
-      `with spt as (select tx_hash, count(*) n from _tok group by 1)
+      `with spt as (select tx_hash, n from _alltok)
        select k.venue,
               /*
                * Regions are labelled against EVERY window, not just the first.
