@@ -53,7 +53,7 @@ export interface TimestampPlan {
  * There is now one SQL text. A future edit cannot move one copy and leave the
  * other behind, because there is no other copy.
  */
-const NEEDED_BLOCKS_SQL = `
+export const NEEDED_BLOCKS_SQL = `
   select distinct s.block_number
     from token_swap_logs s
     join pool_meta m

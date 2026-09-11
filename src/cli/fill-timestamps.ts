@@ -12,12 +12,88 @@
  * The work set comes from the rows that will be written, never from every block
  * in the swap table -- that distinction was a 9.6x overshoot on PONS. It uses
  * `fetchTimestamps`, the same single derivation the intake phase uses.
+ *
+ * `--public` fetches from the free endpoint in batches of 100 instead, which is
+ * what the document's "test the free alternatives first" rule has always asked
+ * for and what no code here implemented: the PONS rebuild's 717,340 blocks are
+ * $6.46 on Alchemy and nothing on the public RPC. It costs wall-clock instead --
+ * about 16.7 blocks per second. See src/intake/blocktimes.ts for the
+ * measurements, and note it cross-checks against Alchemy before it trusts it.
  */
 import { bootstrap } from '../bootstrap.js';
+import type { PoolClient } from '../store/db.js';
 import { errorFields, log } from '../logger.js';
 import { loadIntakeConfig } from '../intake/plan.js';
 import { RpcClient } from '../adapters/token-updates/rpc.js';
-import { fetchTimestamps, planTimestamps } from '../intake/write.js';
+import { NEEDED_BLOCKS_SQL, fetchTimestamps, planTimestamps } from '../intake/write.js';
+import {
+  PUBLIC_BATCH, PUBLIC_PACE_MS, fillFromPublicRpc, verifyAgainstAlchemy,
+} from '../intake/blocktimes.js';
+
+/** Measured; documented in src/intake/blocktimes.ts. */
+const PUBLIC_URL = 'https://rpc.mainnet.chain.robinhood.com';
+
+/**
+ * Store a verified batch. `on conflict do nothing` because `block_times` is
+ * shared across tokens and a concurrent sweep may have stored the same block.
+ */
+async function storeBatch(
+  c: PoolClient,
+  chain: string,
+  batch: { block: number; timestamp: number }[],
+): Promise<void> {
+  if (!batch.length) return;
+  const values = batch.map((_, i) => `($1,$${i * 2 + 2},to_timestamp($${i * 2 + 3}))`).join(',');
+  const params: unknown[] = [chain];
+  for (const b of batch) params.push(b.block, b.timestamp);
+  await c.query(
+    `insert into block_times (chain, block_number, block_time)
+     values ${values} on conflict do nothing`,
+    params,
+  );
+}
+
+/**
+ * The free route, with the cross-check that makes it trustworthy.
+ *
+ * It samples 100 of the blocks it is about to fetch and compares them against
+ * Alchemy (2,000 CU, $0.0009) BEFORE the long run. Any mismatch aborts: the
+ * same endpoint returns a well-formed and entirely wrong `0x0` for log
+ * timestamps, so "it answered" is not evidence that it answered correctly.
+ */
+async function runPublic(
+  c: PoolClient, chain: string, blocks: number[], alchemyUrl: string,
+): Promise<void> {
+  if (!blocks.length) { log.info('nothing to fill', { blocks_missing: 0 }); return; }
+  const step = Math.max(1, Math.floor(blocks.length / 100));
+  const sample = blocks.filter((_, i) => i % step === 0).slice(0, 100);
+  const check = await verifyAgainstAlchemy(PUBLIC_URL, alchemyUrl, sample);
+  if (check.mismatched > 0) {
+    throw new Error(
+      `the public RPC disagreed with Alchemy on ${check.mismatched} of ${check.compared} `
+        + `blocks: ${check.examples.join('; ')}. Refusing to fill from it.`,
+    );
+  }
+  log.info('cross-check passed, starting the free fill', {
+    compared: check.compared, mismatched: 0, blocks: blocks.length,
+    estimated_hours: ((blocks.length / PUBLIC_BATCH) * (PUBLIC_PACE_MS / 1000) / 3600).toFixed(2),
+  });
+  const started = Date.now();
+  const res = await fillFromPublicRpc(
+    PUBLIC_URL, blocks,
+    (batch) => storeBatch(c, chain, batch),
+    (p) => {
+      const secs = (Date.now() - started) / 1000;
+      const rate = p.fetched / Math.max(secs, 1);
+      log.info('filling', {
+        fetched: p.fetched, total: p.total, batches: p.batches,
+        blocks_per_sec: rate.toFixed(1),
+        eta_hours: ((p.total - p.fetched) / Math.max(rate, 0.01) / 3600).toFixed(2),
+      });
+    },
+  );
+  log.info('public fill complete', { ...res, cost_dollars: 0 });
+}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -30,8 +106,8 @@ async function main(): Promise<void> {
   const app = await bootstrap();
   const key = app.env.configVars.get(cfg.rpcKeyVar);
   if (!key) throw new Error(`${cfg.rpcKeyVar} is not set in this process`);
-  const rpc = new RpcClient(cfg.rpcUrlTemplate.replace('{key}', key),
-    cfg.requestTimeoutMs, ceiling);
+  const alchemyUrl = cfg.rpcUrlTemplate.replace('{key}', key);
+  const rpc = new RpcClient(alchemyUrl, cfg.requestTimeoutMs, ceiling);
 
   /*
    * TWO DIFFERENT WORK SETS, AND SAYING WHICH ONE MATTERS.
@@ -44,6 +120,7 @@ async function main(): Promise<void> {
    * like "nothing to do" while price derivation cannot run at all.
    */
   const forPrices = args.includes('--for-prices');
+  const usePublic = args.includes('--public');
 
   const c = await app.pool.connect();
   try {
@@ -63,19 +140,27 @@ async function main(): Promise<void> {
         work_set: 'blocks of in-scope swaps with no stored timestamp -- what price '
           + 'derivation needs, NOT the row-derived set',
         blocks_missing: blocks.length,
-        estimated_cu: blocks.length * 20,
-        estimated_dollars: ((blocks.length * 20 * 0.45) / 1e6).toFixed(4),
-        ceiling,
+        route: usePublic ? 'public RPC, free' : 'alchemy, metered',
+        alchemy_cu: blocks.length * 20,
+        alchemy_dollars: ((blocks.length * 20 * 0.45) / 1e6).toFixed(4),
+        public_rpc_hours: ((blocks.length / PUBLIC_BATCH) * (PUBLIC_PACE_MS / 1000) / 3600)
+          .toFixed(2),
+        ceiling: usePublic ? 'n/a -- the public route spends nothing' : ceiling,
       });
       let fetched = 0;
-      for (const b of blocks) {
-        const ts = await rpc.getBlockTimestamp(b);
-        await c.query(
-          `insert into block_times (chain, block_number, block_time)
-           values ($1,$2,to_timestamp($3)) on conflict do nothing`,
-          [cfg.chain, b, ts],
-        );
-        fetched += 1;
+      if (usePublic) {
+        await runPublic(c, cfg.chain, blocks, alchemyUrl);
+        fetched = blocks.length;
+      } else {
+        for (const b of blocks) {
+          const ts = await rpc.getBlockTimestamp(b);
+          await c.query(
+            `insert into block_times (chain, block_number, block_time)
+             values ($1,$2,to_timestamp($3)) on conflict do nothing`,
+            [cfg.chain, b, ts],
+          );
+          fetched += 1;
+        }
       }
       const left = await c.query<{ n: string }>(
         `select count(*)::text n from (
@@ -108,8 +193,30 @@ async function main(): Promise<void> {
     const plan = await planTimestamps(c, cfg);
     log.info('BEFORE THE FIRST REQUEST', {
       ...plan, ceiling, work_set: 'row-derived',
+      route: usePublic ? 'public RPC, free' : 'alchemy, metered',
+      public_rpc_hours: ((plan.toFetch / PUBLIC_BATCH) * (PUBLIC_PACE_MS / 1000) / 3600)
+        .toFixed(2),
       note: 'the work set is the blocks the rows will need, not every block in the swap table',
     });
+    if (usePublic) {
+      const missing = await c.query<{ block_number: string }>(
+        `select n.block_number::text from (${NEEDED_BLOCKS_SQL}) n
+           left join block_times b on b.chain = $1 and b.block_number = n.block_number
+          where b.block_number is null order by 1`,
+        [cfg.chain, cfg.token],
+      );
+      const blocks = missing.rows.map((r) => Number(r.block_number));
+      if (blocks.length !== plan.toFetch) {
+        throw new Error(
+          `the plan said ${plan.toFetch} blocks and the fetch found ${blocks.length}. `
+            + 'Refusing to run against an unreported figure.',
+        );
+      }
+      await runPublic(c, cfg.chain, blocks, alchemyUrl);
+      c.release();
+      await app.pool.end();
+      process.exit(0);
+    }
     const res = await fetchTimestamps(c, rpc, cfg, ceiling);
     log.info('filled', {
       ...res, cu_spent: rpc.cuSpent,

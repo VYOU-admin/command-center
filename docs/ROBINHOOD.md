@@ -153,6 +153,25 @@ DexScreener slug         robinhood
 The public RPC also caps a query at 10,000 logs and needs 4,000 ms between calls
 to avoid refusals. It is a fallback for spot checks, not a collection endpoint.
 
+**One exception, measured 2026-09-11: BLOCK timestamps from the public RPC are
+exact, and they are the expensive ones.** `eth_getBlockByNumber` is not
+`blockTimestamp`-on-a-log and does not share its defect. Across three samples at
+blocks 20M, 45M and 55M, 100 of 100 matched Alchemy bit-for-bit, with 0 returned
+as `0x0`. Its limits, isolated from each other by idling 15 s between probes:
+
+| | measured |
+|---|---|
+| batch cap | **exactly 100**; a 200-item batch is refused with HTTP 429 *even after 15 s idle*, so the refusal is about size, not rate |
+| refill | one batch per **6,000 ms**: 15,000 ms 6/6 clean, 10,000 ms 6/6, 6,000 ms 6/6, 3,000 ms 4/6 |
+| concurrency | does not help — two lanes at once produced 24 refusals out of 24 |
+| throughput | 16.7 blocks/sec, free |
+
+This matters because step 9 is the one step that can become expensive on a token
+whose swaps were copied rather than swept. `--public` on `fill-timestamps` takes
+that route; it cross-checks 100 of the blocks it is about to fetch against
+Alchemy first (2,000 CU, $0.0009) and aborts on any disagreement, because "it
+answered" is not evidence that it answered correctly.
+
 **Test the free alternatives before committing to a metered one, and report what
 each can and cannot do.** The measurement takes minutes; the assumption costs
 whatever the job costs. A block-timestamp fetch was once queued as ~13,000 paid
@@ -1028,6 +1047,23 @@ rather than spending against a figure nobody saw.
 On Alchemy this step is usually free: `blockTimestamp` arrives with the logs
 during the sweep. It exists for the blocks that arrive without one.
 
+**Swaps copied from `v4_swaps_all` carry no timestamp, and that is what makes
+this step expensive.** `loadSlice` refuses an in-scope swap whose block has no
+stored timestamp — for prices as well as for rows, since `derivePricesForLife`
+goes through `loadSlice`. On the PONS rebuild that left **717,340 blocks**, which
+is 14,346,800 CU = **$6.46 for one token** at 20 CU per `eth_getBlockByNumber`.
+
+**Take the free route.** `npm run fill-timestamps -- <cfg> --for-prices --public`
+fetches the same blocks from the public RPC in batches of 100 at no cost, at
+16.7 blocks/sec — about 12 hours for the PONS backlog. The trade is wall-clock
+against dollars, and wall-clock is the cheaper of the two here.
+
+This is the rule at the top of this document — "test the free alternatives
+before committing to a metered one" — finally implemented. It was recorded after
+a ~13,000-call fetch was queued without trying the alternative, and then the
+rebuild queued 717,340 the same way, because nothing in the code took the free
+route. A rule the code does not implement is a defect in the code.
+
 ---
 
 ### Step 10 — Prices — **STOP**
@@ -1617,7 +1653,11 @@ investigation. A crash would have been strictly better.
 | `eth_blockNumber` | 10 CU | provider's published table |
 | throughput | 15.3 calls/s at concurrency 8, zero refusals | **measured** |
 | per-item errors begin | ~13 req/s × 100 sub-calls | **measured** — 2.4–2.5 req/s with batch 100 gave 0 errors in 51,475 sub-calls |
-| public RPC pacing | 4,000 ms clean, 800 ms gave 15/20 refusals | **measured** |
+| public RPC pacing, logs | 4,000 ms clean, 800 ms gave 15/20 refusals | **measured** |
+| public RPC batch cap, blocks | exactly 100; 200 refused after 15 s idle | **measured 2026-09-11** |
+| public RPC pacing, blocks | 6,000 ms clean 6/6; 3,000 ms 4/6 | **measured 2026-09-11** |
+| public RPC block timestamps | 100/100 exact vs Alchemy, 0 zeros | **measured 2026-09-11** |
+| block timestamp, Alchemy | 20 CU each; 717,340 blocks = $6.46 on PONS | **measured 2026-09-11** |
 | price bucket | 10,000 blocks (~17 min) | derived from the measured block time |
 | bucket anchor | a fixed block tied to the token: an EXISTING grid if it shares a series, else the first swap block, else the deployment block | **measured** per token; INDEX deliberately reused PONS's 8,963,150 and added only 298 of 5,234 native buckets |
 | tick fence | 100× the bucket median | **guessed**, then validated — caught 46 and 9,129 on PONS |
