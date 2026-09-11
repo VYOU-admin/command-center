@@ -130,6 +130,34 @@ async function main(): Promise<void> {
     await c.query('create index if not exists _alltok_tx on _alltok (tx_hash)');
     await c.query('analyze _alltok');
 
+    /*
+     * AND EVERY v4 SWAP ON THE CHAIN, where `v4_swaps_all` covers the block.
+     *
+     * Counting only the token's OWN stored swaps still missed multi-hop
+     * transactions in which the token is an INTERMEDIATE: the router buys it on
+     * one pool and sells it on another, and the legs on pools whose swaps were
+     * never collected are invisible. The single transfer out of the PoolManager
+     * is then the route's final output, not that swap's, and pairing them reads
+     * as a convention disagreement.
+     *
+     * PONS had three such cases in 120,721 pairs -- 0.0025% -- and decoding two
+     * of them showed four v4 swaps across four pools in one transaction.
+     * `v4_swaps_all` holds every v4 swap on the chain for the blocks it covers,
+     * so it can see what the token's own table cannot. Outside that range the
+     * test falls back to the token's own count and says so.
+     */
+    await c.query(`create temp table if not exists _allv4 (tx_hash text primary key, n int)`);
+    await c.query('truncate _allv4');
+    await c.query(
+      `insert into _allv4
+       select v.tx_hash, count(*) from v4_swaps_all v
+        where v.chain = $1
+          and v.tx_hash in (select tx_hash from _tok)
+        group by v.tx_hash`,
+      [cfg.chain],
+    );
+    await c.query('analyze _allv4');
+
     await c.query(`create temp table if not exists _legs (
       tx_hash text primary key, out_legs int, touching int
     )`);
@@ -169,14 +197,18 @@ async function main(): Promise<void> {
                                  where k.block_number between w.lo and w.hi) then 'in-window'
                    when k.block_number < (select min(lo) from _wins) then 'before'
                    else 'outside-a-window' end as region,
-              count(*) filter (where spt.n = 1 and l.touching = 1 and l.out_legs = 1 and (
+              count(*) filter (where spt.n = 1 and l.touching = 1 and l.out_legs = 1
+                and coalesce(av.n, 1) = 1 and (
                 (k.venue='v3' and k.tok_amt < 0) or (k.venue='v4' and k.tok_amt > 0)))::text as agree,
-              count(*) filter (where spt.n = 1 and l.touching = 1 and l.out_legs = 1 and (
+              count(*) filter (where spt.n = 1 and l.touching = 1 and l.out_legs = 1
+                and coalesce(av.n, 1) = 1 and (
                 (k.venue='v3' and k.tok_amt > 0) or (k.venue='v4' and k.tok_amt < 0)))::text as disagree,
-              count(*) filter (where spt.n > 1 or l.touching > 1)::text as ambiguous
+              count(*) filter (where spt.n > 1 or l.touching > 1
+                or coalesce(av.n, 1) > 1)::text as ambiguous
          from _tok k
          join spt on spt.tx_hash = k.tx_hash
          join _legs l on l.tx_hash = k.tx_hash
+         left join _allv4 av on av.tx_hash = k.tx_hash
         where l.out_legs >= 1
         group by 1,2 order by 1,2`,
       [],

@@ -819,6 +819,17 @@ value — and reported as payment proven, purpose unproven.
 
 **A receipt that cannot be read raises.** It is not a wallet that did not pay.
 
+**A MULTI-HOP TRANSACTION WHERE THE TOKEN IS AN INTERMEDIATE IS NOT A
+CONVENTION DIFFERENCE EITHER.** A router can buy the token on one pool and sell
+it on another inside one transaction; the single transfer out of the PoolManager
+is then the route's final output, not that swap's. Counting only the token's own
+stored swaps cannot see it, because the other legs sit on pools whose swaps were
+never collected. PONS had **three such cases in 120,721 pairs — 0.0025%** — and
+decoding two showed **four v4 swaps across four pools in one transaction**.
+`v4_swaps_all` holds every v4 swap on the chain for the blocks it covers and can
+see what the token's own table cannot; outside that range the test falls back to
+the token's own count and says so.
+
 **Direction comes from the transfer, never from the sign.** The sign convention
 establishes which side is the token and how large the counter amount is. A wallet
 that received the token bought; one that sent it sold. That is directly
