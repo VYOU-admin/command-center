@@ -34,6 +34,30 @@
  * A 429 IS NEVER A MISSING TIMESTAMP. It is retried with backoff and then
  * raised. Mapping a refusal to a default would write a plausible, wrong time --
  * the failure mode this project has paid for more than once.
+ *
+ * NEITHER IS A TIMEOUT, AND THAT DISTINCTION COST SEVEN HOURS. The first run
+ * died after 430,000 of 717,340 blocks on a single per-item error:
+ *
+ *   block 51230150: Post "http://10.31.73.205:8547/rpc": context deadline exceeded
+ *
+ * That is the public RPC's own upstream timing out on one item in a batch of
+ * 100. The code raised, because it treated every per-item error that was not
+ * rate-limiting as permanent. Refusing to substitute a default was right; the
+ * category was wrong. There are three kinds of answer and they need three
+ * different responses:
+ *
+ *   THROTTLED or TRANSIENT -- 429, 502/503/504, a timeout, a reset connection,
+ *     an upstream deadline. Wait and try the batch again. These say nothing
+ *     about the data.
+ *   A LIE -- a `0x0` timestamp, a block number that is not the one asked for,
+ *     a short batch. Raise immediately and never retry: waiting does not make
+ *     a wrong answer right, and this is exactly what the endpoint does to log
+ *     timestamps.
+ *   AN ANSWER -- store it.
+ *
+ * A job that dies at 60% and is not watched is indistinguishable from one still
+ * running, so this one also re-execs from the database on a non-zero exit: the
+ * work set is recomputed from what is missing, so a restart resumes.
  */
 
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -45,6 +69,16 @@ export const PUBLIC_BATCH = 100;
 export const PUBLIC_PACE_MS = 6000;
 
 export interface BlockTime { block: number; timestamp: number }
+
+/**
+ * Is this the endpoint struggling, or the endpoint lying? Only the first is
+ * worth retrying, and treating the second as retryable would hide a wrong
+ * answer behind eight attempts.
+ */
+export function isTransient(message: string): boolean {
+  return /rate|too many|limit|timeout|timed out|deadline|temporar|unavailable|try again|reset|EOF|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|502|503|504/i
+    .test(message);
+}
 
 interface RpcItem {
   id: number;
@@ -66,12 +100,20 @@ async function fetchBatch(url: string, blocks: number[]): Promise<BlockTime[] | 
     jsonrpc: '2.0', id: i, method: 'eth_getBlockByNumber',
     params: ['0x' + b.toString(16), false],
   }));
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (res.status === 429 || res.status === 503) return null;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    // A dropped socket is the transport, not the data. Retry it.
+    const m = err instanceof Error ? err.message : String(err);
+    if (isTransient(m) || /fetch failed|network/i.test(m)) return null;
+    throw err;
+  }
+  if (res.status === 429 || res.status >= 500) return null;
   const text = await res.text();
   if (!res.ok) throw new Error(`public RPC HTTP ${res.status}: ${text.slice(0, 200)}`);
 
@@ -83,7 +125,7 @@ async function fetchBatch(url: string, blocks: number[]): Promise<BlockTime[] | 
   // A single error object in place of the array is a whole-batch refusal.
   if (!Array.isArray(parsed)) {
     const m = items[0]?.error?.message ?? '';
-    if (/rate|too many|limit/i.test(m)) return null;
+    if (isTransient(m)) return null;
     throw new Error(`public RPC refused the batch: ${text.slice(0, 200)}`);
   }
   if (items.length !== blocks.length) {
@@ -99,7 +141,10 @@ async function fetchBatch(url: string, blocks: number[]): Promise<BlockTime[] | 
     if (want === undefined) throw new Error(`public RPC returned unknown id ${item.id}`);
     if (item.error) {
       const m = item.error.message ?? '';
-      if (/rate|too many|limit/i.test(m)) return null;
+      // Transient on ONE item retries the WHOLE batch. Partial storage would
+      // leave a hole that the next run's "what is missing" query would find
+      // anyway, but retrying is cheaper than another pass over 717,340 blocks.
+      if (isTransient(m)) return null;
       throw new Error(`block ${want}: ${m}`);
     }
     if (!item.result || !item.result.timestamp) {
@@ -123,12 +168,14 @@ async function fetchBatch(url: string, blocks: number[]): Promise<BlockTime[] | 
  * answer, so a caller can never mistake throttling for an empty range.
  */
 export async function fetchBatchWithRetry(
-  url: string, blocks: number[], maxAttempts = 8,
+  url: string, blocks: number[], maxAttempts = 12,
+  onRetry?: (attempt: number, waitMs: number) => void,
 ): Promise<BlockTime[]> {
   let wait = PUBLIC_PACE_MS;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const got = await fetchBatch(url, blocks);
     if (got) return got;
+    if (onRetry) onRetry(attempt, wait);
     await sleep(wait);
     wait = Math.min(wait * 2, 120_000);
   }
@@ -159,7 +206,14 @@ export async function fillFromPublicRpc(
   for (let i = 0; i < blocks.length; i += PUBLIC_BATCH) {
     const slice = blocks.slice(i, i + PUBLIC_BATCH);
     const before = Date.now();
-    const got = await fetchBatchWithRetry(url, slice);
+    const got = await fetchBatchWithRetry(url, slice, 12, (attempt, waitMs) => {
+      p.refusals += 1;
+      if (attempt >= 3) {
+        log.warn('public RPC retrying a batch', {
+          from_block: slice[0], attempt, wait_ms: waitMs, refusals_total: p.refusals,
+        });
+      }
+    });
     await store(got);
     p.fetched += got.length;
     p.batches += 1;

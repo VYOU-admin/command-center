@@ -166,6 +166,25 @@ as `0x0`. Its limits, isolated from each other by idling 15 s between probes:
 | concurrency | does not help — two lanes at once produced 24 refusals out of 24 |
 | throughput | 16.7 blocks/sec, free |
 
+**It fails transiently, and a transient failure is not a wrong answer.** The
+first run died after 430,000 of 717,340 blocks on one per-item error —
+`block 51230150: Post "http://10.31.73.205:8547/rpc": context deadline
+exceeded`, the endpoint's own upstream timing out on one item in a batch of 100.
+The code raised, because it treated every per-item error that was not
+rate-limiting as permanent, and then sat dead for seven hours because nothing
+was watching it. Three categories, three responses, and conflating the first two
+is what cost the time:
+
+| the endpoint says | response |
+|---|---|
+| 429, 5xx, timeout, deadline exceeded, reset connection | **retry the batch** — this says nothing about the data |
+| `0x0` timestamp, wrong block number, short batch | **raise at once, never retry** — waiting does not make a wrong answer right, and this is exactly what it does to log timestamps |
+| a timestamp | store it |
+
+A long free job must also survive its own failures: the work set is recomputed
+from what is missing, so re-running resumes, and it is run under a loop that
+re-execs on a non-zero exit.
+
 This matters because step 9 is the one step that can become expensive on a token
 whose swaps were copied rather than swept. `--public` on `fill-timestamps` takes
 that route; it cross-checks 100 of the blocks it is about to fetch against
