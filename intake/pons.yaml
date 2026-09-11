@@ -1,9 +1,13 @@
-# PONS — the worked example for the intake runner.
+# PONS — the worked example for the intake runner, and now the config its
+# REBUILD runs from.
 #
-# This is the configuration that would reproduce the PONS intake from scratch.
-# It exists as the reference shape for the next token, not to be re-run: PONS is
-# already loaded, and re-running would re-fetch millions of logs to arrive at
-# rows that are already in the database.
+# PONS was originally loaded by scratchpad scripts that were lost, under rules
+# that have since changed three ways: it excluded 2,001 EIP-7702 delegated
+# accounts the current rule keeps, it used the 3 configured router addresses
+# where behaviour finds 62 candidates, and it has no transfer rows. The rebuild
+# was approved on 2026-09-10.
+#
+# PONS-P1-T (396 hop wallets) is a SEPARATE tag and is not touched by it.
 #
 # Every figure here was measured during the original intake. Nothing is recalled.
 
@@ -107,7 +111,10 @@ ceilings:
   scope: 100000
   sweep: 4000000
   conventions: 50000
-  cohort: 600000
+  # REBUILD 2026-09-10. 16,910 candidate wallets in-window x (26 CU code check +
+  # ~17.1 CU payment proof) is ~727,000 CU; the old 600,000 was sized before the
+  # payment rule existed and would stop the phase two thirds through.
+  cohort: 1000000
   tags: 0            # writes wallet_tags; no network
   timestamps: 2000000
   prices: 0        # derived from stored logs; no network
