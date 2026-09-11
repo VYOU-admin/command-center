@@ -162,10 +162,26 @@ async function main(): Promise<void> {
       tx_hash text primary key, out_legs int, touching int
     )`);
     await c.query('truncate _legs');
+    /*
+     * A TRANSFER IS THAT SWAP'S OUTPUT ONLY IF THE AMOUNTS MATCH.
+     *
+     * Every residual left after the round-trip and multi-hop tests had a
+     * transfer whose amount bore no relation to the swap it was paired with.
+     * PONS's last one was a 0.808 transfer against a 57.37 swap -- 70x apart --
+     * inside a 74-log route that hopped through v3 pools, which `v4_swaps_all`
+     * cannot see because it holds only v4. No amount of counting swaps finds
+     * that; comparing the amounts does, and it is the same test that separated
+     * 219 of the 220 v3 residuals earlier.
+     *
+     * out_legs now counts only transfers out of the counterparty whose amount
+     * equals some swap's token amount in that transaction.
+     */
     await c.query(
       `insert into _legs
        select t.tx_hash,
-              count(*) filter (where m.from_addr = t.cp and m.to_addr <> t.cp),
+              count(*) filter (where m.from_addr = t.cp and m.to_addr <> t.cp
+                and exists (select 1 from _tok k2
+                             where k2.tx_hash = t.tx_hash and abs(k2.tok_amt) = m.amount)),
               count(*) filter (where m.from_addr = t.cp or m.to_addr = t.cp)
          from (select distinct tx_hash, counterparty cp from _tok) t
          join token_transfer_logs m on m.chain=$1 and m.token=$2 and m.tx_hash=t.tx_hash
