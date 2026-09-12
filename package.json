@@ -30,7 +30,8 @@
     "decode-tx": "npm run build && node dist/cli/decode-tx.js",
     "write-rows": "npm run build && node dist/cli/write-rows.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
-    "check-pages": "node scripts/check-pages.mjs"
+    "check-pages": "node scripts/check-pages.mjs",
+    "eth-usd-probe": "node dist/cli/eth-usd-probe.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
