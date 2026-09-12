@@ -29,42 +29,51 @@ built on it.
 
 ## 0. What is loaded right now
 
-*Updated whenever a token is loaded or a defect is found. Last: 2026-09-10.*
+*Updated whenever a token is loaded or a defect is found. Last: 2026-09-12.*
 **This is the first thing a session needs.** Everything below it is procedure;
 this is state.
 
-| token | role | cohorts | rows | wallets | cursor | monitor | last scored |
+| token | role | cohorts | rows | wallets | swept to | monitor | scores |
 |---|---|---|---|---|---|---|---|
-| **PONS** `0x39dBED…4571` | tracked | `PONS-P1` 13,095 · `PONS-P1-T` 396 | 185,189 | 12,636 | 59,183,149 | `token-updates` ✅ | 2026-09-10 |
-| **INDEX** `0x56910D…9870` | tracked | `INDEX-P1` 3,316 · `INDEX-P2` 4,267 | 152,369 | 7,230 | 59,183,149 | `index-updates` ✅ | 2026-09-10 |
-| **AI** `0x2E8c31…1e18` | tracked | `AI-P1` 3,508 | 45,794 | 3,507 | 59,181,432 | `ai-updates` ✅ | 2026-09-10 |
-| **NVDA** `0xd0601c…9eec` | **pricing-source** | none | 0 | 0 | none | none — correct | never |
-| **MOS** `4ChT49…91ZT` | tracked (**Solana**) | `MOS-P1..P4` 519 | 1,534 | 486 | none | none | never |
-| **USELESS** `Dz9mQ9…bonk` | tracked (**Solana**) | `USELESS-P1..P3` 1,615 | 10,458 | 1,462 | none | none | never |
+| **PONS** `0x39dBED…4571` | tracked | `PONS-P1` 13,823 · `PONS-P1-T` 396 | 503,472 | 14,138 | 61,173,149 | `token-updates` ✅ | 13,823 |
+| **INDEX** `0x56910D…9870` | tracked | `INDEX-P1` 3,316 · `INDEX-P2` 4,267 | 156,723 | 7,230 | 61,193,149 | `index-updates` ✅ | 7,583 |
+| **AI** `0x2E8c31…1e18` | tracked | `AI-P1` 3,508 | 59,592 | 3,507 | 61,181,432 | `ai-updates` ✅ | 3,508 |
+| **NVDA** `0xd0601c…9eec` | **pricing-source** | none | 0 | 0 | 59,111,432 | none — correct | never |
+| **MOS** `4ChT49…91ZT` | tracked (**Solana**) | `MOS-P1..P4` 519 | 1,534 | 486 | none | none | **never** |
+| **USELESS** `Dz9mQ9…bonk` | tracked (**Solana**) | `USELESS-P1..P3` 1,615 | 10,458 | 1,462 | none | none | **never** |
 
 ```
-price series   pons 4,952   index 5,252   ai 3,973   native 9,231   bridge(NVDA) 4,065
+row breakdown  PONS  buy 115,084  sell 76,195  transfers 312,193
+               INDEX buy  58,934  sell 29,318  transfers  68,471
+               AI    buy  22,976  sell 14,764  transfers  21,852
+price series   pons 5,171  index 5,450  ai 4,171  native 9,586  bridge(NVDA) 4,065
 monitors       token-updates, index-updates, ai-updates, token-price,
-               wallet-scores, oil-prices, postgres-disk        all enabled
+               wallet-scores, oil-prices, postgres-disk    all enabled, 0 failures/24h
 ```
+
+**PONS was rebuilt on 2026-09-11/12 and is no longer the odd one out.** It now
+carries the same rules as AI and INDEX: EIP-7702 accounts kept, 39 routers found
+by behaviour rather than the 3 configured, payment-proven cohort membership, and
+transfer rows. Cross-token comparison is sound for the first time.
 
 **What is known incomplete, per token:**
 
-- **PONS** — built under **different rules** from AI and INDEX, and frozen. Its
-  cohort excluded 2,001 EIP-7702 delegated accounts that the current rule keeps;
-  it used the 3 configured router addresses where behaviour finds 62 candidates
-  over its window; and it has **no `transfer_in`/`transfer_out` rows** while AI
-  and INDEX do. **Any comparison across tokens has to account for this.** See
-  step 7 and the PONS findings.
-- **AI** — 14,135 rows carry a null USD. ~5,032 of those are NVDA-quoted rows
-  written by the hourly job before the bridge series was extended; the series
-  now reaches them and the repair is a scoped reinsert of the backlog range,
-  outstanding.
-- **INDEX** — 71,518 rows carry a null USD, expected: 66,682 are transfers,
-  which are always unpriced by definition.
+- **INDEX** — **6,052 trade rows carry a null USD**, by far the worst of the
+  three (AI 169, PONS 80). Not yet diagnosed. Transfers are excluded from that
+  count; they are unpriced by definition.
+- **NVDA** — **1,443,064 in-scope swap blocks have no stored timestamp.** Benign
+  today: NVDA has no cohort and no rows, so nothing calls `loadSlice` on it. It
+  becomes a blocker the moment NVDA is tracked rather than used as a bridge, and
+  it is ~12 h on the free route or $13 metered.
 - **MOS, USELESS** — **Solana**, loaded by the scratchpad scripts that were
-  lost. Nothing in this document applies to them. No pump points, so they cannot
-  be scored; no monitor, so they do not advance. They are frozen history.
+  lost. Nothing in this document applies to them. Tagged but **never scored**:
+  `wallet-scores` requires an explicit `chain` and is Robinhood-only, which is
+  correct — it once scored these two from a Robinhood monitor. They are frozen
+  history until a Solana scorer exists.
+- **All three tracked tokens** — rows extend past the swept range because the
+  hourly job runs ahead of the last sweep. That tail is now written by the
+  **fixed** adapter (carrying `log_index` and a real `counterparty`), so it is
+  no longer a region of known-wrong rows; before 2026-09-12 it was.
 
 ---
 
@@ -2093,12 +2102,35 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   reader finds its own; neither is correct once a third token arrives. Give the
   shared series a chain-level anchor before that happens.
 
+- **Nothing scores Solana.** `MOS` (519 wallets across 4 windows) and `USELESS`
+  (1,615 across 3) are tagged and have rows, and `wallet_scores` holds nothing
+  for either. The scorer is correctly Robinhood-scoped after it once scored them
+  from a Robinhood monitor, but the document describes scoring as covering every
+  window and no window of these two is covered.
+- **NVDA's swaps are untimed.** 1,443,064 in-scope swap blocks carry no
+  `block_times` row. It costs nothing today because NVDA is a pricing source with
+  no rows, but the bridge series is derived from swaps whose blocks the code
+  cannot date, and the rule that `loadSlice` enforces everywhere else does not
+  reach it.
+
 One further limitation is a property of the chain rather than a gap in the code:
 
 - **A bucket median is still a median over ~17 minutes.** The window-median bias
   measured elsewhere (95.56 whole-window against 127.17 and 97.41 for the
   halves) has never been measured on this chain. Measure it on a token that
   moved.
+
+**Closed on 2026-09-12**, and kept here because the pattern recurs: three
+separate tables kept members a cohort no longer had — `wallet_tags`,
+`wallet_scores`, and `wallet_transactions` rows for dropped wallets. All three
+were upsert-only. **Whenever a membership can change, every table derived from it
+needs a removal path, not just an upsert**, and the check belongs in the write
+itself rather than in a later report.
+
+Also closed: the block-timestamp step took the metered route for 717,340 blocks
+while this document had said since the first intake to test the free
+alternatives first. Both are now implemented; the point is that each sat here
+unimplemented while work was built on top of it.
 
 When something is found that this document requires and the code does not do,
 it goes here, and it is a defect in the code.
