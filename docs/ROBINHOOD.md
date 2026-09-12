@@ -1331,6 +1331,44 @@ table carries a `pons_usd` column and every pool row a `pons_side`. Renaming
 them is a migration rather than a config change. Expect them; do not write
 `token_side`.
 
+**The unique key is `(chain, tx_hash, wallet, token, side, pool, counterparty,
+log_index)` with `NULLS NOT DISTINCT`, and every part of it earns its place.**
+Each was added after the simpler form silently discarded real rows, and since
+the insert is `ON CONFLICT DO NOTHING`, a discarded row looks exactly like an
+idempotent re-run.
+
+| part | what the key loses without it |
+|---|---|
+| `counterparty` | one transaction sending to two recipients makes two `transfer_out` rows that collide on a null pool — splits and airdrops do this constantly |
+| `NULLS NOT DISTINCT` | the opposite: Postgres treats two nulls as distinct, a null pool makes every transfer unique, and a re-run doubles every transfer instead of being idempotent |
+| `log_index` | two transfers in one transaction **between the same pair** collapse to one row and the rest are thrown away |
+
+The third was found on 2026-09-12, when the PONS rebuild planned 502,147 rows
+and stored 488,806 — **13,341 transfers discarded, trades untouched**. They are
+not duplicates. In `0x8235525f6cb2d57d9dad3685463741af94179148b490cfe98687c7755d1d8a5f`
+there are **58 transfers** from `0x5ca62142…` to `0x0e42d788…`, every amount
+different; in `0xd1f443def102e449e4744fe12ef4ac0d9e2c8f89e2f422efccef9672bb780afe`
+there are **133** between one pair. Measured over cohort-touching logs, the old
+key collapsed **26,149 for PONS, 3,959 for INDEX, 1,842 for AI**.
+
+**`log_index` is NULL for a trade row and that is deliberate.** A trade row
+aggregates every swap log for one wallet, side and pool inside a transaction —
+that aggregation is the definition of the row, not an accident — so it has no
+single log index and must keep deduplicating exactly as before. `NULLS NOT
+DISTINCT` gives that for free: trade rows all carry null and collide as they
+always did, transfer rows carry a real index and no longer collide.
+
+The defect stayed invisible for as long as it did because PONS had 2,240
+transfer rows until the transfer gap was closed. At 311,112 it surfaced
+immediately. **A constraint is only exercised by the data that reaches it.**
+
+**The hourly adapter hardcoded `counterparty` to null while the intake passed the
+real value.** Same family, opposite direction: the column is in the key so that
+one transaction to two recipients keeps both rows, and with null it keeps one.
+719 PONS rows, 1,205 INDEX and 311 AI carry a null counterparty written by that
+path. Two code paths inserting into one table must build the row the same way,
+and this is the fourth time on this project that they did not.
+
 **Write progressively**, per slice, not accumulated and flushed at the end, so a
 run that dies leaves a truthful partial record rather than nothing.
 
@@ -1427,6 +1465,24 @@ success, so `last_status` read green while windows went unscored.
 **There is ONE implementation of a score.** It lived inside the CLI's `main()`,
 which is why the only way to score was to run it by hand. It now lives in
 `src/scoring/run.ts`; the CLI and the monitor both call it.
+
+**A cohort that shrinks must shrink the scores.** This was upsert-only, like
+tags were, so a wallet removed from a cohort kept its score for ever. The PONS
+rebuild dropped 733 wallets and left 733 scores behind: **14,556 rows describing
+a 13,823-wallet cohort**, which the dashboard reads and renders as members.
+Scoring now deletes `wallet_scores` rows for wallets no longer carrying the tag,
+scoped to `(chain, token, tag)` so a wallet scored under another window is
+untouched.
+
+**The delete and the verification run inside the write transaction**, and the
+run throws if the table does not then hold exactly the cohort — rolling the
+whole write back rather than publishing a score table that describes no cohort
+that was ever computed. The statements having run is not evidence.
+
+This is the same defect in three places: `wallet_tags`, `wallet_scores`, and
+`wallet_transactions` rows for dropped wallets. **Whenever a membership can
+change, every table derived from it needs a removal path, not just an upsert.**
+Check the rest of the derived tables against this before adding another.
 
 **Two score-quality flags, derived on every run and stored as an array:**
 

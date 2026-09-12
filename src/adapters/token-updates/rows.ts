@@ -68,6 +68,16 @@ export interface WalletRow {
   counterparty?: string | null;
   blockTime: Date;
   blockNumber: number;
+  /**
+   * The Transfer log's index for a transfer row; NULL for a trade row.
+   *
+   * A trade row aggregates every swap log for one wallet, side and pool inside
+   * a transaction, so it has no single log index -- that aggregation is the
+   * definition of the row. Transfers are one row per log, and without this two
+   * transfers between the same pair in one transaction collide on the unique
+   * key and one is silently discarded.
+   */
+  logIndex: number | null;
   tokenAmount: string;
   usdAmount: number | null;
   priceUsd: number | null;
@@ -316,6 +326,9 @@ export function buildRows(
       wallet: leg.wallet, side: leg.side, txHash: leg.txHash, pool: leg.pool,
       counterparty: null,
       blockTime: new Date(leg.timestamp * 1000), blockNumber: leg.block,
+      // A trade row aggregates every swap log for this wallet, side and pool in
+      // the transaction, so there is no single log index to carry.
+      logIndex: null,
       tokenAmount, usdAmount: usd,
       priceUsd: usd !== null && amountNumber > 0 ? usd / amountNumber : null,
     });
@@ -383,6 +396,7 @@ export function buildTransferRows(
         counterparty: side === 'transfer_in' ? t.from : t.to,
         blockTime: new Date(t.timestamp * 1000),
         blockNumber: t.block,
+        logIndex: t.logIndex,
         tokenAmount: amount,
         usdAmount: null,
         priceUsd: null,

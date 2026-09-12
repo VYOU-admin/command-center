@@ -93,6 +93,11 @@ export interface ScoreResult {
   lowWeightThreshold: number; lowWeightDerived: boolean;
   flags: Record<string, number>;
   written: number;
+  /**
+   * Scores deleted because the wallet is no longer in the cohort. Non-zero only
+   * after a membership change; 733 on the PONS rebuild.
+   */
+  orphansRemoved: number;
 }
 
 export async function scoreWindow(
@@ -389,10 +394,11 @@ export async function scoreWindow(
     return {
       chain, token, tag, cohort: cohort.length, scored: flagged.length,
       lowWeightThreshold: lowWeight.threshold, lowWeightDerived: lowWeight.derived,
-      flags: countBy(flagged.flatMap((x) => x.f)), written: 0,
+      flags: countBy(flagged.flatMap((x) => x.f)), written: 0, orphansRemoved: 0,
     };
   }
 
+  let removedOrphans = 0;
   const stored = await withTransaction(pool, async (c) => {
     let n = 0;
     for (const { w, f } of flagged) {
@@ -417,14 +423,57 @@ export async function scoreWindow(
       );
       n += res.rowCount ?? 0;
     }
+
+    /*
+     * A COHORT THAT SHRINKS MUST SHRINK THE SCORES, for the same reason it must
+     * shrink the tags: this was upsert-only, so a wallet removed from a cohort
+     * kept its score for ever. The PONS rebuild dropped 733 wallets and left 733
+     * scores behind -- 14,556 rows describing a 13,823-wallet cohort, which the
+     * dashboard reads and renders as members.
+     *
+     * Scoped to (chain, token, tag). A wallet legitimately scored under another
+     * window's tag is a different row and is untouched.
+     */
+    const orphans = await c.query(
+      `delete from wallet_scores s
+        where s.chain = $1 and s.token = $2 and s.tag = $3
+          and not exists (
+            select 1 from wallet_tags t
+             where t.mint = $2 and t.tag = $3 and t.wallet = s.wallet
+          )`,
+      [chain, token, tag],
+    );
+    removedOrphans = orphans.rowCount ?? 0;
+
+    /*
+     * VERIFY INSIDE THE TRANSACTION. The statements having run is not evidence
+     * the table now describes the cohort, and this is the table the dashboard
+     * and every downstream report read. Throwing rolls the whole write back.
+     */
+    const after = await c.query<{ n: string }>(
+      `select count(*)::text n from wallet_scores
+        where chain = $1 and token = $2 and tag = $3`,
+      [chain, token, tag],
+    );
+    const held = Number(after.rows[0]?.n ?? 0);
+    if (held !== cohort.length) {
+      throw new Error(
+        `after scoring ${tag} the table holds ${held} rows but the cohort has `
+          + `${cohort.length}. Rolling back rather than publishing a score table `
+          + 'that does not describe the cohort.',
+      );
+    }
     return n;
   });
-  log.info('scores written', { rows: stored, metrics: METRIC_ORDER });
+  log.info('scores written', {
+    rows: stored, orphans_removed: removedOrphans, metrics: METRIC_ORDER,
+  });
 
   return {
     chain, token, tag,
     cohort: cohort.length,
     scored: flagged.length,
+    orphansRemoved: removedOrphans,
     lowWeightThreshold: lowWeight.threshold,
     lowWeightDerived: lowWeight.derived,
     flags: countBy(flagged.flatMap((x) => x.f)),

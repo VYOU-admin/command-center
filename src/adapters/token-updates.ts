@@ -551,15 +551,25 @@ const adapter: SourceAdapter<WalletRow> = {
 
     let stored = 0;
     for (const r of rows) {
+      /*
+       * COUNTERPARTY WAS HARDCODED null HERE while the intake path passed the
+       * real value. The column is in the unique key precisely so that one
+       * transaction sending to two recipients keeps both rows -- with null it
+       * keeps one, so the hourly job was discarding transfer rows the backfill
+       * would have kept. 719 PONS rows, 1,205 INDEX and 311 AI carry a null
+       * counterparty from this path.
+       */
       const res = await client.query(
         `insert into wallet_transactions
            (chain, token, wallet, side, counterparty, tx_hash, pool,
-            block_time, block_number, token_amount, usd_amount, price_usd)
-         values ($1, $2, $3, $4, null, $5, $6, $7, $8, $9, $10, $11)
+            block_time, block_number, log_index, token_amount, usd_amount, price_usd)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          on conflict do nothing`,
         [
-          p.cfg.chain, p.cfg.token, r.wallet, r.side, r.txHash, r.pool,
-          r.blockTime, r.blockNumber, r.tokenAmount, r.usdAmount, r.priceUsd,
+          p.cfg.chain, p.cfg.token, r.wallet, r.side, r.counterparty ?? null,
+          r.txHash, r.pool,
+          r.blockTime, r.blockNumber, r.logIndex, r.tokenAmount, r.usdAmount,
+          r.priceUsd,
         ],
       );
       stored += res.rowCount ?? 0;

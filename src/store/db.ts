@@ -196,6 +196,10 @@ create table if not exists wallet_transactions (
     check (side in ('buy','sell','transfer_in','transfer_out'))
 );
 
+-- Null for a trade row, the Transfer log's index for a transfer row. See the
+-- unique index below for why.
+alter table wallet_transactions add column if not exists log_index bigint;
+
 /*
  * COUNTERPARTY IS IN THE KEY, AND NULLS COMPARE EQUAL. Both differ from the
  * obvious form, and each fixes a way the obvious form loses real rows.
@@ -211,9 +215,42 @@ create table if not exists wallet_transactions (
  * stops deduplicating anything at all. A re-run would then double every transfer
  * instead of being idempotent.
  */
-create unique index if not exists wallet_transactions_event_idx
-  on wallet_transactions (chain, tx_hash, wallet, token, side, pool, counterparty)
+/*
+ * LOG INDEX IS IN THE KEY, AND THAT IS THE THIRD WAY THE OBVIOUS FORM LOSES
+ * REAL ROWS. Counterparty separates two transfers in one transaction to
+ * DIFFERENT recipients. It does nothing for two transfers in one transaction
+ * between the SAME pair, which is common and not a duplicate:
+ *
+ *   0x8235525f6cb2d57d9dad3685463741af94179148b490cfe98687c7755d1d8a5f
+ *     58 transfers, 0x5ca62142... -> 0x0e42d788..., every amount different
+ *   0xd1f443def102e449e4744fe12ef4ac0d9e2c8f89e2f422efccef9672bb780afe
+ *     133 transfers between one pair
+ *
+ * Under the old key each of those collapsed to ONE row and the rest were
+ * discarded by ON CONFLICT DO NOTHING -- silently, since a discarded insert
+ * is indistinguishable from an idempotent re-run. Measured on cohort-touching
+ * logs: 26,149 collapsed for PONS, 3,959 for INDEX, 1,842 for AI. It only
+ * became visible when PONS went from 2,240 transfer rows to 311,112.
+ *
+ * NULL FOR A TRADE ROW, AND DELIBERATELY SO. A trade row already aggregates
+ * every swap log for one wallet, side and pool within a transaction -- that
+ * aggregation is the definition of the row, not an accident -- so it has no
+ * single log index and must keep deduplicating exactly as before. NULLS NOT
+ * DISTINCT gives that for free: trade rows all carry null and collide as they
+ * always did, while transfer rows carry a real index and no longer collide.
+ */
+create unique index if not exists wallet_transactions_event_idx_v2
+  on wallet_transactions
+     (chain, tx_hash, wallet, token, side, pool, counterparty, log_index)
   nulls not distinct;
+
+/*
+ * Dropped only AFTER the replacement exists. The new key is strictly finer than
+ * the old one, so any set unique under the old key is unique under the new one
+ * and the create above cannot fail -- but ordering it this way means a failure
+ * never leaves the table without a unique constraint.
+ */
+drop index if exists wallet_transactions_event_idx;
 
 create index if not exists wallet_transactions_token_wallet_idx
   on wallet_transactions (token, wallet);

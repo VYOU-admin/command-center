@@ -588,13 +588,14 @@ export async function planOrWrite(
         const res = await client.query(
           `insert into wallet_transactions
              (chain, token, wallet, side, counterparty, tx_hash, pool,
-              block_time, block_number, token_amount, usd_amount, price_usd)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+              block_time, block_number, log_index, token_amount, usd_amount, price_usd)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            on conflict do nothing`,
           [
             cfg.chain, cfg.token, r.wallet, r.side, r.counterparty ?? null,
             r.txHash, r.pool,
-            r.blockTime, r.blockNumber, r.tokenAmount, r.usdAmount, r.priceUsd,
+            r.blockTime, r.blockNumber, r.logIndex, r.tokenAmount, r.usdAmount,
+            r.priceUsd,
           ],
         );
         stored += res.rowCount ?? 0;
