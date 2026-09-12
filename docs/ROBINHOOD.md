@@ -1042,6 +1042,29 @@ half-collected cohort must not look complete.
 `NOT NULL` with no default. A re-run re-asserts `auto` tags by upsert and never
 removes `manual` ones — tags live in their own table so operator edits survive.
 
+**A cohort that shrinks must shrink the tags.** This step was upsert-only, which
+meant a membership rule that *removes* a wallet could never take effect. The
+PONS rebuild's cohort of 13,823 keeps 12,362, adds 1,461 and **drops 733**;
+upserting alone would have left 14,556 tags — the union of two different
+definitions, describing no cohort that was ever computed. The cohort handed to
+this step is the complete membership for the window, so an `auto` tag for a
+wallet not in it is deleted. `manual` is untouched in both directions.
+
+This happens **only when the window is complete**. A partial cohort is not a
+membership claim and deleting against one would empty the table. Both callers
+pass the whole reviewed cohort, and the hourly adapter only reads `wallet_tags`.
+
+**The step re-counts and refuses to continue if the table does not hold the
+cohort.** The statements having run without throwing is not evidence; the rows
+written next are derived from these tags, so a wrong tag table is a wrong row
+table one step later.
+
+Check the address casing before a rebuild. Tags are matched on the exact string,
+so if stored tags and the cohort disagreed in case the upsert would insert a
+second row for every wallet instead of refreshing it. On the PONS rebuild both
+sides were fully lowercase and the exact-case match equalled the lowercased
+match at 12,362, which is what makes the delete-and-upsert safe.
+
 ---
 
 ### Step 9 — Block timestamps

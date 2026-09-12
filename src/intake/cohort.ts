@@ -38,6 +38,12 @@ export interface TagReport {
   tagsRefreshed: number;
   /** Tags a human set to `manual`, which a re-run must never overwrite. */
   manualLeftAlone: number;
+  /**
+   * `auto` tags deleted because the rebuilt cohort no longer contains the
+   * wallet. Non-zero only when the membership rule has changed, so it is worth
+   * reading: 733 on the PONS rebuild.
+   */
+  tagsRemoved: number;
   windowRow: boolean;
 }
 
@@ -212,6 +218,21 @@ export async function buildCohort(
  * both finished. A window with tags and no window row is the signal that it was
  * interrupted, and it renders with no legend entry, which is correct: a
  * half-collected cohort must not look complete.
+ *
+ * A COHORT THAT SHRINKS MUST SHRINK THE TAGS. This was upsert-only, so a
+ * membership rule that removes a wallet could never take effect: the PONS
+ * rebuild's cohort of 13,823 kept 12,362, added 1,461 and DROPPED 733, and
+ * upserting alone would have left 14,556 tags -- the union of two different
+ * definitions, describing no cohort that was ever computed. The cohort argument
+ * is the complete membership for this window, so an `auto` tag for a wallet not
+ * in it is removed.
+ *
+ * Only when `complete`. A partial cohort is not a membership claim, and deleting
+ * against one would empty the table. Both callers pass the whole reviewed
+ * cohort; the hourly adapter only reads `wallet_tags` and never calls this.
+ *
+ * `manual` is never touched, in either direction. An operator's edit outlives a
+ * re-run, which is the entire reason tags live in their own table.
  */
 export async function writeTags(
   client: PoolClient,
@@ -240,7 +261,43 @@ export async function writeTags(
 
   const manualLeftAlone = cohort.length - tagsStored - tagsRefreshed;
   if (!complete) {
-    return { tagsStored, tagsRefreshed, manualLeftAlone, windowRow: false };
+    return { tagsStored, tagsRefreshed, manualLeftAlone, windowRow: false, tagsRemoved: 0 };
+  }
+
+  /*
+   * Remove `auto` tags for wallets the rebuilt cohort no longer contains.
+   * Anti-joined against an unnested array so the planner hashes it; `<> all()`
+   * over 13,823 addresses is a nested loop against every stored tag.
+   */
+  const removed = await client.query<{ wallet: string }>(
+    `delete from wallet_tags t
+      where t.mint = $1 and t.tag = $2 and t.source = 'auto'
+        and not exists (
+          select 1 from unnest($3::text[]) as c(wallet) where c.wallet = t.wallet
+        )
+      returning t.wallet`,
+    [cfg.token, window.label, cohort],
+  );
+  const tagsRemoved = removed.rowCount ?? 0;
+
+  /*
+   * VERIFY, DO NOT ASSUME. The statements above having run without throwing is
+   * not evidence the table now holds the cohort. Re-count and refuse to go on
+   * if it does not, because the rows written next are derived from these tags.
+   */
+  const after = await client.query<{ auto: string; manual: string }>(
+    `select count(*) filter (where source = 'auto')::text as auto,
+            count(*) filter (where source = 'manual')::text as manual
+       from wallet_tags where mint = $1 and tag = $2`,
+    [cfg.token, window.label],
+  );
+  const auto = Number(after.rows[0]?.auto ?? 0);
+  if (auto !== cohort.length) {
+    throw new Error(
+      `after writing tags for ${window.label} the table holds ${auto} auto tags but the `
+        + `cohort has ${cohort.length}. Refusing to continue: the rows are derived from `
+        + 'these tags.',
+    );
   }
   await client.query(
     `insert into token_windows (mint, tag, window_start, window_end, label)
@@ -251,5 +308,5 @@ export async function writeTags(
            label        = excluded.label`,
     [cfg.token, window.label, window.start, window.end, window.label],
   );
-  return { tagsStored, tagsRefreshed, manualLeftAlone, windowRow: true };
+  return { tagsStored, tagsRefreshed, manualLeftAlone, tagsRemoved, windowRow: true };
 }
