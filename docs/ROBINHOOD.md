@@ -1722,6 +1722,231 @@ to be true. That is what the next token reads.
 
 ---
 
+### Step 17 — The watchlist and its alert
+
+**Does:** cuts the top N% of every scored window into one cross-token wallet
+list, watches those wallets trade **any** token on the chain, and alerts
+aggregated by token.
+**Costs:** the watchlist is free — it reads `wallet_scores`. The watcher spends;
+see below.
+**Produces:** `wallet_watchlist`, `watchlist_activity`.
+**Stops:** yes — the watchlist is reviewed before the watcher is built, because
+the cut decides everything the watcher spends money on.
+
+**This is what the whole system is for.** Every step before it answers "what did
+this cohort do with this token". This one inverts that: it asks what the wallets
+worth watching are doing *now*, anywhere. It was built last and belongs in this
+document first.
+
+#### The cut is a config value, not a constant
+
+`watchlist.top_percent`, default **0.05**. It is not measured and there is no
+natural break in the data to measure it against — it is an operator preference
+and will be tuned. Measured sensitivity on the four scored windows, merged:
+
+| cut | qualifying rows | distinct wallets |
+|---|---|---|
+| 1% | 253 | 246 |
+| 2% | 501 | 483 |
+| **5%** | **1,248** | **1,176** |
+| 10% | 2,493 | 2,354 |
+
+Per window, at 5%, on 2026-09-12:
+
+| window | cohort | top 5% | score at cutoff | max | median |
+|---|---|---|---|---|---|
+| `AI-P1` | 3,508 | 176 | **0.264357** | 0.757349 | 0.157199 |
+| `INDEX-P1` | 3,316 | 166 | **0.668889** | 0.832810 | 0.250994 |
+| `INDEX-P2` | 4,267 | 214 | **0.337093** | 0.640614 | 0.260233 |
+| `PONS-P1` | 13,823 | 692 | **0.449739** | 0.602470 | 0.344013 |
+
+#### SCORES ARE NOT COMPARABLE ACROSS WINDOWS, AND THE 5% CUT PROVES IT
+
+State this wherever the merged list is used. Three measurements, each sufficient
+on its own:
+
+1. **`INDEX-P1`'s 5% cutoff, 0.6689, is above `PONS-P1`'s MAXIMUM of 0.6025 and
+   above `INDEX-P2`'s maximum of 0.6406.** No PONS wallet would clear INDEX-P1's
+   bar, and every INDEX-P1 qualifier would top the PONS list.
+2. **`AI-P1`'s cutoff, 0.2644, is below `PONS-P1`'s MEDIAN of 0.3440.** The same
+   "top 5%" label selects an élite in one window and an average wallet in
+   another.
+3. Each metric is **min-maxed within its own cohort** (step 13), so a score is a
+   rank-like position inside one window and carries no cross-window meaning. The
+   quality thresholds are per-window too — `low-weight` derived to 0.625 for
+   INDEX-P1 and could not be derived for INDEX-P2.
+
+**`INDEX-P1`'s top 5% is an artefact, and it is the clearest case.** All **166 of
+166** are flagged `low-weight`, with a **median `weight_used` of 0.300** — every
+one of them is scored on 30% of the weight. The cause is known: INDEX-P1 spans
+blocks 1,693,406–9,800,208, which is exactly the era where 6,052 INDEX rows have
+no USD (step 10 and the INDEX findings). The money metrics are null, they drop
+out, the weights renormalise, and a wallet ranked on earliness and hold time
+alone scores **higher than any fully-weighted wallet on any token** — INDEX-P1
+holds the highest maximum of all four windows at 0.8328 on 30% of the weight.
+
+The weight distributions, which is where this is visible:
+
+```
+AI-P1      3,490 at 1.000    5 at 0.300     1 at 0.950    12 at 0 (null score)
+INDEX-P1   2,277 at 1.000  1,019 at 0.300   16 at 0.950    4 at 0
+INDEX-P2   4,259 at 1.000                                  8 at 0
+PONS-P1   13,732 at 1.000      2 at 0.875    1 at 0.825   88 at 0
+```
+
+**So the cut is per window and the merge is a union, never a re-ranking.** Do not
+sort the merged list by score, do not take a global top N%, and do not present a
+cross-token ranking. The list is "qualified somewhere", and each membership row
+keeps the window it qualified under and the score it had there.
+
+#### A null score must never rank first
+
+`order by score desc` in Postgres is `NULLS FIRST`. Under the default ordering
+the null-score wallets occupy ranks 1..n of every window — PONS's **88 nulls take
+ranks 1–88** of 13,823, AI's 12 take 1–12 — so they would fill 12.7% of PONS's
+692-wallet allocation and displace 88 genuine top scorers. The cut is taken
+**`order by score desc nulls last`**, and the difference is visible in the
+cutoff: PONS 0.449739 correct against 0.450131 defaulted, AI 0.264357 against
+0.264943.
+
+A null score means every metric was null (`weight_used = 0`, and the counts match
+exactly: 12 / 4 / 8 / 88). Such a wallet is not a top wallet; it is an unmeasured
+one.
+
+#### Wallets that qualify more than once, and flagged wallets
+
+A wallet is **on the list once**, with one membership row per window it qualified
+under. 1,248 qualifying rows collapse to **1,176 distinct wallets**: 1,110
+qualify in one window, **60 in two, 6 in three**. Every overlap is cross-token —
+**no wallet is in both INDEX windows' top 5%** — so the pairs are:
+
+```
+AI-P1    + PONS-P1     32        INDEX-P1 + PONS-P1      3
+INDEX-P2 + PONS-P1     25        AI-P1    + INDEX-P1     1
+AI-P1    + INDEX-P2    17
+```
+
+Qualifying twice is the strongest signal the list carries, because it is the one
+comparison that does not depend on scores being comparable: it says the wallet was
+in the top slice of two independently-built cohorts.
+
+**Flagged wallets are kept and labelled, never dropped.** Of the 1,176: **169
+carry `low-weight` somewhere, 148 carry `inflated-pnl` somewhere, and 884 are
+unflagged in every window they qualified under.** Dropping them would be wrong in
+both directions — `inflated-pnl` usually means a transfer has not been collected
+yet rather than that the wallet is uninteresting, and it clears itself once the
+missing side arrives (step 13). `low-weight` is a statement about our data, not
+about the wallet. But 166 of the 169 low-weight entries are INDEX-P1, so a list
+that did not carry the flag would present that window's artefact as signal.
+
+#### Where the rebuild belongs: inside the scoring monitor
+
+**Alongside scoring, in `wallet-scores`, not as its own monitor.** The watchlist
+is a membership derived entirely from `wallet_scores`, and step 13's own
+reasoning applies unchanged: it has no cursor, it reads the database only, and it
+must cover every window rather than every token. Three further reasons:
+
+- **It changes exactly when scores change and at no other time.** A separate
+  schedule would either trail the scores or recompute an unchanged list.
+- **A separate monitor could read `wallet_scores` mid-rewrite.** Scoring deletes
+  orphans and re-asserts rows inside one transaction; a reader on its own clock
+  can land in the middle of that.
+- **The three-table lesson says the removal path belongs in the write.** A wallet
+  that drops out of a top 5% must drop off the watchlist, and the place that
+  cannot forget is the run that moved the score.
+
+**The watcher is a separate monitor, for the opposite reason.** It is
+cursor-driven and it spends compute units, and step 13 is explicit that coupling
+a database-only job to one that spends means a ceiling or a rate limit stops
+scoring too. `wallet-scores` stays free; the watcher carries its own ceiling.
+
+---
+
+**Everything below this line is DESIGN, not measurement. It is recorded before
+the watcher is built, and every figure in it is an estimate that the first real
+run must replace.**
+
+#### What is watched, and what wallet-first changes
+
+Those wallets' buys and sells of **any** token, not only the tokens they were
+scored on. Three things change, and none is cosmetic:
+
+1. **The filter inverts.** Every sweep so far fixes the token and lets the
+   wallets vary: `address = <token>, topic0 = Transfer`. This fixes the wallets
+   and lets the token vary: `address` unset, `topic0 = Transfer`, and the wallet
+   set in `topics[1]` (sent) or `topics[2]` (received). That is **two filters per
+   wallet chunk**, and the chunk rule from step 5 applies — a 540-entry topic
+   array is accepted and 5,024 hangs, so **chunk at 500**. 1,176 wallets is 3
+   chunks, so **6 filters per slice**.
+2. **There is no pool set.** The trade definition in step 11 requires the
+   counterparty to be an in-scope pool, and `pool_meta` exists only for tracked
+   tokens. For an arbitrary token it does not, so the counterparty has to be
+   classified: the **v4 PoolManager is a single known address** and covers every
+   v4 trade, while a v3 pool must be identified by `token0()`/`token1()` exactly
+   as step 3 defines it — 52 CU per novel address, **cached in a table so each is
+   asked once**. A revert is the answer, not a failure.
+3. **"In a transaction containing a Swap" is not "traded".** Step 11 records that
+   this conflation produced a wrong count of 34,744. The counterparty test above
+   is what keeps this honest; transaction-level co-occurrence alone must not be
+   used.
+
+#### What is stored
+
+`watchlist_activity`, one row per movement: wallet, token, side, token amount,
+USD amount, block, block time, transaction hash, log index. The unique key
+follows step 12 — `(chain, tx_hash, wallet, token, side, counterparty,
+log_index)` with `NULLS NOT DISTINCT` — for the reasons that key already records.
+
+**USD will be null far more often here than anywhere else in this system, and
+that is honest rather than broken.** A watchlist token usually has no price
+series: there is no `<token>_usd_prices` table for it, no bucket grid, and no
+in-scope pool set. USD is derivable only where the counter asset is itself
+priceable — USDG resolves to 1, and WETH or native ETH resolve through
+`native_usd_prices`, which is chain-level. So a trade against a stablecoin or ETH
+gets a USD figure and everything else gets **null, never zero**. Token amount and
+decimals are always recorded, so a null USD row is still a complete record of
+what moved. **The expected null share is unmeasured; the first run reports it.**
+
+#### The alert
+
+**Aggregated by token, never per wallet.** One line per token: token, wallets
+that bought, wallets that sold, total token amount, total USD. Nothing
+per-wallet in the alert — the per-wallet detail is the stored record and a later
+dashboard tab.
+
+Proposed channel **`crypto_early`** and cadence **30 minutes**. The channel
+because this is early-signal wallet activity rather than a system event, and
+`system` is reserved for failure and recovery alerts. 30 minutes because it
+matches the scoring monitor's period, so the watchlist a run uses is never more
+than one scoring cycle stale.
+
+**An empty period sends nothing.** A "0 wallets traded" message every 30 minutes
+trains the reader to ignore the channel, and the run still records its cycle so
+silence is distinguishable from a dead monitor by looking at `monitor_runs`
+rather than at Discord. A **failure** alerts on `system` as every other monitor
+does.
+
+#### Cost per run — ESTIMATE, and what must be measured first
+
+```
+transfer filters   6 per slice (3 wallet chunks x 2 directions)
+                   x ceil(slice_blocks / span) x 60 CU
+v3 counterparty    52 CU per NOVEL address, cached; high on the first run,
+classification     approaching zero afterwards
+```
+
+At a 40,000-block slice and one request per filter, that is **360 CU per run, ~$0.00016** — but the span
+depends on a density nobody has measured, and **this document records twice that
+a density assumed from the wrong population was wrong by 16x and by 27%.** A
+wallet-keyed filter across all tokens has no measured density at all.
+
+**So the first thing the watcher does is a density probe over the range it will
+actually read**, reported before anything is swept, exactly as step 5 requires.
+Until that number exists the per-run cost is a guess, and it is recorded here as
+one.
+
+---
+
 ## 5. What a null means, per field
 
 **A null is never a zero.** Zero is a measurement; null is the absence of one.
