@@ -58,9 +58,14 @@ transfer rows. Cross-token comparison is sound for the first time.
 
 **What is known incomplete, per token:**
 
-- **INDEX** — **6,052 trade rows carry a null USD**, by far the worst of the
-  three (AI 169, PONS 80). Not yet diagnosed. Transfers are excluded from that
-  count; they are unpriced by definition.
+- **INDEX** — **6,052 trade rows carry a null USD** against AI's 169 and PONS's
+  80. **Diagnosed 2026-09-12 and genuinely underivable**, not a processing
+  failure: INDEX traded from block 1,670,964 but its first USDG swap is at
+  5,371,436, and nothing else on the chain traded before 8,963,150, so there is
+  no ETH/USD reference for the first 3.7M blocks of its life. 100% of its trade
+  rows below block 5,363,150 are null and effectively none above 9.5M. Pricing
+  them needs a WETH/USDG market outside the tracked tokens, whose existence is
+  unestablished; the probe is ~2,400 CU ≈ $0.001. See the INDEX findings.
 - **NVDA** — **1,443,064 in-scope swap blocks have no stored timestamp.** Benign
   today: NVDA has no cohort and no rows, so nothing calls `loadSlice` on it. It
   becomes a blocker the moment NVDA is tracked rather than used as a bridge, and
@@ -1900,6 +1905,97 @@ prices                         0 CU
                           ~464,000 CU   ~$0.21
 ```
 
+**INDEX's 6,052 null-USD trade rows, diagnosed 2026-09-12.** Against AI's 169
+and PONS's 80 — two orders of magnitude, and the cause is INDEX's age, not its
+quoting.
+
+**Where they fall.** Overwhelmingly at the token's start, in 378 distinct
+buckets between blocks 1,670,964 and 9,460,566, and nowhere else:
+
+| block band | trade rows | null | share |
+|---|---|---|---|
+| < 5,363,150 | 4,688 | 4,688 | **100.0%** |
+| 5,363,150 – 9,143,149 | 4,169 | 1,337 | 32.1% |
+| 9,143,150 – 20M | 31,160 | 27 | 0.1% |
+| 20M – 40M | 28,202 | 0 | 0% |
+| 40M+ | 20,046 | 0 | 0% |
+
+**Which side is missing.** Always the counter side — the chain's ETH/USD
+reference. A trade row's USD comes from what the counter asset paid, so
+`native_usd_prices` is the only series consulted; `index_usd_prices` plays no
+part in it (and has the identical hole, starting at the same 5,363,150).
+
+**Which pools.** 6,038 of the 6,052 are **native ETH** on 6 v4 pools; 14 are
+WETH on one v3 pool. **USDG rows are never null — 0 of 22,102** — because a
+dollar stablecoin resolves to 1 without consulting any series. WETH rows are
+null 14 times in 41,924.
+
+**Why INDEX differs from AI and PONS by two orders of magnitude, plainly: it is
+NOT because INDEX is ETH-quoted with no bridge.** Being ETH-quoted is what
+*exposes* the gap — USDG rows are immune — but the gap itself is chronological.
+INDEX's first swap is at block **1,670,964, against native ETH. Its first USDG
+swap is at 5,371,436**, 3.7 million blocks later. Nothing else on this chain
+traded that early: PONS begins at 8,963,150 and AI at 18,275,462. So for the
+first 3.7M blocks of INDEX's life **there is no USD-denominated market anywhere
+in the collected data to date ETH against**, and no amount of quoting choice
+changes that.
+
+The mechanism is exact. `native_usd_prices` begins at bucket **5,363,150**,
+which is precisely the bucket containing INDEX's first USDG swap. **INDEX
+bootstraps the chain's ETH/USD series itself**, and it cannot do so before it
+has both quote sides in one bucket. In the pre-9,463,150 era INDEX occupies 713
+buckets: 286 carry both sides, **424 carry ETH only**, 3 carry USDG only. The
+424 are where the rows go null.
+
+**It is not a bucket-grid mismatch, and that was tested rather than assumed.**
+For all 6,052, a price exists at the exact bucket in **0** cases, and anywhere
+inside the same 10,000-block window at any residue in **0** cases. Only 336 have
+any native price within ±10,000 blocks, and the nearest is 5,363,150 — the start
+of the series. The lookup is behaving correctly; the data is absent.
+
+**What it would take to price them, and the cost.** ETH/USD in that era can only
+come from a market we have not collected: a WETH-or-ETH/USDG pool belonging to
+no tracked token. Enumerating it is one sparse `Initialize`/`PoolCreated` query
+over the chain's life (~120 CU, measured: 4,615 Initialize logs returned in a
+single call across 40,000,000 blocks), and sweeping its swaps across
+1,670,964–5,371,436 is ~37 dense requests at 60 CU (~2,220 CU). Timestamps ride
+along with the logs. Deriving a chain-level series and reinserting the INDEX rows
+costs nothing. **Total ≈ 2,400 CU ≈ $0.001.**
+
+**Whether such a pool exists is NOT established, and the database cannot
+answer it.** `v4_swaps_all` returns 0 swaps before 5,371,436, but it spans only
+15,115,267–42,695,454 — it was built for PONS's window. **That zero is a
+coverage artefact, not evidence the era had no market**, and treating it as
+evidence would be the standing filter-matched-nothing trap. The probe above is
+what settles it, and it costs a tenth of a cent either way.
+
+**Is any of it a defect?** The lookup is not. Three other things are:
+
+1. **`intake/index.yaml` states something the data contradicts.** Its comment
+   justifies reusing PONS's anchor by saying INDEX thereby reads buckets
+   "spanning 9,143,150-58,993,150 — its whole life". INDEX's life starts at
+   1,670,964. **7.47 million blocks of it sit outside the claimed span, and
+   4,688 rows sit in that gap.** The false claim is why nobody expected these
+   rows to be unpriceable. A config comment asserting coverage must be checked
+   against the series it names.
+2. **ETH/USD is a chain-level quantity derived per token.** It exists only where
+   some tracked token happened to trade against both a native asset and USDG
+   inside one 10,000-block bucket, which makes the chain's reference series an
+   accident of which tokens were loaded and when. A series derived from the
+   WETH/USDG market itself would have no such hole. This is the same root as the
+   shared-anchor item in section 9.
+3. **The series is fragmented across two residues.** `native_usd_prices` holds
+   9,645 buckets: 5,473 at PONS's residue 3150 and **4,172 at AI's residue
+   1433**, and a reader anchored on one grid can never match the other. It does
+   not cause these 6,052 — AI's contribution starts at 18,281,433, long after
+   the null era — so today it is harmless duplication of one quantity. It stops
+   being harmless the moment a token needs a bucket only the other grid has.
+
+**These rows are genuinely underivable from what is collected.** They are not a
+processing failure, and until the probe above is run they should stay null
+rather than be filled by interpolation — the nearest real price is up to 3.7
+million blocks away.
+
 - **The density probe missed the token's early life.** I probed 8,963,150
   onward, but INDEX starts at 1,670,725; the unsampled 7.3M blocks are denser
   than the probe suggested and the sweep came in **27.4% over**. **Probe from the
@@ -2112,6 +2208,19 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   no rows, but the bridge series is derived from swaps whose blocks the code
   cannot date, and the rule that `loadSlice` enforces everywhere else does not
   reach it.
+
+- **The chain's ETH/USD series is an accident of which tokens were loaded.**
+  `native_usd_prices` is chain-level but derived per token, existing only where
+  a tracked token traded against both a native asset and USDG inside one bucket.
+  It therefore begins at 5,363,150 — the bucket of INDEX's first USDG swap — and
+  6,052 INDEX rows below that are unpriceable. It is also fragmented across two
+  residues, 5,473 buckets at 3150 and 4,172 at 1433, which no single reader can
+  both see. Derive it from the WETH/USDG market itself, on a chain-level anchor.
+- **A config comment asserted coverage the data contradicts.** `intake/index.yaml`
+  justifies its bucket anchor by claiming the shared series spans "its whole
+  life"; 7.47M blocks of INDEX's life sit outside that span. Claims like this
+  need checking against the series they name, in config as much as in this
+  document.
 
 One further limitation is a property of the chain rather than a gap in the code:
 
