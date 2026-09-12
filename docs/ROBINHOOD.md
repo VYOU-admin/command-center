@@ -59,13 +59,13 @@ transfer rows. Cross-token comparison is sound for the first time.
 **What is known incomplete, per token:**
 
 - **INDEX** — **6,052 trade rows carry a null USD** against AI's 169 and PONS's
-  80. **Diagnosed 2026-09-12 and genuinely underivable**, not a processing
-  failure: INDEX traded from block 1,670,964 but its first USDG swap is at
-  5,371,436, and nothing else on the chain traded before 8,963,150, so there is
-  no ETH/USD reference for the first 3.7M blocks of its life. 100% of its trade
-  rows below block 5,363,150 are null and effectively none above 9.5M. Pricing
-  them needs a WETH/USDG market outside the tracked tokens, whose existence is
-  unestablished; the probe is ~2,400 CU ≈ $0.001. See the INDEX findings.
+  80, because `native_usd_prices` starts at block 5,363,150 and 100% of INDEX's
+  trade rows below that are null. **Probed 2026-09-12: they are RECOVERABLE.** A
+  WETH/USDG pool has existed since block **50,716** and traded **264,078 times**
+  inside the gap, first swap at 1,671,009 — 45 blocks after INDEX's first. The
+  block is not missing data but a missing derivation: ETH/USD is assembled from
+  tracked tokens' incidental both-sided buckets rather than from the ETH/USD
+  market itself. Fix is in section 9. See the INDEX findings.
 - **NVDA** — **1,443,064 in-scope swap blocks have no stored timestamp.** Benign
   today: NVDA has no cohort and no rows, so nothing calls `loadSlice` on it. It
   becomes a blocker the moment NVDA is tracked rather than used as a bridge, and
@@ -1815,6 +1815,21 @@ These are not about Robinhood Chain, but the code that loads it obeys them.
 
 - **A `create table if not exists` is a no-op on an existing table.** It does not
   reconcile a changed shape, and it reports success either way.
+- **`ORDER BY` binds to an output column name before a table column, so a
+  `::text` cast silently changes the sort to lexicographic.** In
+  `select block_number::text from t order by block_number`, the output column is
+  *named* `block_number`, and that is what `ORDER BY` resolves to — so the sort
+  is on text. On block numbers that puts `'10003150'` before `'5363150'`.
+
+  This produced a flat contradiction inside one query on 2026-09-12:
+  `min(block_number)` returned 5,363,150 while an ordered subquery returned
+  10,003,150, and a row at 5,363,150 provably existed. It reads exactly like a
+  corrupt btree, and index corruption was about to be reported before the real
+  cause was found. The aggregates were right the whole time; the diagnostic was
+  wrong.
+
+  Alias the cast (`block_number::text as blk`) or order by the bare column, and
+  when a query disagrees with itself, **suspect the query before the database.**
 - **Check SQL parameter arity before deploying.** A mismatch is a runtime error
   on a path that may run hours later.
 - **Chain an edit and the command that depends on it with `&&`.** A failed patch
@@ -1962,12 +1977,47 @@ single call across 40,000,000 blocks), and sweeping its swaps across
 along with the logs. Deriving a chain-level series and reinserting the INDEX rows
 costs nothing. **Total ≈ 2,400 CU ≈ $0.001.**
 
-**Whether such a pool exists is NOT established, and the database cannot
-answer it.** `v4_swaps_all` returns 0 swaps before 5,371,436, but it spans only
-15,115,267–42,695,454 — it was built for PONS's window. **That zero is a
-coverage artefact, not evidence the era had no market**, and treating it as
-evidence would be the standing filter-matched-nothing trap. The probe above is
-what settles it, and it costs a tenth of a cent either way.
+**PROBE RUN 2026-09-12: the market exists, and these rows are RECOVERABLE.**
+`eth-usd-probe` enumerated both orderings of WETH/USDG and ETH/USDG across the
+whole chain and found **48 pools, the earliest created at block 50,716** — 1.62
+million blocks *before* INDEX's first swap — with 33 of them created before the
+range even starts. Sweeping their Swap logs over 1,670,964–5,371,436 returned
+**264,078 swaps** (81,701 v4, 182,377 v3). The first falls at block **1,671,009,
+45 blocks after INDEX's first swap.** There is no meaningful part of INDEX's life
+without a USD-denominated ETH market running alongside it.
+
+Verified on individual decoded transactions rather than on the count, from the v3
+WETH/USDG pool `0xa9188730fe85be88ad499d7d52b099e800fb0334` (created at block
+50,716; token0 WETH 18 dec, token1 USDG 6 dec):
+
+| block | tx | implied ETH/USD |
+|---|---|---|
+| 1,680,559 | `0x0f6ebed92d60f68c4c7d16c4c7e2b2ca168ff2bd3788e394010dd4fe4c6061b2` | **1,708.53** |
+| 3,005,932 | `0x27a4eaaef146ffe11accdc5196cc60e736041f585a9fd03777ae026aa103e27e` | **1,771.72** |
+| 5,354,209 | `0x59703054ec722367bd9bd2644b0c3947a18853c83980a67fb0bd739e07fab5d6` | **1,743.24** |
+
+Against the current series' earliest bucket, 5,363,150 at **1,877.27**. Same
+regime, no order-of-magnitude error, and steadier than what we store.
+
+**The dedicated market is not merely a fallback — it is better than the series we
+have.** The earliest stored buckets rest on **one USDG tick each**: 5,363,150 has
+`usd_ticks 1`, 5,403,150 has 1, 5,473,150 has 2, and their medians swing
+1,877 → 1,434 → 1,653 across 110,000 blocks. The WETH/USDG pool supplies 5 to 86
+swaps per 20,000 blocks continuously from block 50,716. Deriving ETH/USD from the
+market that *is* ETH/USD replaces a by-product with a measurement.
+
+**`v4_swaps_all` said the opposite and was wrong to be believed.** It returns 0
+swaps before 5,371,436 — but spans only 15,115,267–42,695,454, having been built
+for PONS's window. That zero was a coverage artefact. It is recorded here because
+the probe cost less than half a cent and overturned it completely: **a zero from a
+table whose coverage you have not checked is not a finding.**
+
+**Cost: 10,080 CU / $0.0045, against an estimate of ~2,400 CU / $0.001 — 4.2x
+over.** The enumeration came in at 360 CU against 480 estimated. The dense sweep
+did not: I sized it at 37 requests from the block count and it took 168
+`eth_getLogs` calls, because 264,078 logs forced the span to halve repeatedly.
+**Sizing a dense sweep by block count and not by log density is the same mistake
+this document records for the sweep phase**, made again in an estimate.
 
 **Is any of it a defect?** The lookup is not. Three other things are:
 
@@ -1991,10 +2041,16 @@ what settles it, and it costs a tenth of a cent either way.
    the null era — so today it is harmless duplication of one quantity. It stops
    being harmless the moment a token needs a bucket only the other grid has.
 
-**These rows are genuinely underivable from what is collected.** They are not a
-processing failure, and until the probe above is run they should stay null
-rather than be filled by interpolation — the nearest real price is up to 3.7
-million blocks away.
+**These rows were underivable from what had been COLLECTED, not from the chain,
+and that distinction is the whole finding.** The earlier reading of this section
+concluded they were genuinely underivable; the probe reversed it for half a cent.
+`native_usd_prices` was never missing because the data does not exist — it was
+missing because it is assembled from tracked tokens' incidental both-sided
+buckets instead of from the ETH/USD market itself.
+
+They must still not be interpolated. The fix is to derive a chain-level ETH/USD
+series from the WETH/USDG and ETH/USDG pools, on a chain-level anchor, and
+reinsert; that is a code change and is listed in section 9, not done here.
 
 - **The density probe missed the token's early life.** I probed 8,963,150
   onward, but INDEX starts at 1,670,725; the unsampled 7.3M blocks are denser
@@ -2209,13 +2265,18 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   cannot date, and the rule that `loadSlice` enforces everywhere else does not
   reach it.
 
-- **The chain's ETH/USD series is an accident of which tokens were loaded.**
-  `native_usd_prices` is chain-level but derived per token, existing only where
-  a tracked token traded against both a native asset and USDG inside one bucket.
-  It therefore begins at 5,363,150 — the bucket of INDEX's first USDG swap — and
-  6,052 INDEX rows below that are unpriceable. It is also fragmented across two
-  residues, 5,473 buckets at 3150 and 4,172 at 1433, which no single reader can
-  both see. Derive it from the WETH/USDG market itself, on a chain-level anchor.
+- **The chain's ETH/USD series is an accident of which tokens were loaded, and
+  a dedicated market exists that nothing reads.** `native_usd_prices` is
+  chain-level but derived per token, existing only where a tracked token traded
+  against both a native asset and USDG inside one bucket. It therefore begins at
+  5,363,150 — the bucket of INDEX's first USDG swap — leaving 6,052 INDEX rows
+  below it unpriced, and its earliest buckets rest on a **single USDG tick**,
+  swinging 1,877 → 1,434 → 1,653 across 110,000 blocks. Meanwhile **48 WETH/USDG
+  and ETH/USDG pools exist, the earliest since block 50,716, with 264,078 swaps
+  in the gap alone** (probed 2026-09-12, $0.0045). Derive ETH/USD from those
+  pools on a chain-level anchor, which fixes the gap and the single-tick buckets
+  together, and also removes the two-residue fragmentation — 5,473 buckets at
+  3150 and 4,172 at 1433 that no single reader can both see.
 - **A config comment asserted coverage the data contradicts.** `intake/index.yaml`
   justifies its bucket anchor by claiming the shared series spans "its whole
   life"; 7.47M blocks of INDEX's life sit outside that span. Claims like this
