@@ -31,7 +31,8 @@
     "write-rows": "npm run build && node dist/cli/write-rows.js",
     "alert-test": "npm run build && node dist/cli/alert-test.js",
     "check-pages": "node scripts/check-pages.mjs",
-    "eth-usd-probe": "node dist/cli/eth-usd-probe.js"
+    "eth-usd-probe": "node dist/cli/eth-usd-probe.js",
+    "eth-usd-series": "node dist/cli/eth-usd-series.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
