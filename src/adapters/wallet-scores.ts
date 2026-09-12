@@ -15,11 +15,32 @@
  *   - Scores depend on rows from ALL of a token's monitors having landed. A
  *     separate pass runs after them rather than racing inside one.
  *
- * IT WRITES ONLY `wallet_scores`. Rows, tags, cursors and prices are untouched.
+ * IT WRITES `wallet_scores` AND REBUILDS `wallet_watchlist`. Rows, tags, cursors
+ * and prices are untouched.
+ *
+ * THE WATCHLIST REBUILD LIVES HERE RATHER THAN IN ITS OWN MONITOR, for the same
+ * reasons scoring is separate from the hourly job, applied one level up: it has
+ * no cursor, it reads the database only, it must cover every window, and it
+ * changes exactly when a score changes and at no other time. A monitor on its own
+ * clock would either trail the scores or recompute an unchanged list, and could
+ * read `wallet_scores` in the middle of the transaction where scoring deletes
+ * orphans and re-asserts rows. See docs/ROBINHOOD.md step 17.
+ *
+ * The WATCHER -- what those wallets then do on the chain -- is a separate monitor,
+ * for the opposite reason: it is cursor-driven and it spends compute units, and
+ * coupling a free job to a metered one means a ceiling stops the free one too.
  */
 import type { AdapterContext, SourceAdapter } from './types.js';
 import { SCORES_SCHEMA } from '../scoring/schema.js';
 import { scoreWindow, type ScoreResult } from '../scoring/run.js';
+import { WATCHLIST_SCHEMA, rebuildWatchlist } from '../scoring/watchlist.js';
+
+/**
+ * The cut, as a fraction. Not measured and not measurable -- there is no natural
+ * break in the score distribution -- so it is an operator preference with a
+ * default, set per monitor in YAML.
+ */
+const DEFAULT_TOP_PERCENT = 0.05;
 
 const pending = new Map<string, ScoreResult[]>();
 
@@ -47,7 +68,18 @@ const adapter: SourceAdapter<ScoreResult> = {
         + 'that happens to have a cohort crosses chains silently.',
       );
     }
-    const extra = Object.keys(options ?? {}).filter((k) => k !== 'chain');
+    const pct = options?.['watchlist_top_percent'];
+    if (pct !== undefined) {
+      const n = Number(pct);
+      if (!Number.isFinite(n) || n <= 0 || n > 1) {
+        throw new Error(
+          `${monitorId}: watchlist_top_percent must be a fraction in (0, 1]; got `
+          + `${String(pct)}. 5% is 0.05, not 5.`,
+        );
+      }
+    }
+    const known = new Set(['chain', 'watchlist_top_percent']);
+    const extra = Object.keys(options ?? {}).filter((k) => !known.has(k));
     if (extra.length > 0) {
       throw new Error(`${monitorId}: unexpected option(s) ${extra.join(', ')}`);
     }
@@ -55,6 +87,7 @@ const adapter: SourceAdapter<ScoreResult> = {
 
   async migrate(client) {
     await client.query(SCORES_SCHEMA);
+    await client.query(WATCHLIST_SCHEMA);
   },
 
   async fetch(ctx: AdapterContext): Promise<ScoreResult[]> {
@@ -178,6 +211,35 @@ const adapter: SourceAdapter<ScoreResult> = {
         + `. ${out.length} were scored and written.`,
       );
     }
+    /*
+     * THE WATCHLIST IS REBUILT ONLY AFTER EVERY WINDOW SCORED. It is a cut across
+     * all of them, so building it while one window still carries stale scores
+     * would silently mix a fresh cut with an old one. The throw above already
+     * guarantees we only reach here when none failed; this comment records that
+     * the ordering is deliberate rather than incidental.
+     */
+    const topPercent = ctx.options['watchlist_top_percent'] === undefined
+      ? DEFAULT_TOP_PERCENT
+      : Number(ctx.options['watchlist_top_percent']);
+    const wlClient = await ctx.db.connect();
+    try {
+      const wl = await rebuildWatchlist(wlClient, chain, topPercent);
+      ctx.log.info('watchlist rebuilt', {
+        top_percent: wl.topPercent,
+        qualifying_rows: wl.qualifyingRows,
+        distinct_wallets: wl.distinctWallets,
+        in_two_or_more_windows: wl.inTwoOrMoreWindows,
+        in_two_or_more_tokens: wl.inTwoOrMoreTokens,
+        memberships_added: wl.added,
+        memberships_removed: wl.removed,
+        note: 'the cut is per window; the merge is a union, never a re-ranking -- '
+          + 'scores are min-maxed within a cohort and do not compare across windows',
+        windows: wl.windows,
+      });
+    } finally {
+      wlClient.release();
+    }
+
     pending.set(ctx.monitorId, out);
     return out;
   },

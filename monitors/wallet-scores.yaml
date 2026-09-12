@@ -27,6 +27,19 @@ alerts:
   discord_on_consecutive_failures: 3
 
 options:
+  # THE WATCHLIST CUT, as a fraction. 5% is 0.05, not 5.
+  #
+  # Not measured and not measurable: there is no natural break in the score
+  # distribution to cut at, so this is an operator preference. Measured
+  # sensitivity across the four scored windows, merged and deduplicated:
+  # 1% -> 246 wallets, 2% -> 483, 5% -> 1,176, 10% -> 2,354.
+  #
+  # The cut is taken PER WINDOW and merged as a union. Scores are min-maxed
+  # within their own cohort so they do not compare across windows -- INDEX-P1's
+  # 5% cutoff of 0.6689 sits above PONS-P1's MAXIMUM of 0.6025. Raising this
+  # number admits more wallets per window; it never re-ranks across them.
+  watchlist_top_percent: 0.05
+
   # REQUIRED AND EXPLICIT. Without it this scored MOS and USELESS -- Solana
   # tokens -- from a Robinhood monitor, and their raising for want of pump points
   # was written down as correct behaviour. It was a scoping defect. A Solana
