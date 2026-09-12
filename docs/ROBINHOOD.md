@@ -275,6 +275,7 @@ was an opinion rather than a number. Measured on the three loads:
 | prices | not measured¹ | seconds | seconds | **seconds — no network** |
 | rows (dry run + write) | not measured¹ | ~1 min | ~8 min | scales with rows |
 | scoring, all windows | — | — | ~60 s for 24,186 wallets | **seconds to a minute** |
+| scoring + watchlist rebuild | — | — | 80.9 s (9.1–11.9 s without the rebuild) | **about a minute** |
 
 ¹ PONS was loaded by the scratchpad scripts that were lost; no phase timing
 survives. ² 16.4 s when router detection ran with data present.
@@ -1859,6 +1860,39 @@ must cover every window rather than every token. Three further reasons:
 cursor-driven and it spends compute units, and step 13 is explicit that coupling
 a database-only job to one that spends means a ceiling or a rate limit stops
 scoring too. `wallet-scores` stays free; the watcher carries its own ceiling.
+
+#### Built and verified 2026-09-12
+
+`wallet_watchlist` keys `(chain, wallet, token, tag)` — one membership row per
+window a wallet qualified under, carrying the score, its rank, the cohort size,
+the slot count, the weight the score rests on, the flags, and the `top_percent`
+the cut was taken at. Rebuilt inside `wallet-scores`, after every window scored.
+
+As stored, read back on a fresh connection after an unattended monitor run:
+
+| window | cohort | slots | admitted | cutoff | max | low-weight | inflated-pnl |
+|---|---|---|---|---|---|---|---|
+| `AI-P1` | 3,508 | 176 | 176 | 0.264308 | 0.757357 | 3 | 71 |
+| `INDEX-P1` | 3,316 | 166 | 166 | 0.668896 | 0.832810 | **166** | 0 |
+| `INDEX-P2` | 4,267 | 214 | 214 | 0.337066 | 0.640592 | 0 | 2 |
+| `PONS-P1` | 13,823 | 692 | 692 | 0.449285 | 0.602471 | 0 | 78 |
+
+**1,248 rows, 1,176 distinct wallets, 66 in two or more windows — all of them
+cross-token — and 0 null scores admitted.** Slots equal admitted in every window.
+Invariants checked and all zero: memberships with no matching score row **0**,
+with no matching tag **0**, with a rank above their slot count **0**, and exactly
+**1** distinct `top_percent` value stored.
+
+**The figures move every cycle, and that is correct.** Between an ad-hoc query and
+the monitor's own run twenty minutes later the cutoffs shifted in the fourth
+decimal (AI 0.264357 → 0.264308, PONS 0.449739 → 0.449285) and the two-window
+count went 67 → 66, because the hourly jobs add rows and every score is
+recomputed. A watchlist figure is a snapshot of a moving cut, never a constant.
+
+**Wall-clock: the rebuild adds ~70 s to the scoring monitor.** The nine runs
+before it shipped ran 9,142–11,926 ms; the first run with it took **80,901 ms**.
+One sample, so treat the 70 s as provisional, but it moves `wallet-scores` from
+"seconds" into "about a minute" and the expectation table should read that way.
 
 ---
 
