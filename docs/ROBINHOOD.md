@@ -1221,6 +1221,60 @@ derivation from real trades; only which token's trades produced it is arbitrary.
 Rewriting them would replace reviewed history to gain at most half a percent,
 and the rule below forbids it. Going forward only the owner writes.
 
+#### The chain's ETH/USD series comes from the ETH/USD market — added 2026-09-13
+
+**ETH/USD was a by-product and is now a measurement.** It used to exist only
+where a *tracked token* happened to trade against both a native asset and USDG
+inside one bucket, which made the chain's reference series an accident of which
+tokens were loaded. That left it starting at 5,363,150 — the bucket of INDEX's
+first USDG swap — with **6,052 INDEX rows below it unpriced**, and its earliest
+buckets resting on a single USDG tick each, swinging 1,877 → 1,434 → 1,653 across
+110,000 blocks.
+
+The chain has a dedicated market for exactly this quantity: **48 WETH/USDG and
+ETH/USDG pools, the earliest created at block 50,716**, 1.62M blocks before the
+earliest tracked token's first swap. `eth-usd-series` enumerates them the same way
+step 3 enumerates any pool — both orderings of both pairs, `Initialize` for v4 and
+`PoolCreated` for v3 — sweeps their swaps, and derives the series from ticks whose
+two sides *are* ETH and USD.
+
+**The ratio is convention-independent, which is why this is safe across venues.**
+A tick is `|usd side| / |native side|`, and taking absolute values means the v3
+pool perspective and the v4 swapper perspective give the same number. Step 6's
+conventions decide direction, and this derivation asks only for magnitude.
+
+**Decimals come from the pricing-asset block in config, not from a per-swap
+read.** WETH 18, USDG 6, native ETH 18 are fixed by this document and by every
+intake config; a pool in this market pairs two of exactly those three. This is the
+one place decimals are not read per token, and the reason is that the assets are
+enumerated rather than discovered.
+
+**IT WRITES ONLY BUCKETS THAT ARE MISSING.** The rule below is absolute and this
+obeys it: a stored bucket was computed by a run that saw the whole bucket, so the
+job inserts `on conflict do nothing` and reports how many it skipped. It does not
+improve the single-tick buckets — that would be a rewrite.
+
+**The consequence is a series with two provenances, and it is recorded in the data
+rather than only here.** `native_usd_prices.source` is `eth-usd-market` for a
+bucket derived from the dedicated market and **NULL for every bucket written
+before 2026-09-13**, which were derived from a tracked token's incidental
+both-sided ticks. A null is not a missing value here; it is the older method, and
+the column exists so nobody has to infer provenance from a block number.
+
+**It writes on the residue-3150 grid, not a chain-level one.** That is the grid
+PONS and INDEX read, so it is the grid that fixes the rows. Giving the shared
+series a genuine chain-level anchor still needs the resolver to look up native
+prices on a chain anchor instead of the token's, and AI's 4,172 buckets at residue
+1433 remain unreadable by the other two. **Both stay open in section 9** — this
+fixes the coverage hole, not the fragmentation.
+
+**Cost, sized from the buckets actually needed rather than from the token's
+life:** 378 missing buckets span 1,663,150–9,453,150, so the sweep covers
+7,800,000 blocks. Enumeration is 8 sparse calls (~480 CU). The probe measured 168
+`eth_getLogs` over 3,700,000 blocks of this same market, which scales to ~354
+calls, so **~22,000 CU ≈ $0.010, ceiling 200,000 CU**. Timestamps ride with the
+logs. Deriving, writing buckets, reinserting the rows and re-scoring cost nothing.
+
 **Never rewrite a bucket that is already stored.** A stored bucket was computed
 by a run that saw the whole bucket; recomputing gains nothing and silently
 replaces reviewed history. Three were rewritten before this was caught.
@@ -2524,8 +2578,24 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   cannot date, and the rule that `loadSlice` enforces everywhere else does not
   reach it.
 
-- **The chain's ETH/USD series is an accident of which tokens were loaded, and
-  a dedicated market exists that nothing reads.** `native_usd_prices` is
+- **The shared series still has no chain-level anchor.** Partly addressed on
+  2026-09-13: ETH/USD is now derived from the dedicated WETH/USDG market and the
+  coverage hole below 5,363,150 is filled. The FRAGMENTATION is not fixed. The
+  series is still written on the residue-3150 grid because that is what PONS and
+  INDEX read, `counterUsdResolver` still looks up native prices on the *token's*
+  anchor rather than the chain's, and AI's **4,172 buckets at residue 1433 remain
+  unreadable** by the other two tokens. A third anchor would still fragment it
+  further. The fix is a chain anchor for `native_usd_prices` plus a resolver that
+  uses it for the native series while keeping the token's anchor for the token's
+  own and for bridges.
+- **The single-tick early buckets are still single-tick.** 5,363,150, 5,403,150
+  and 5,473,150 rest on 1, 1 and 2 USDG ticks and swing 1,877 → 1,434 → 1,653.
+  The dedicated market could replace them with dozens of ticks each, but "never
+  rewrite a stored bucket" forbids it and that rule is the older one. Deciding
+  between them is an operator call that has not been made.
+- **The chain's ETH/USD series was an accident of which tokens were loaded, and
+  a dedicated market existed that nothing read.** FIXED 2026-09-13; kept for the
+  lesson. `native_usd_prices` is
   chain-level but derived per token, existing only where a tracked token traded
   against both a native asset and USDG inside one bucket. It therefore begins at
   5,363,150 — the bucket of INDEX's first USDG swap — leaving 6,052 INDEX rows
