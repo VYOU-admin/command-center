@@ -1385,6 +1385,24 @@ this chain's series**, because it is the deepest and longest-running token here.
 Every other monitor still *derives* the series in memory — it needs it to value
 its own rows for the slice — and **persists nothing**.
 
+**THE INTAKE NEVER HONOURED THAT RULE, and CHUMP is where it was caught — by a
+DEADLOCK, not by a check.** The monitor configs have carried
+`derives_native_usd` since the rule was written (`token-updates` true,
+`index-updates` and `ai-updates` false), but **`plan.ts` never read the key**, so it
+was not even a valid intake-config option — and `persistAllPrices` wrote
+`native_usd_prices` for every token regardless. CHUMP's prices phase died with
+`deadlock detected` against an `index-updates` run that overlapped it by two seconds.
+
+**The deadlock is the symptom; writing a shared table from a second place is the
+defect.** It matters more now than when the rule was written: since 2026-09-13 the
+series is derived from the dedicated WETH/USDG market, which *is* the quantity, and a
+newly-loaded token filling gaps with token-incidental buckets would put the inferior
+provenance back into the series the better one was built to replace.
+
+The intake now reads the key, defaults it to **false**, derives the series in memory
+as before — the token needs the rate to value its own rows — and **reports the count
+it did not write** rather than omitting it.
+
 **The buckets already written by the race are left alone.** Each is a real
 derivation from real trades; only which token's trades produced it is arbitrary.
 Rewriting them would replace reviewed history to gain at most half a percent,
@@ -3710,6 +3728,16 @@ against a 2,000,000 ceiling.
   optional `knownPool`, which the conventions loop already had and never used, and
   raises with a message naming the cause when neither is available. **The fix keeps one
   decode implementation** rather than a second written to avoid the line.
+- **FIXED 2026-09-13: the intake wrote `native_usd_prices` for every token, ignoring
+  the one-owner-per-chain rule.** `pricing.derives_native_usd` has named the owner
+  since the rule was written and the monitors honour it, but `plan.ts` never read the
+  key, so it was not a valid intake option and `persistAllPrices` wrote the shared
+  series regardless. **It surfaced as `deadlock detected`** on CHUMP's prices phase
+  against an `index-updates` run overlapping it by two seconds — a symptom, where the
+  defect is a second writer of a chain-level table. The intake now reads the key,
+  defaults to false, still derives in memory, and reports the buckets it did not
+  write.
+
 - **FIXED 2026-09-13: the per-token `<ticker>_usd_prices` table was created by no
   code.** `SCHEMA` creates `pons_usd_prices` and nothing else, so `index_usd_prices`
   and `ai_usd_prices` were made by hand and CHUMP's prices phase failed with

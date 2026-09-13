@@ -131,6 +131,13 @@ export interface IntakeConfig {
   };
 
   tokenUsdTable: string;
+  /**
+   * Whether THIS token persists the chain's ETH/USD series. Default FALSE.
+   * See docs/ROBINHOOD.md step 10: exactly one owner per chain writes
+   * `native_usd_prices`; everything else derives it in memory and persists
+   * nothing.
+   */
+  derivesNativeUsd: boolean;
   nativeUsdTable: string;
 
   /** Compute-unit ceiling per phase, by phase name. */
@@ -315,6 +322,14 @@ export async function loadIntakeConfig(path: string): Promise<IntakeConfig> {
     },
 
     tokenUsdTable: table('token_usd', 'token_usd_prices'),
+    /*
+     * DEFAULT FALSE, deliberately. `native_usd_prices` is keyed (chain,
+     * block_number) with no token column, so a token that writes it is writing
+     * the CHAIN's series. Opting in has to be explicit -- the monitors have
+     * carried this key since the ownership rule was written and the intake never
+     * read it.
+     */
+    derivesNativeUsd: (pricing as Record<string, unknown>)['derives_native_usd'] === true,
     nativeUsdTable: table('native_usd', 'native_usd_prices'),
 
     ceilings: Object.fromEntries(

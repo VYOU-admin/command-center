@@ -513,18 +513,58 @@ export async function persistAllPrices(
   client: PoolClient,
   cfg: IntakeConfig,
   series: PriceSeries[],
-): Promise<{ tokenUsdInserted: number; nativeUsdInserted: number; alreadyPresent: number }> {
+): Promise<{
+  tokenUsdInserted: number;
+  nativeUsdInserted: number;
+  alreadyPresent: number;
+  /** Derived for this token's own pricing, deliberately NOT persisted. */
+  nativeUsdNotWritten: number;
+  nativeUsdOwner: boolean;
+}> {
   await ensureTokenUsdTable(client, cfg);
   let tokenUsdInserted = 0;
   let nativeUsdInserted = 0;
   let alreadyPresent = 0;
+  let nativeUsdNotWritten = 0;
   for (const s of series) {
-    const r = await persistPrices(client, cfg, s);
+    /*
+     * EXACTLY ONE OWNER PER CHAIN PERSISTS `native_usd_prices`, AND THE INTAKE
+     * NEVER HONOURED THAT.
+     *
+     * docs/ROBINHOOD.md step 10: the table is keyed (chain, block_number) with no
+     * token column, so a token writing it is writing the CHAIN's series, not its
+     * own. `pricing.derives_native_usd` names the owner -- `token-updates` (PONS)
+     * -- and every other monitor derives the series in memory for its own slice
+     * and persists nothing. The monitor configs have carried the key since the
+     * rule was written; `plan.ts` never read it, so every intake wrote the shared
+     * series regardless.
+     *
+     * It matters more now than when the rule was written. Since 2026-09-13 the
+     * series is derived from the dedicated WETH/USDG market, which is a
+     * measurement of the quantity rather than a by-product of whichever tokens
+     * happened to trade both sides in one bucket. A new token filling gaps with
+     * token-incidental buckets would put the inferior provenance back into the
+     * series the better one was built to replace.
+     *
+     * The derivation still runs -- the token needs the rate to value its own rows
+     * -- and the count it did NOT write is reported rather than omitted.
+     */
+    const toPersist = cfg.derivesNativeUsd
+      ? s
+      : { ...s, nativeUsd: new Map() as typeof s.nativeUsd };
+    if (!cfg.derivesNativeUsd) nativeUsdNotWritten += s.nativeUsd.size;
+    const r = await persistPrices(client, cfg, toPersist);
     tokenUsdInserted += r.tokenUsdInserted;
     nativeUsdInserted += r.nativeUsdInserted;
     alreadyPresent += r.tokenUsdAlreadyPresent + r.nativeUsdAlreadyPresent;
   }
-  return { tokenUsdInserted, nativeUsdInserted, alreadyPresent };
+  return {
+    tokenUsdInserted,
+    nativeUsdInserted,
+    alreadyPresent,
+    nativeUsdNotWritten,
+    nativeUsdOwner: cfg.derivesNativeUsd,
+  };
 }
 
 /* --------------------------------------------------------- dry run + write */
