@@ -2203,6 +2203,55 @@ silence is distinguishable from a dead monitor by looking at `monitor_runs`
 rather than at Discord. A **failure** alerts on `system` as every other monitor
 does.
 
+#### The pool-side test for an ARBITRARY token
+
+Step 11 defines a trade as a transfer whose counterparty is a pool, **inside a
+transaction containing a `Swap` on that pool**. Both halves are kept here. The
+weaker "was in a transaction containing a Swap" is NOT used — that conflation
+produced a wrong count of 34,744 once, and a watchlist wallet's transfer sits in
+transactions full of unrelated hops.
+
+`pool_meta` exists only for tracked tokens, so the counterparty is classified from
+the chain and cached. **Both venues, by the step 3 definition:**
+
+| venue | the counterparty is | classified by | cost |
+|---|---|---|---|
+| v4 | the **PoolManager**, one known address, for every v4 pool | the `Swap` log in the same transaction carries the pool id; that id's `Initialize` gives its two currencies | one sparse `eth_getLogs` per novel pool id, 60 CU |
+| v3 | the pool contract itself | `token0()` and `token1()` — a revert is the answer, not a failure | two `eth_call`, 52 CU per novel address |
+
+**A v4 transfer cannot name its own pool.** The PoolManager is the counterparty for
+every v4 pool, so the transfer alone cannot say which pool traded — the `Swap` log
+in the transaction is the only thing that can. That is why the Swap half is
+structural here rather than a redundant check: for v4 it supplies the pool
+identity, and the currency test then confirms the token actually belongs to it.
+
+**Both caches are permanent.** A pool is a pool for good (step 7: pool-ness is
+checked at the enumeration head, not per moment), so a classification is asked once
+per address or pool id and never again. The first run pays for the set the
+watchlist touches; later runs pay only for pools that are new to it.
+
+#### USD for a token with no price series
+
+**Most tokens a watchlist wallet touches have no series, no grid and no in-scope
+pool set**, so the honest answer is often null. It is never zero.
+
+Where the trade's pool pairs the token with a **recognised pricing asset**, USD is
+derivable from the counter side without any series for the token itself: USDG
+resolves to 1, and WETH or native ETH resolve through `native_usd_prices`, which is
+chain-level and now market-derived. The `Swap` log carries both amounts, and the
+counter asset's decimals are read once and cached like the pool classification.
+
+**The watcher looks up the nearest PRECEDING native bucket, not the exact bucket,
+and that is a deliberate departure.** Everywhere else in this document an
+exact-bucket lookup is required, because a token's rows live on that token's fixed
+grid and a mismatch prices everything null. The watcher has no such grid: it prices
+arbitrary tokens, and `native_usd_prices` holds two interleaved residues (3150 and
+1433, section 9). Taking the greatest bucket at or below the trade's block, within
+one bucket width, reads whichever grid is nearer instead of missing both. **This is
+a signal feed, not the accounting record** — `wallet_transactions` keeps the
+exact-bucket discipline. Stated here so it is a choice rather than a bug someone
+finds later.
+
 #### Cost per run — ESTIMATE, and what must be measured first
 
 ```

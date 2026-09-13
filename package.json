@@ -33,7 +33,8 @@
     "check-pages": "node scripts/check-pages.mjs",
     "eth-usd-probe": "node dist/cli/eth-usd-probe.js",
     "eth-usd-series": "node dist/cli/eth-usd-series.js",
-    "eth-usd-repair": "node dist/cli/eth-usd-repair.js"
+    "eth-usd-repair": "node dist/cli/eth-usd-repair.js",
+    "watch-probe": "node dist/cli/watch-probe.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

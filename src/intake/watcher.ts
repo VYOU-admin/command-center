@@ -1,0 +1,283 @@
+/**
+ * The watcher: what the watchlist wallets are doing, on any token.
+ *
+ * docs/ROBINHOOD.md step 17. Every other job in this system fixes a TOKEN and
+ * lets the wallets vary. This one fixes the WALLETS and lets the token vary, and
+ * three things follow from that inversion:
+ *
+ *   1. The filter inverts. `address` is unset and the wallet set goes in
+ *      `topics[1]` (sent) or `topics[2]` (received). The step 5 chunk rule still
+ *      applies -- a 540-entry topic array is accepted and 5,024 HANGS with neither
+ *      an answer nor a refusal -- so wallets are chunked at 500.
+ *   2. There is no pool set. `pool_meta` exists only for tracked tokens, so a
+ *      counterparty is classified from the chain and cached permanently.
+ *   3. There is usually no price series, so USD is often null. Never zero.
+ *
+ * STEP 11'S DEFINITION IS KEPT WHOLE. A trade is a transfer whose counterparty is
+ * a pool AND which sits in a transaction containing a Swap on that pool. The
+ * weaker "was in a transaction containing a Swap" is not used; that conflation
+ * produced a wrong count of 34,744 once, and a watchlist wallet's transfers sit in
+ * transactions full of unrelated hops.
+ *
+ * For v4 the Swap half is STRUCTURAL rather than a redundant check: the
+ * PoolManager is the counterparty for every v4 pool, so the transfer alone cannot
+ * say which pool traded and the Swap log is the only thing that can.
+ */
+
+import type { PoolClient } from '../store/db.js';
+import type { RpcClient, LogEntry } from '../adapters/token-updates/rpc.js';
+import { TOPICS, SELECTORS, addressTopic, addressFromTopic } from '../adapters/token-updates/decode.js';
+import { log } from '../logger.js';
+
+/** Step 5: 540 accepted, 5,024 hangs. */
+export const WALLET_CHUNK = 500;
+
+export const WATCHER_SCHEMA = `
+create table if not exists watchlist_activity (
+  chain        text        not null,
+  wallet       text        not null,
+  token        text        not null,
+  side         text        not null,
+  venue        text        not null,
+  pool         text        not null,
+  counterparty text        not null,
+  tx_hash      text        not null,
+  log_index    bigint      not null,
+  block_number bigint      not null,
+  block_time   timestamptz not null,
+  token_amount numeric     not null,
+  usd_amount   numeric,
+  seen_at      timestamptz not null default now(),
+  constraint watchlist_activity_side_ck check (side in ('buy','sell')),
+  primary key (chain, tx_hash, wallet, token, side, log_index)
+);
+
+create index if not exists watchlist_activity_block_idx
+  on watchlist_activity (chain, block_number);
+create index if not exists watchlist_activity_wallet_idx
+  on watchlist_activity (chain, wallet);
+
+/*
+ * PERMANENT CACHE. A pool is a pool for good, so each address or pool id is
+ * classified once and never asked again. kind: 'v3' | 'v4' | 'not-a-pool'.
+ * 'not-a-pool' is a RESULT and is cached too -- re-asking a settled negative is
+ * how a classifier once spent five rounds on 1,664 answered questions.
+ */
+create table if not exists chain_pool_cache (
+  chain       text not null,
+  id          text not null,
+  kind        text not null,
+  currency0   text,
+  currency1   text,
+  primary key (chain, id)
+);
+
+create table if not exists token_decimals_cache (
+  chain    text    not null,
+  token    text    not null,
+  decimals integer,
+  primary key (chain, token)
+);
+`;
+
+export async function loadWatchlistWallets(
+  client: PoolClient, chain: string,
+): Promise<string[]> {
+  const r = await client.query<{ wallet: string }>(
+    'select distinct wallet from wallet_watchlist where chain = $1 order by wallet', [chain],
+  );
+  /*
+   * AN EMPTY WATCHLIST IS A DEFECT, NOT A QUIET RUN. Sweeping for nobody returns
+   * nothing and reads exactly like a period in which nobody traded.
+   */
+  if (r.rowCount === 0) {
+    throw new Error(
+      `wallet_watchlist holds no wallets for ${chain}. That is not an empty period; `
+      + 'it means the watchlist was never built or was emptied.',
+    );
+  }
+  return r.rows.map((x) => x.wallet.toLowerCase());
+}
+
+export const chunk = <T>(xs: T[], n: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n));
+  return out;
+};
+
+export interface DensitySample {
+  from: number;
+  to: number;
+  logs: number;
+  requests: number;
+}
+
+/**
+ * Measure the density of the wallet-keyed filter over the blocks the watcher will
+ * actually read.
+ *
+ * Step 5: "a token's density is not constant over its life, so probe the range you
+ * will actually sweep." A density taken from the wrong range has been wrong here
+ * by 16x, by 27% and by 2.0x. A wallet-keyed filter across every token on the
+ * chain has no measured density at all, so the watcher's cost is a guess until
+ * this runs.
+ */
+export async function probeWatchDensity(
+  rpc: RpcClient,
+  wallets: string[],
+  samples: { from: number; to: number }[],
+): Promise<{ samples: DensitySample[]; logsPerBlock: number; requests: number }> {
+  const chunks = chunk(wallets, WALLET_CHUNK);
+  const out: DensitySample[] = [];
+  let requests = 0;
+  for (const s of samples) {
+    let logs = 0;
+    for (const c of chunks) {
+      const topics = c.map(addressTopic);
+      for (const position of [1, 2] as const) {
+        const filter = position === 1
+          ? { topics: [TOPICS.transfer, topics] }
+          : { topics: [TOPICS.transfer, null, topics] };
+        const got = await rpc.getLogs(filter, s.from, s.to, s.to - s.from + 1, 25);
+        logs += got.length;
+        requests += 1;
+      }
+    }
+    out.push({ from: s.from, to: s.to, logs, requests: chunks.length * 2 });
+  }
+  const blocks = out.reduce((n, s) => n + (s.to - s.from + 1), 0);
+  const logs = out.reduce((n, s) => n + s.logs, 0);
+  return { samples: out, logsPerBlock: blocks > 0 ? logs / blocks : 0, requests };
+}
+
+/* --------------------------------------------------------- pool classification */
+
+export interface PoolInfo {
+  kind: 'v3' | 'v4' | 'not-a-pool';
+  currency0: string | null;
+  currency1: string | null;
+}
+
+export async function loadPoolCache(
+  client: PoolClient, chain: string,
+): Promise<Map<string, PoolInfo>> {
+  const r = await client.query<{
+    id: string; kind: string; currency0: string | null; currency1: string | null;
+  }>('select id, kind, currency0, currency1 from chain_pool_cache where chain = $1', [chain]);
+  const m = new Map<string, PoolInfo>();
+  for (const x of r.rows) {
+    m.set(x.id.toLowerCase(), {
+      kind: x.kind as PoolInfo['kind'], currency0: x.currency0, currency1: x.currency1,
+    });
+  }
+  return m;
+}
+
+async function cachePool(
+  client: PoolClient, chain: string, id: string, info: PoolInfo,
+): Promise<void> {
+  await client.query(
+    `insert into chain_pool_cache (chain, id, kind, currency0, currency1)
+     values ($1,$2,$3,$4,$5) on conflict (chain, id) do nothing`,
+    [chain, id, info.kind, info.currency0, info.currency1],
+  );
+}
+
+/**
+ * Classify a v3 candidate by asking it. Step 3: a pool answers both `token0()`
+ * and `token1()`; **a revert is the answer, not a failure** — it means the
+ * contract has no such function and is therefore not a pool.
+ */
+export async function classifyV3(
+  client: PoolClient, rpc: RpcClient, chain: string, address: string,
+  cache: Map<string, PoolInfo>, block: number,
+): Promise<PoolInfo> {
+  const hit = cache.get(address);
+  if (hit) return hit;
+  let info: PoolInfo = { kind: 'not-a-pool', currency0: null, currency1: null };
+  try {
+    const t0 = await rpc.ethCall(address, SELECTORS.token0, block);
+    const t1 = await rpc.ethCall(address, SELECTORS.token1, block);
+    if (typeof t0 === 'string' && typeof t1 === 'string' && t0.length >= 66 && t1.length >= 66) {
+      info = {
+        kind: 'v3',
+        currency0: '0x' + t0.slice(-40).toLowerCase(),
+        currency1: '0x' + t1.slice(-40).toLowerCase(),
+      };
+    }
+  } catch {
+    // A revert is the answer: not a pool. Cached as such so it is asked once.
+  }
+  cache.set(address, info);
+  await cachePool(client, chain, address, info);
+  return info;
+}
+
+/**
+ * Classify a v4 pool id from its `Initialize` event, which carries both
+ * currencies as indexed topics. One sparse filter over the chain's life.
+ */
+export async function classifyV4(
+  client: PoolClient, rpc: RpcClient, chain: string, poolId: string,
+  cache: Map<string, PoolInfo>, poolManager: string, head: number, sparseSpan: number,
+): Promise<PoolInfo> {
+  const hit = cache.get(poolId);
+  if (hit) return hit;
+  const logs = await rpc.getLogs(
+    { address: poolManager, topics: [TOPICS.initializeV4, poolId] },
+    0, head, sparseSpan, 25,
+  );
+  let info: PoolInfo = { kind: 'not-a-pool', currency0: null, currency1: null };
+  const l = logs[0];
+  if (l && l.topics[2] && l.topics[3]) {
+    info = {
+      kind: 'v4',
+      currency0: addressFromTopic(l.topics[2]),
+      currency1: addressFromTopic(l.topics[3]),
+    };
+  }
+  cache.set(poolId, info);
+  await cachePool(client, chain, poolId, info);
+  return info;
+}
+
+export async function tokenDecimals(
+  client: PoolClient, rpc: RpcClient, chain: string, token: string,
+  cache: Map<string, number | null>,
+): Promise<number | null> {
+  if (cache.has(token)) return cache.get(token) ?? null;
+  const stored = await client.query<{ decimals: number | null }>(
+    'select decimals from token_decimals_cache where chain=$1 and token=$2', [chain, token],
+  );
+  if (stored.rowCount) {
+    const d = stored.rows[0]!.decimals;
+    cache.set(token, d);
+    return d;
+  }
+  let dec: number | null = null;
+  try {
+    const r = await rpc.ethCall(token, SELECTORS.decimals);
+    /*
+     * A `0x` RETURN IS UNKNOWN, NOT 18 AND NOT 0 (step 1). Assuming 18 for an
+     * unreadable decimals is a factor-of-10^12 error waiting to happen, so this
+     * stores null and the row's USD stays null rather than being invented.
+     */
+    if (typeof r === 'string' && r.length >= 66) dec = Number(BigInt(r));
+    if (dec !== null && (!Number.isFinite(dec) || dec < 0 || dec > 36)) dec = null;
+  } catch {
+    dec = null;
+  }
+  cache.set(token, dec);
+  await client.query(
+    `insert into token_decimals_cache (chain, token, decimals) values ($1,$2,$3)
+     on conflict (chain, token) do nothing`, [chain, token, dec],
+  );
+  return dec;
+}
+
+export { type LogEntry };
+export const transferTopic = TOPICS.transfer;
+export const swapV3Topic = TOPICS.swapV3;
+export const swapV4Topic = TOPICS.swapV4;
+
+void log;
