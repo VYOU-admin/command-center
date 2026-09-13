@@ -12,6 +12,7 @@ import type { DiscordSink } from '../sinks/discord.js';
 import type { Pool } from '../store/db.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard } from './views.js';
+import { renderWatchlistPage } from './watchlist-page.js';
 import { renderTokensPage, type ChainGroup, type TokenGroup, type TokenIngest, type TokenPrice,
   type WalletRow, type WindowRow } from './tokens-page.js';
 
@@ -263,6 +264,93 @@ export function createWebServer(opts: WebServerOptions): Server {
           generatedAt: new Date(),
         }),
       );
+      return;
+    }
+
+    /*
+     * /watchlist -- every trade the watchlist wallets made, on any token.
+     *
+     * FILTERED AND LIMITED IN SQL, not in the browser. 191,728 rows once produced a
+     * 69.3 MB page (step 14), so the row cap is real, it is stated on the page, and
+     * the total matching count is shown beside it. A silent truncation would read as
+     * "that is all that happened".
+     */
+    if (path === '/watchlist') {
+      const q = url.searchParams;
+      const rawToken = (q.get('token') ?? '').trim().toLowerCase();
+      const rawWallet = (q.get('wallet') ?? '').trim().toLowerCase();
+      /*
+       * Anything that is not a hex address is treated as NO filter rather than as an
+       * error. A half-typed address should show everything, not nothing -- a filter
+       * that matches nothing is the failure shape this project keeps hitting.
+       */
+      const hex = /^0x[0-9a-f]{40}$/;
+      const filterToken = hex.test(rawToken) ? rawToken : '';
+      const filterWallet = hex.test(rawWallet) ? rawWallet : '';
+      const allowed = [100, 500, 2000, 5000];
+      const wanted = Number.parseInt(q.get('limit') ?? '500', 10);
+      const limit = allowed.includes(wanted) ? wanted : 500;
+      try {
+        const where: string[] = ["a.chain = 'robinhood'"];
+        const params: unknown[] = [];
+        if (filterToken) { params.push(filterToken); where.push('a.token = $' + params.length); }
+        if (filterWallet) { params.push(filterWallet); where.push('a.wallet = $' + params.length); }
+        const clause = where.join(' and ');
+        const [rows, totals, toks] = await Promise.all([
+          pool.query(
+            'select a.wallet, a.token, m.name, m.symbol, a.side, a.venue, '
+            + 'a.token_amount::text as token_amount, a.usd_amount::float8 as usd_amount, '
+            + 'a.block_number::text as block_number, a.block_time, a.tx_hash '
+            + 'from watchlist_activity a '
+            + 'left join token_decimals_cache m on m.chain = a.chain and m.token = a.token '
+            + 'where ' + clause
+            + ' order by a.block_number desc, a.log_index desc limit ' + String(limit),
+            params),
+          pool.query(
+            'select count(*)::text as total, count(distinct a.wallet)::text as wallets '
+            + 'from watchlist_activity a where ' + clause, params),
+          pool.query(
+            'select a.token, m.name, m.symbol, count(*)::int as trades '
+            + 'from watchlist_activity a '
+            + 'left join token_decimals_cache m on m.chain = a.chain and m.token = a.token '
+            + "where a.chain = 'robinhood' group by 1,2,3 order by 4 desc, 1"),
+        ]);
+        const html = renderWatchlistPage({
+          rows: rows.rows.map((r) => {
+            const x = r as Record<string, unknown>;
+            return {
+              wallet: String(x['wallet']), token: String(x['token']),
+              name: x['name'] === null ? null : String(x['name']),
+              symbol: x['symbol'] === null ? null : String(x['symbol']),
+              side: x['side'] === 'sell' ? ('sell' as const) : ('buy' as const),
+              venue: String(x['venue']),
+              tokenAmount: String(x['token_amount']),
+              usdAmount: x['usd_amount'] === null ? null : Number(x['usd_amount']),
+              blockNumber: String(x['block_number']),
+              blockTime: new Date(String(x['block_time'])).toISOString(),
+              txHash: String(x['tx_hash']),
+            };
+          }),
+          tokens: toks.rows.map((t) => {
+            const x = t as Record<string, unknown>;
+            return {
+              token: String(x['token']),
+              name: x['name'] === null ? null : String(x['name']),
+              symbol: x['symbol'] === null ? null : String(x['symbol']),
+              trades: Number(x['trades']),
+            };
+          }),
+          total: Number((totals.rows[0] as Record<string, unknown> | undefined)?.['total'] ?? 0),
+          walletCount: Number((totals.rows[0] as Record<string, unknown> | undefined)?.['wallets'] ?? 0),
+          limit, filterToken, filterWallet, generatedAt: new Date(),
+        });
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } catch (err) {
+        log.error('watchlist page failed', errorFields(err));
+        res.writeHead(500, { 'content-type': 'text/plain' });
+        res.end('watchlist page failed');
+      }
       return;
     }
 

@@ -13,6 +13,7 @@
  */
 import { renderDashboard } from '../dist/web/views.js';
 import { renderTokensPage } from '../dist/web/tokens-page.js';
+import { renderWatchlistPage } from '../dist/web/watchlist-page.js';
 
 // A token with a wallet that has BOTH a priced and an unpriced purchase, so the
 // null-rendering branch and the partial-total branch are both exercised by the
@@ -45,6 +46,31 @@ const SAMPLE_TOKENS = [{
 const pages = [
   ['dashboard', () => renderDashboard({ monitors: [], overall: 'ok', generatedAt: new Date() })],
   ['tokens', () => renderTokensPage({ chains: SAMPLE_TOKENS, generatedAt: new Date() })],
+  /*
+   * A watchlist row with a PRICED and an UNPRICED trade, and a token with neither
+   * name nor symbol, so the "unpriced" branch and the unnamed-token branch are both
+   * exercised by the gate rather than only on production data.
+   */
+  ['watchlist', () => renderWatchlistPage({
+    rows: [
+      { wallet: '0x' + '1'.repeat(40), token: '0x' + '2'.repeat(40),
+        name: 'Pons', symbol: 'PONS', side: 'buy', venue: 'v4',
+        tokenAmount: '1234.5', usdAmount: 2000.25,
+        blockNumber: '61574943', blockTime: '2026-09-13T01:00:00.000Z',
+        txHash: '0x' + 'a'.repeat(64) },
+      { wallet: '0x' + '3'.repeat(40), token: '0x' + '4'.repeat(40),
+        name: null, symbol: null, side: 'sell', venue: 'v3',
+        tokenAmount: '10', usdAmount: null,
+        blockNumber: '61574900', blockTime: '2026-09-13T00:59:00.000Z',
+        txHash: '0x' + 'b'.repeat(64) },
+    ],
+    tokens: [
+      { token: '0x' + '2'.repeat(40), name: 'Pons', symbol: 'PONS', trades: 1 },
+      { token: '0x' + '4'.repeat(40), name: null, symbol: null, trades: 1 },
+    ],
+    total: 2, limit: 500, filterToken: '', filterWallet: '', walletCount: 2,
+    generatedAt: new Date(),
+  })],
 ];
 
 let failures = 0;

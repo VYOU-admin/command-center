@@ -29,6 +29,7 @@ import type { RpcClient, LogEntry } from '../adapters/token-updates/rpc.js';
 import {
   TOPICS, SELECTORS, addressTopic, addressFromTopic, decodeString,
 } from '../adapters/token-updates/decode.js';
+import { bucketOf } from '../adapters/token-updates/prices.js';
 import { log } from '../logger.js';
 
 /** Step 5: 540 accepted, 5,024 hangs. */
@@ -424,7 +425,17 @@ const formatUnits = (raw: bigint, decimals: number): string => {
  */
 async function ethUsdAt(
   client: PoolClient, chain: string, block: number, bucketBlocks: number,
+  slicePrices?: Map<number, number>, bucketOrigin?: number,
 ): Promise<number | null> {
+  /*
+   * THE SLICE'S OWN DERIVATION WINS. It was computed from this slice's blocks, so
+   * where it has a bucket it is both fresher and closer to the trade than anything
+   * the hourly job has persisted.
+   */
+  if (slicePrices && bucketOrigin !== undefined) {
+    const exact = slicePrices.get(bucketOf(block, bucketBlocks, bucketOrigin));
+    if (exact !== undefined && exact > 0) return exact;
+  }
   const r = await client.query<{ px: string }>(
     `select eth_usd::text px from native_usd_prices
       where chain = $1 and block_number <= $2 and block_number > $2 - $3
@@ -442,11 +453,12 @@ export async function sweepWatchlistActivity(
   cfg: {
     v4PoolManager: string; usdAsset: string; nativeAssets: string[];
     maxLogSpanBlocks: number; minLogSpanBlocks: number; sparseLogSpanBlocks: number;
-    bucketBlocks: number;
+    bucketBlocks: number; bucketOrigin: number;
   },
   wallets: string[],
   fromBlock: number,
   toBlock: number,
+  slicePrices?: Map<number, number>,
 ): Promise<SweepReport> {
   const walletSet = new Set(wallets);
   const poolManager = cfg.v4PoolManager.toLowerCase();
@@ -602,8 +614,9 @@ export async function sweepWatchlistActivity(
     if (counter === usdAsset) {
       usd = Math.abs(Number(counterRaw)) / 1e6;
     } else if (natives.has(counter)) {
-      const px = await ethUsdAt(client, chain, c.block, cfg.bucketBlocks);
-      if (px === null) nullBecause('no ETH/USD bucket within one bucket width');
+      const px = await ethUsdAt(client, chain, c.block, cfg.bucketBlocks,
+        slicePrices, cfg.bucketOrigin);
+      if (px === null) nullBecause('no ETH/USD bucket in the slice derivation or within one bucket width of the stored series');
       else usd = (Math.abs(Number(counterRaw)) / 1e18) * px;
     } else {
       nullBecause('counter asset is not a recognised pricing asset and has no series');
@@ -645,6 +658,124 @@ export async function sweepWatchlistActivity(
   rep.poolsClassified = poolCache.size - cacheSizeBefore;
   rep.decimalsRead = metaCache.size;
   return rep;
+}
+
+/**
+ * Derive ETH/USD for THIS SLICE, in memory, persisting nothing.
+ *
+ * WHY THE WATCHER DERIVES ITS OWN. `native_usd_prices` is written by whichever
+ * monitor owns the chain's series -- `token-updates` -- and that runs hourly, so it
+ * trails the head. The watcher reads to within 200 blocks of head, and the gap
+ * GROWS at the rate the chain produces blocks: measured at 2.2 bucket widths on the
+ * first slice (75 of 189 rows priced) and 3.2 on the second (1 of 42). An alert
+ * reading "$4 priced" on 42 trades is not a screener.
+ *
+ * THIS IS NOT A NEW OWNERSHIP VIOLATION. Step 10's rule is that exactly one monitor
+ * per chain PERSISTS the series, and that every other monitor derives it in memory
+ * for its own slice and persists nothing. The watcher now does the same thing every
+ * other monitor already did.
+ *
+ * WHOLE BUCKETS ONLY. The sweep is widened to the bucket boundaries either side of
+ * the slice, so no bucket is computed from a fraction of its ticks -- the rule step
+ * 10 states for the persisted series applies just as much to one held in memory.
+ */
+export async function deriveSliceEthUsd(
+  client: PoolClient,
+  rpc: RpcClient,
+  chain: string,
+  cfg: {
+    v4PoolManager: string; maxLogSpanBlocks: number; minLogSpanBlocks: number;
+    bucketBlocks: number; bucketOrigin: number; nativeFenceMultiple: number;
+  },
+  fromBlock: number,
+  toBlock: number,
+): Promise<{ prices: Map<number, number>; ticks: number; discarded: number; requests: number }> {
+  const pools = await client.query<{ venue: string; pool: string; native_side: number }>(
+    'select venue, pool, native_side from eth_usd_pools where chain = $1', [chain],
+  );
+  const prices = new Map<number, number>();
+  if (pools.rowCount === 0) {
+    /*
+     * NOT AN EMPTY SERIES -- a missing prerequisite. The market's pools are
+     * enumerated by eth-usd-series and cached; with none stored the watcher would
+     * silently price nothing and look like a quiet market.
+     */
+    throw new Error(
+      `eth_usd_pools holds no pools for ${chain}. Run eth-usd-series first; deriving `
+      + 'from an empty pool set would price every row null and look like a quiet market.',
+    );
+  }
+
+  const lo = bucketOf(fromBlock, cfg.bucketBlocks, cfg.bucketOrigin);
+  const hi = bucketOf(toBlock, cfg.bucketBlocks, cfg.bucketOrigin) + cfg.bucketBlocks - 1;
+  const sideOf = new Map(pools.rows.map((p) => [p.pool.toLowerCase(), p.native_side]));
+  const v4 = pools.rows.filter((p) => p.venue === 'v4').map((p) => p.pool.toLowerCase());
+  const v3 = pools.rows.filter((p) => p.venue === 'v3').map((p) => p.pool.toLowerCase());
+
+  const byBucket = new Map<number, number[]>();
+  let requests = 0;
+  const collect = (poolId: string, block: number, a0: bigint, a1: bigint): void => {
+    const side = sideOf.get(poolId);
+    if (side === undefined) return;
+    const nat = side === 0 ? a0 : a1;
+    const usdRaw = side === 0 ? a1 : a0;
+    const n = Math.abs(Number(nat)) / 1e18;
+    const u = Math.abs(Number(usdRaw)) / 1e6;
+    if (!(n > 0) || !(u > 0)) return;
+    const tick = u / n;
+    if (!Number.isFinite(tick) || tick <= 0) return;
+    const b = bucketOf(block, cfg.bucketBlocks, cfg.bucketOrigin);
+    const list = byBucket.get(b);
+    if (list) list.push(tick); else byBucket.set(b, [tick]);
+  };
+
+  for (const c of chunk(v4, WALLET_CHUNK)) {
+    const logs = await rpc.getLogs(
+      { address: cfg.v4PoolManager, topics: [TOPICS.swapV4, c] },
+      lo, hi, cfg.maxLogSpanBlocks, cfg.minLogSpanBlocks,
+    );
+    requests += 1;
+    for (const l of logs) {
+      const body = l.data.replace(/^0x/, '');
+      if (body.length < 128 || !l.topics[1]) continue;
+      collect(l.topics[1].toLowerCase(), Number(BigInt(l.blockNumber)),
+        signed(body.slice(0, 64)), signed(body.slice(64, 128)));
+    }
+  }
+  if (v3.length) {
+    const logs = await rpc.getLogs(
+      { address: v3, topics: [TOPICS.swapV3] },
+      lo, hi, cfg.maxLogSpanBlocks, cfg.minLogSpanBlocks,
+    );
+    requests += 1;
+    for (const l of logs) {
+      const body = l.data.replace(/^0x/, '');
+      if (body.length < 128) continue;
+      collect(l.address.toLowerCase(), Number(BigInt(l.blockNumber)),
+        signed(body.slice(0, 64)), signed(body.slice(64, 128)));
+    }
+  }
+
+  let ticks = 0; let discarded = 0;
+  for (const [bucket, list] of byBucket) {
+    const first = median(list);
+    if (first === null || first <= 0) { discarded += list.length; continue; }
+    const kept = list.filter((t) => t >= first / cfg.nativeFenceMultiple
+      && t <= first * cfg.nativeFenceMultiple);
+    const v = median(kept);
+    if (v === null) { discarded += list.length; continue; }
+    prices.set(bucket, v);
+    ticks += kept.length;
+    discarded += list.length - kept.length;
+  }
+  return { prices, ticks, discarded, requests };
+}
+
+function median(xs: number[]): number | null {
+  if (xs.length === 0) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 }
 
 /** Batched, per section 7: one row per statement fsyncs the WAL per row. */

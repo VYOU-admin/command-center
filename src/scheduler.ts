@@ -23,6 +23,8 @@ import { getMonitorStates, recordRun, type MonitorState } from './store/registry
 const MAX_RUN_MS = 5 * 60_000;
 
 export interface SchedulerOptions {
+  /** The dashboard base URL, passed through to adapters that link back to it. */
+  publicUrl?: string | null;
   pool: Pool;
   adapters: Map<string, AnyAdapter>;
   monitors: MonitorConfig[];
@@ -139,6 +141,7 @@ export class Scheduler {
         db: this.opts.pool,
         platform: this.opts.platform,
         configVars: this.opts.configVars,
+        publicUrl: this.opts.publicUrl ?? null,
         queueAlert: (alert, channel) => pendingAlerts.push({ alert, channel }),
       };
 

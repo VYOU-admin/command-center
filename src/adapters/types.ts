@@ -69,6 +69,14 @@ export interface AdapterContext {
    */
   configVars: ReadonlyMap<string, string>;
   /**
+   * The dashboard's own base URL, so an alert can link back to the page that
+   * holds the detail it had to leave out. Null when no domain is attached, and an
+   * alert must then omit the link rather than print a broken one -- step 14: a
+   * dead link that looks live is the same shape of failure as a filter matching
+   * nothing.
+   */
+  publicUrl: string | null;
+  /**
    * Queue a Discord alert. Deliberately queued rather than sent: alerts are
    * raised inside the persist transaction but must not perform network I/O
    * while holding it open, so the scheduler flushes them after the commit.

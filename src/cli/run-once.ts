@@ -38,6 +38,7 @@ async function main(): Promise<void> {
     tickMs: app.env.tickMs,
     platform: app.env.platform,
     configVars: app.env.configVars,
+    publicUrl: app.env.publicUrl,
   });
 
   let failures = 0;

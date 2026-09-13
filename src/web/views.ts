@@ -177,6 +177,11 @@ export function renderDashboard(args: {
   .flag.bad { color:var(--bad); border-color:var(--bad); }
   .flag.unknown { color:var(--muted); }
   footer { margin-top:36px; color:var(--muted); font-size:12px; }
+  .nav{display:flex;gap:8px;margin:0 0 16px}
+  .nav a{padding:5px 12px;border:1px solid #2a323d;border-radius:6px;background:#161b22;
+    color:#8b98a5;text-decoration:none;font-size:13px}
+  .nav a:hover{color:#e6edf3}
+  .nav a:focus-visible{outline:2px solid #4fb3bd;outline-offset:2px}
 </style>
 </head>
 <body>
@@ -185,6 +190,7 @@ export function renderDashboard(args: {
     <h1>command center <span>/ monitoring spine</span></h1>
     <span class="generated">updated ${escapeHtml(generatedAt.toISOString().replace('T', ' ').slice(0, 19))} UTC</span>
   </header>
+  <nav class="nav"><a href="/tokens">tokens</a> <a href="/watchlist">watchlist</a></nav>
 
   ${banner}
 

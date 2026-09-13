@@ -22,8 +22,8 @@ import type { AdapterContext, SourceAdapter } from './types.js';
 import { RpcClient } from './token-updates/rpc.js';
 import { loadIntakeConfig } from '../intake/plan.js';
 import {
-  WATCHER_SCHEMA, loadWatchlistWallets, persistWatchRows, sweepWatchlistActivity,
-  type SweepReport,
+  WATCHER_SCHEMA, deriveSliceEthUsd, loadWatchlistWallets, persistWatchRows,
+  sweepWatchlistActivity, type SweepReport,
 } from '../intake/watcher.js';
 
 interface Pending { stored: number }
@@ -93,6 +93,30 @@ const adapter: SourceAdapter<{ token: string }> = {
         return [];
       }
 
+      /*
+       * DERIVE ETH/USD FOR THIS SLICE FIRST, in memory, persisting nothing. The
+       * hourly job owns the stored series and trails the head, and the gap grows
+       * at the rate the chain produces blocks -- it cost 188 of 231 rows their USD
+       * before this existed. Step 10: exactly one monitor PERSISTS the series and
+       * every other derives it in memory for its own slice.
+       */
+      const px = await deriveSliceEthUsd(
+        client, rpc, chain,
+        {
+          v4PoolManager: cfg.v4PoolManager, maxLogSpanBlocks: cfg.maxLogSpanBlocks,
+          minLogSpanBlocks: cfg.minLogSpanBlocks, bucketBlocks: cfg.bucketBlocks,
+          bucketOrigin: cfg.bucketOrigin, nativeFenceMultiple: cfg.nativeFenceMultiple,
+        },
+        from, to,
+      );
+      ctx.log.info('eth/usd derived for this slice', {
+        buckets: px.prices.size, ticks: px.ticks,
+        discarded_by_fence: px.discarded, requests: px.requests,
+        prices: [...px.prices.entries()].map(([b, v]) => `${b}:$${v.toFixed(2)}`),
+        note: 'in memory only; native_usd_prices is owned by token-updates and is '
+          + 'not written here',
+      });
+
       report = await sweepWatchlistActivity(
         client, rpc, chain,
         {
@@ -100,8 +124,9 @@ const adapter: SourceAdapter<{ token: string }> = {
           nativeAssets: cfg.nativeAssets, maxLogSpanBlocks: cfg.maxLogSpanBlocks,
           minLogSpanBlocks: cfg.minLogSpanBlocks,
           sparseLogSpanBlocks: cfg.sparseLogSpanBlocks, bucketBlocks: cfg.bucketBlocks,
+          bucketOrigin: cfg.bucketOrigin,
         },
-        wallets, from, to,
+        wallets, from, to, px.prices,
       );
 
       await client.query('begin');
@@ -238,9 +263,18 @@ const adapter: SourceAdapter<{ token: string }> = {
             + (unpricedRows > 0 ? `  ·  ${unpricedRows} of ${report.trades} rows unpriced` : '')
             + `\n\n${shown.join('\n\n')}`
             + (omitted > 0
-              ? `\n\n_…and ${omitted} more token${omitted === 1 ? '' : 's'}, `
-                + `ordered by USD. All ${byToken.size} are in \`watchlist_activity\`._`
-              : ''),
+              ? `\n\n_…and ${omitted} more token${omitted === 1 ? '' : 's'}, ordered by USD._`
+              : '')
+            /*
+             * THE LINK IS OMITTED WHEN THERE IS NO DOMAIN, never printed broken.
+             * Step 14: a dead link that looks live is the same shape of failure as
+             * a filter that matches nothing.
+             */
+            + (ctx.publicUrl
+              ? `\n\n**[Every trade on the watchlist tab →](${ctx.publicUrl}/watchlist)**`
+                + `  ·  filterable by token and by wallet`
+              : `\n\nAll ${report.trades} trades are in \`watchlist_activity\`; the `
+                + 'watchlist tab has no public URL configured.'),
           level: 'info',
         }, 'crypto');
       }
