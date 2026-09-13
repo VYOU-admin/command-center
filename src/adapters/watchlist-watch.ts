@@ -107,11 +107,15 @@ const adapter: SourceAdapter<{ token: string }> = {
           minLogSpanBlocks: cfg.minLogSpanBlocks, bucketBlocks: cfg.bucketBlocks,
           bucketOrigin: cfg.bucketOrigin, nativeFenceMultiple: cfg.nativeFenceMultiple,
         },
-        from, to,
+        from, to, head,
       );
       ctx.log.info('eth/usd derived for this slice', {
         buckets: px.prices.size, ticks: px.ticks,
         discarded_by_fence: px.discarded, requests: px.requests,
+        partial_buckets: px.partialBuckets,
+        partial_note: 'a bucket whose span runs past head is derived from the ticks '
+          + 'available and counted here; nothing is persisted, and the alternative is '
+          + 'leaving the freshest rows unpriced',
         prices: [...px.prices.entries()].map(([b, v]) => `${b}:$${v.toFixed(2)}`),
         note: 'in memory only; native_usd_prices is owned by token-updates and is '
           + 'not written here',

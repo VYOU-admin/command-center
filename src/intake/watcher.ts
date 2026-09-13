@@ -675,9 +675,19 @@ export async function sweepWatchlistActivity(
  * for its own slice and persists nothing. The watcher now does the same thing every
  * other monitor already did.
  *
- * WHOLE BUCKETS ONLY. The sweep is widened to the bucket boundaries either side of
- * the slice, so no bucket is computed from a fraction of its ticks -- the rule step
- * 10 states for the persisted series applies just as much to one held in memory.
+ * WHOLE BUCKETS WHERE THE CHAIN ALLOWS IT. The sweep is widened to the bucket
+ * boundaries either side of the slice so a bucket is computed from all its ticks --
+ * but the trailing boundary can sit BEYOND THE CURRENT HEAD, which the endpoint
+ * refuses outright ("block range extends beyond current head block"). So the range
+ * is clamped to head and any bucket whose span runs past it is counted and reported
+ * as PARTIAL.
+ *
+ * A partial bucket is derived here rather than dropped, and that is a deliberate
+ * narrowing of step 10's "only whole buckets are written". That rule protects the
+ * PERSISTED series, where a bucket computed from a fraction of its ticks becomes
+ * permanent and is never recomputed. Nothing is persisted here, the alternative is
+ * leaving the freshest rows in every slice unpriced, and the count of partial
+ * buckets is reported so the imprecision is visible rather than assumed away.
  */
 export async function deriveSliceEthUsd(
   client: PoolClient,
@@ -689,7 +699,11 @@ export async function deriveSliceEthUsd(
   },
   fromBlock: number,
   toBlock: number,
-): Promise<{ prices: Map<number, number>; ticks: number; discarded: number; requests: number }> {
+  headBlock: number,
+): Promise<{
+  prices: Map<number, number>; ticks: number; discarded: number; requests: number;
+  partialBuckets: number;
+}> {
   const pools = await client.query<{ venue: string; pool: string; native_side: number }>(
     'select venue, pool, native_side from eth_usd_pools where chain = $1', [chain],
   );
@@ -707,7 +721,8 @@ export async function deriveSliceEthUsd(
   }
 
   const lo = bucketOf(fromBlock, cfg.bucketBlocks, cfg.bucketOrigin);
-  const hi = bucketOf(toBlock, cfg.bucketBlocks, cfg.bucketOrigin) + cfg.bucketBlocks - 1;
+  const wanted = bucketOf(toBlock, cfg.bucketBlocks, cfg.bucketOrigin) + cfg.bucketBlocks - 1;
+  const hi = Math.min(wanted, headBlock);
   const sideOf = new Map(pools.rows.map((p) => [p.pool.toLowerCase(), p.native_side]));
   const v4 = pools.rows.filter((p) => p.venue === 'v4').map((p) => p.pool.toLowerCase());
   const v3 = pools.rows.filter((p) => p.venue === 'v3').map((p) => p.pool.toLowerCase());
@@ -756,8 +771,9 @@ export async function deriveSliceEthUsd(
     }
   }
 
-  let ticks = 0; let discarded = 0;
+  let ticks = 0; let discarded = 0; let partialBuckets = 0;
   for (const [bucket, list] of byBucket) {
+    if (bucket + cfg.bucketBlocks - 1 > hi) partialBuckets += 1;
     const first = median(list);
     if (first === null || first <= 0) { discarded += list.length; continue; }
     const kept = list.filter((t) => t >= first / cfg.nativeFenceMultiple
@@ -768,7 +784,7 @@ export async function deriveSliceEthUsd(
     ticks += kept.length;
     discarded += list.length - kept.length;
   }
-  return { prices, ticks, discarded, requests };
+  return { prices, ticks, discarded, requests, partialBuckets };
 }
 
 function median(xs: number[]): number | null {
