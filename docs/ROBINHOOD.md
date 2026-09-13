@@ -2354,31 +2354,60 @@ Left as it is for now, and recorded in section 9.
 
 #### The alert, as it renders
 
-Aggregated by token, nothing per-wallet, sorted by USD descending:
+Aggregated by token, nothing per-wallet, **buy and sell sides kept separate** so a
+token being accumulated is distinguishable from one being distributed. Ordered by
+total USD descending.
 
 ```
-Watchlist activity: 67 token(s), 189 trades
-Blocks 61554943-61574942. 67 token(s), aggregated.
+Watchlist: 189 trades, 67 tokens, 54 wallets
+Blocks 61554943-61574942  ·  $24,918 priced  ·  114 of 189 rows unpriced
 
-`0x39dbed…4571`  bought 0  sold 1   38,415.85 tokens     $4,616 (partial)
-`0x15d36b…5c4d`  bought 0  sold 2   566,530 tokens       $4,394
-`0xd9db30…1e18`  bought 2  sold 0   285,400.07 tokens    $3,276 (partial)
+[**PONS** — Pons](https://dexscreener.com/robinhood/0x39dbed…4571)  `0x39db…4571`
+　bought  —  —  —
+　sold  　1 wallet  $4,616+  38,416
+
+[**WIF** — dogwifhat](https://dexscreener.com/robinhood/0x15d36b…5c4d)  `0x15d3…5c4d`
+　bought  —  —  —
+　sold  　2 wallets  $4,394  566,530
+
+…and 47 more tokens, ordered by USD. All 67 are in `watchlist_activity`.
 ```
 
-**`(partial)` appears when some rows in that token were unpriced**, so a total is
-never presented as complete when it is not. A token with no priced row at all reads
-`unpriced` rather than `$0` — a zero would be a measurement.
+Each line carries: **symbol and name**, a **DexScreener link** on the label, the
+short address, then per side — **wallets, USD, token amount**, all three separate.
 
-**Channel `crypto_screener`, every 30 minutes, and NOTHING is sent on an empty
-period.** A recurring "0 wallets traded" line trains the reader to ignore the
-channel, and `monitor_runs` already distinguishes silence from a dead monitor.
-Failures alert on `system` like every other monitor.
+**A symbol is a label, not an identity, so the address is always shown.** Two
+tokens on this chain both answer `symbol()` with "NVDA" (step 16). Name and symbol
+are read once per token and cached with its decimals; a token that answers neither
+is rendered as its address rather than given an invented label.
 
-**`DISCORD_WEBHOOK_CRYPTO_SCREENER` does not exist yet**, so the first alert fell
-back to `DISCORD_WEBHOOK_URL` and said so — `via: "fallback"`, with the expected
-variable named. That is the designed behaviour: a missing channel is visible rather
-than silent. Adding the variable triggers a Railway redeploy, so it must not be set
-while a collection is running.
+**Zero is never printed as `$0`.** A side with no trades reads `—`; a side whose
+every row was unpriced reads `unpriced`; a side partly unpriced reads `$n+`, so a
+total is never presented as complete when it is not. `$0` would be a measurement,
+and the wrong one.
+
+**The list is capped at 20 tokens and the remainder is COUNTED IN THE MESSAGE.**
+Discord rejects an embed description over 4,096 characters outright rather than
+trimming it, so an uncapped list of 67 tokens would make the alert vanish. A silent
+trim would read as "that is all that happened"; the footer names the count and says
+where the rest are.
+
+**Channel: `crypto`, which IS the Discord channel #crypto-screener.** The webhook
+named "Crypto" is `DISCORD_WEBHOOK_CRYPTO` and `env.ts` already registers it, so
+nothing was created and the log reads `via: "channel"`. **The two names differ and
+that is worth knowing** — a reader should not assume `crypto` is a general channel,
+and adding `DISCORD_WEBHOOK_CRYPTO_SCREENER` later would register a SECOND channel
+pointing at the same Discord channel while leaving this monitor on `crypto`.
+
+An earlier attempt routed this to a `crypto_screener` channel that did not exist,
+which fell back to `DISCORD_WEBHOOK_URL` and said so. **The fallback warning is the
+design working** — a misrouting was visible rather than silent — but it was a
+misrouting, and the fix was to find the webhook that already existed rather than add
+one.
+
+**Every 30 minutes, and NOTHING is sent on an empty period.** A recurring "0 wallets
+traded" line trains the reader to ignore the channel, and `monitor_runs` already
+distinguishes silence from a dead monitor. Failures alert on `system`.
 
 **`AlertLevel` gained `info`.** The activity alert is none of critical, warning or
 recovery, and reusing `recovery` would colour a routine event as "a failure ended".

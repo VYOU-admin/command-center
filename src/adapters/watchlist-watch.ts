@@ -7,6 +7,11 @@
  * SPENDS. Coupling a metered job to a free one means a ceiling or a rate limit
  * stops the free one too, and a sweep failure would stop scoring.
  *
+ * THE ALERT GOES TO THE `crypto` CHANNEL, WHICH IS #crypto-screener. The webhook
+ * named "Crypto" is DISCORD_WEBHOOK_CRYPTO and the loop in env.ts already
+ * registers it, so nothing new is created and the log reads via:"channel". The
+ * channel name and the Discord channel name differ; see env.ts.
+ *
  * THE ALERT IS AGGREGATED BY TOKEN AND CARRIES NOTHING PER-WALLET. The per-wallet
  * detail is the stored record and a later dashboard tab. An empty period sends
  * NOTHING: a recurring "0 wallets traded" line trains the reader to ignore the
@@ -144,37 +149,100 @@ const adapter: SourceAdapter<{ token: string }> = {
        * AGGREGATED BY TOKEN, NOTHING PER-WALLET, AND SILENT WHEN EMPTY.
        */
       if (report.rows.length > 0) {
-        const byToken = new Map<string, {
-          buyers: Set<string>; sellers: Set<string>; amount: number; usd: number; anyNull: boolean;
-        }>();
+        interface Agg {
+          name: string | null; symbol: string | null;
+          buyers: Set<string>; sellers: Set<string>;
+          boughtTokens: number; soldTokens: number;
+          boughtUsd: number; soldUsd: number;
+          boughtTrades: number; soldTrades: number;
+          boughtUnpriced: number; soldUnpriced: number;
+        }
+        const byToken = new Map<string, Agg>();
         for (const r of report.rows) {
           const e = byToken.get(r.token) ?? {
+            name: r.tokenName, symbol: r.tokenSymbol,
             buyers: new Set<string>(), sellers: new Set<string>(),
-            amount: 0, usd: 0, anyNull: false,
+            boughtTokens: 0, soldTokens: 0, boughtUsd: 0, soldUsd: 0,
+            boughtTrades: 0, soldTrades: 0, boughtUnpriced: 0, soldUnpriced: 0,
           };
-          if (r.side === 'buy') e.buyers.add(r.wallet); else e.sellers.add(r.wallet);
-          e.amount += Math.abs(Number(r.tokenAmount));
-          if (r.usdAmount === null) e.anyNull = true; else e.usd += r.usdAmount;
+          const amt = Math.abs(Number(r.tokenAmount));
+          if (r.side === 'buy') {
+            e.buyers.add(r.wallet); e.boughtTokens += amt; e.boughtTrades += 1;
+            if (r.usdAmount === null) e.boughtUnpriced += 1; else e.boughtUsd += r.usdAmount;
+          } else {
+            e.sellers.add(r.wallet); e.soldTokens += amt; e.soldTrades += 1;
+            if (r.usdAmount === null) e.soldUnpriced += 1; else e.soldUsd += r.usdAmount;
+          }
           byToken.set(r.token, e);
         }
+
+        const short = (a: string): string => `${a.slice(0, 6)}…${a.slice(-4)}`;
+        const n0 = (x: number): string =>
+          x.toLocaleString('en-US', { maximumFractionDigits: 0 });
+        const tok = (x: number): string =>
+          x >= 1000 ? x.toLocaleString('en-US', { maximumFractionDigits: 0 })
+            : x.toLocaleString('en-US', { maximumFractionDigits: 4 });
+        /*
+         * A ZERO USD FIGURE IS NEVER PRINTED AS $0. Either some rows on that side
+         * were unpriced -- shown as `unpriced` or `$n+` -- or there was no activity
+         * on that side, shown as a dash. `$0` would be a measurement, and it would
+         * be the wrong one.
+         */
+        const usd = (v: number, unpriced: number, trades: number): string => {
+          if (trades === 0) return '—';
+          if (unpriced === trades) return 'unpriced';
+          return unpriced > 0 ? `$${n0(v)}+` : `$${n0(v)}`;
+        };
+
         const lines = [...byToken.entries()]
-          .sort((a, b) => b[1].usd - a[1].usd)
+          .sort((a, b) => (b[1].boughtUsd + b[1].soldUsd) - (a[1].boughtUsd + a[1].soldUsd))
           .map(([token, e]) => {
-            const usd = e.usd > 0
-              ? `$${e.usd.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
-              : 'unpriced';
-            // A partial total says so. Presenting it as complete would understate.
-            const qualifier = e.anyNull && e.usd > 0 ? ' (partial)' : '';
-            return `\`${token}\`  bought ${e.buyers.size}  sold ${e.sellers.size}  `
-              + `${e.amount.toLocaleString('en-US', { maximumFractionDigits: 2 })} tokens  `
-              + `${usd}${qualifier}`;
+            /*
+             * A SYMBOL IS A LABEL, NOT AN IDENTITY -- two tokens on this chain both
+             * answer symbol() with "NVDA". The address is always shown alongside,
+             * and a token that answers neither name() nor symbol() shows the
+             * address rather than an invented label.
+             */
+            const label = e.symbol && e.name ? `**${e.symbol}** — ${e.name}`
+              : e.symbol ? `**${e.symbol}**`
+                : e.name ? `**${e.name}**`
+                  : `\`${short(token)}\``;
+            const chart = `https://dexscreener.com/robinhood/${token}`;
+            const nb = e.buyers.size; const ns = e.sellers.size;
+            const side = (
+              wallets: number, trades: number, usdV: number, unpriced: number, amount: number,
+            ): string => (trades === 0 ? '—  —  —'
+              : `${wallets} wallet${wallets === 1 ? '' : 's'}  `
+                + `${usd(usdV, unpriced, trades)}  ${tok(amount)}`);
+            return `[${label}](${chart})  \`${short(token)}\`\n`
+              + `　bought  ${side(nb, e.boughtTrades, e.boughtUsd, e.boughtUnpriced, e.boughtTokens)}\n`
+              + `　sold  　${side(ns, e.soldTrades, e.soldUsd, e.soldUnpriced, e.soldTokens)}`;
           });
+
+        /*
+         * DISCORD CAPS AN EMBED DESCRIPTION AT 4,096 CHARACTERS. 67 tokens at three
+         * lines each overruns it, and a truncated embed is REJECTED rather than
+         * trimmed -- the alert would vanish. So the list is capped and the tokens
+         * left out are COUNTED IN THE MESSAGE: a silent trim would read as "that is
+         * all that happened".
+         */
+        const LIMIT = 20;
+        const shown = lines.slice(0, LIMIT);
+        const omitted = lines.length - shown.length;
+        const totalUsd = [...byToken.values()].reduce((n, e) => n + e.boughtUsd + e.soldUsd, 0);
+        const unpricedRows = report.usdNull;
         ctx.queueAlert({
-          title: `Watchlist activity: ${byToken.size} token(s), ${report.trades} trades`,
-          description: `Blocks ${from}–${to}. ${lines.length} token(s), aggregated.\n\n`
-            + lines.join('\n'),
+          title: `Watchlist: ${report.trades} trades, ${byToken.size} tokens, `
+            + `${new Set(report.rows.map((r) => r.wallet)).size} wallets`,
+          description: `Blocks ${from}–${to}  ·  $${n0(totalUsd)} priced`
+            + (unpricedRows > 0 ? `  ·  ${unpricedRows} of ${report.trades} rows unpriced` : '')
+            + `\n\n${shown.join('\n\n')}`
+            + (omitted > 0
+              ? `\n\n_…and ${omitted} more token${omitted === 1 ? '' : 's'}, `
+                + `ordered by USD. All ${byToken.size} are in \`watchlist_activity\`._`
+              : ''),
           level: 'info',
-        }, 'crypto_screener');
+        }, 'crypto');
       }
     } finally {
       client.release();

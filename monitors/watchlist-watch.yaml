@@ -23,7 +23,9 @@ schedule: 30m
 
 alerts:
   # FAILURES go to system like every other monitor. The activity alert itself is
-  # routed to crypto_screener from inside the adapter.
+  # routed from inside the adapter to the `crypto` channel, which is the Discord
+  # channel #crypto-screener -- the webhook named "Crypto",
+  # DISCORD_WEBHOOK_CRYPTO, already registered. Nothing new was created.
   channel: system
   discord_on_consecutive_failures: 2
 

@@ -99,10 +99,23 @@ export function loadEnv(): Env {
    * rather than defaulted, so /health shows via:"fallback" and a misrouting is
    * visible instead of silent.
    *
-   * Currently empty. The one entry that lived here routed a channel whose
-   * monitor has been removed; the environment variable is still set on the
-   * service so its Discord webhook is not lost, but nothing registers it as a
-   * channel any more.
+   * Still empty, and the watchlist alert deliberately does NOT add an entry.
+   *
+   * The Discord channel #crypto-screener is served by the webhook named "Crypto",
+   * which is `DISCORD_WEBHOOK_CRYPTO` -- so the loop above already registers it as
+   * the channel `crypto`. An alias would only add a second name for a webhook that
+   * is already reachable, which is how two names for one destination drift apart.
+   *
+   * **The channel `crypto` IS #crypto-screener.** The names differ and that is
+   * worth knowing: a future reader should not assume `crypto` means some general
+   * channel, and should not add `DISCORD_WEBHOOK_CRYPTO_SCREENER` expecting it to
+   * be picked up -- that would register a SECOND channel, `crypto_screener`,
+   * pointing at the same Discord channel, and the monitors routed to `crypto`
+   * would not move.
+   *
+   * The one entry that lived here routed MOS_PRICE_CHECK to `mos-price-alert`;
+   * that monitor was removed and the variable is still set on the service so its
+   * webhook is not lost.
    */
   const WEBHOOK_ALIASES: ReadonlyArray<readonly [string, string]> = [];
   for (const [envVar, channel] of WEBHOOK_ALIASES) {

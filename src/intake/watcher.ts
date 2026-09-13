@@ -26,7 +26,9 @@
 
 import type { PoolClient } from '../store/db.js';
 import type { RpcClient, LogEntry } from '../adapters/token-updates/rpc.js';
-import { TOPICS, SELECTORS, addressTopic, addressFromTopic } from '../adapters/token-updates/decode.js';
+import {
+  TOPICS, SELECTORS, addressTopic, addressFromTopic, decodeString,
+} from '../adapters/token-updates/decode.js';
 import { log } from '../logger.js';
 
 /** Step 5: 540 accepted, 5,024 hangs. */
@@ -78,6 +80,15 @@ create table if not exists token_decimals_cache (
   decimals integer,
   primary key (chain, token)
 );
+
+/*
+ * Name and symbol for the alert, which must read as a token rather than as an
+ * address. Both are nullable and a null is rendered as the short address -- a
+ * token that does not answer name() is not a broken row, and inventing a label
+ * for it would be worse than showing the address.
+ */
+alter table token_decimals_cache add column if not exists name text;
+alter table token_decimals_cache add column if not exists symbol text;
 `;
 
 export async function loadWatchlistWallets(
@@ -148,6 +159,64 @@ export async function probeWatchDensity(
   const blocks = out.reduce((n, s) => n + (s.to - s.from + 1), 0);
   const logs = out.reduce((n, s) => n + s.logs, 0);
   return { samples: out, logsPerBlock: blocks > 0 ? logs / blocks : 0, requests };
+}
+
+export interface TokenMeta { decimals: number | null; name: string | null; symbol: string | null }
+
+/**
+ * Name, symbol and decimals for a token, read once and cached.
+ *
+ * A SYMBOL IS A LABEL, NOT AN IDENTITY (step 16, AI): two tokens on this chain
+ * both answer `symbol()` with "NVDA". The alert therefore shows the symbol AND
+ * links the address, so a reader is never asked to trust a name alone.
+ */
+export async function tokenMeta(
+  client: PoolClient, rpc: RpcClient, chain: string, token: string,
+  cache: Map<string, TokenMeta>,
+): Promise<TokenMeta> {
+  const hit = cache.get(token);
+  if (hit) return hit;
+  const stored = await client.query<{
+    decimals: number | null; name: string | null; symbol: string | null;
+  }>('select decimals, name, symbol from token_decimals_cache where chain=$1 and token=$2',
+    [chain, token]);
+  if (stored.rowCount && stored.rows[0]!.symbol !== null) {
+    const m = stored.rows[0]!;
+    const meta = { decimals: m.decimals, name: m.name, symbol: m.symbol };
+    cache.set(token, meta);
+    return meta;
+  }
+
+  let decimals: number | null = stored.rows[0]?.decimals ?? null;
+  if (stored.rowCount === 0) {
+    try {
+      const r = await rpc.ethCall(token, SELECTORS.decimals);
+      /*
+       * A `0x` RETURN IS UNKNOWN, NOT 18 AND NOT 0 (step 1). Assuming 18 for an
+       * unreadable decimals is a factor-of-10^12 error waiting to happen.
+       */
+      if (typeof r === 'string' && r.length >= 66) decimals = Number(BigInt(r));
+      if (decimals !== null && (!Number.isFinite(decimals) || decimals < 0 || decimals > 36)) {
+        decimals = null;
+      }
+    } catch { decimals = null; }
+  }
+  let name: string | null = null;
+  let symbol: string | null = null;
+  try { name = decodeString(await rpc.ethCall(token, SELECTORS.name)) || null; } catch { name = null; }
+  try { symbol = decodeString(await rpc.ethCall(token, SELECTORS.symbol)) || null; } catch { symbol = null; }
+
+  const meta: TokenMeta = { decimals, name, symbol };
+  cache.set(token, meta);
+  await client.query(
+    `insert into token_decimals_cache (chain, token, decimals, name, symbol)
+     values ($1,$2,$3,$4,$5)
+     on conflict (chain, token) do update
+       set name = coalesce(excluded.name, token_decimals_cache.name),
+           symbol = coalesce(excluded.symbol, token_decimals_cache.symbol)`,
+    [chain, token, decimals, name, symbol],
+  );
+  return meta;
 }
 
 /* --------------------------------------------------------- pool classification */
@@ -290,6 +359,8 @@ const BATCH_ROWS = 500;
 export interface WatchRow {
   wallet: string;
   token: string;
+  tokenName: string | null;
+  tokenSymbol: string | null;
   side: 'buy' | 'sell';
   venue: 'v3' | 'v4';
   pool: string;
@@ -467,7 +538,7 @@ export async function sweepWatchlistActivity(
 
   /* 4. classify, match, price */
   const poolCache = await loadPoolCache(client, chain);
-  const decCache = new Map<string, number | null>();
+  const metaCache = new Map<string, TokenMeta>();
   const cacheSizeBefore = poolCache.size;
   const head = toBlock;
 
@@ -501,7 +572,8 @@ export async function sweepWatchlistActivity(
       matched = { venue: 'v3', pool: c.counterparty, info, a0: s.a0, a1: s.a1 };
     }
 
-    const dec = await tokenDecimals(client, rpc, chain, c.token, decCache);
+    const meta = await tokenMeta(client, rpc, chain, c.token, metaCache);
+    const dec = meta.decimals;
     if (dec === null) {
       /*
        * NO DECIMALS MEANS NO AMOUNT WE CAN STATE. token_amount is NOT NULL by
@@ -552,7 +624,9 @@ export async function sweepWatchlistActivity(
     }
     rep.trades += 1;
     rep.rows.push({
-      wallet: c.wallet, token: c.token, side: c.side, venue: matched.venue,
+      wallet: c.wallet, token: c.token,
+      tokenName: meta.name, tokenSymbol: meta.symbol,
+      side: c.side, venue: matched.venue,
       pool: matched.pool, counterparty: c.counterparty,
       txHash: c.log.transactionHash, logIndex: Number(BigInt(c.log.logIndex)),
       block: c.block, blockTime: new Date(Number(BigInt(ts)) * 1000),
@@ -560,7 +634,7 @@ export async function sweepWatchlistActivity(
     });
   }
   rep.poolsClassified = poolCache.size - cacheSizeBefore;
-  rep.decimalsRead = decCache.size;
+  rep.decimalsRead = metaCache.size;
   return rep;
 }
 
