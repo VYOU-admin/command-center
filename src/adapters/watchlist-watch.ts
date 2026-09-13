@@ -20,6 +20,7 @@
  */
 import type { AdapterContext, SourceAdapter } from './types.js';
 import { RpcClient } from './token-updates/rpc.js';
+import { bucketOf } from './token-updates/prices.js';
 import { loadIntakeConfig } from '../intake/plan.js';
 import {
   WATCHER_SCHEMA, deriveSliceEthUsd, loadWatchlistWallets, persistWatchRows,
@@ -84,11 +85,34 @@ const adapter: SourceAdapter<{ token: string }> = {
         `select cursor_block::text from token_ingest_cursor
           where chain = $1 and token = 'WATCHLIST' and kind = 'watch'`, [chain],
       );
-      const target = head - lag;
-      from = cur.rowCount ? Number(cur.rows[0]!.cursor_block) + 1 : target - slice;
-      to = Math.min(from + slice - 1, target);
-      if (to <= from) {
-        ctx.log.info('nothing to advance', { from, to, head, lag });
+
+      /*
+       * THE SLICE ENDS ON A WHOLE BUCKET BOUNDARY, so the derivation never sees a
+       * partial bucket. `boundary` is the last block of the last COMPLETE bucket at
+       * or below `head - lag`; the `safe + 1` form handles the exact-boundary case
+       * without a branch. Blocks past it are not read this run -- the cursor stops
+       * there and the next run picks them up once their bucket completes.
+       *
+       * THE COST IS FRESHNESS: up to one bucket width, 16.8 minutes at 35,622
+       * blocks/hour, against ~0.3 minutes when the sweep was clamped to head
+       * instead. That is what never pricing from a fraction of a bucket costs, and
+       * it is stated rather than absorbed.
+       */
+      const safe = head - lag;
+      const boundary = bucketOf(safe + 1, cfg.bucketBlocks, cfg.bucketOrigin) - 1;
+      from = cur.rowCount ? Number(cur.rows[0]!.cursor_block) + 1 : boundary - slice + 1;
+      to = Math.min(from + slice - 1, boundary);
+      if (to < from) {
+        /*
+         * NOT AN ERROR, and reported with the numbers rather than as silence: the
+         * cursor has reached the last complete bucket and the next one is still
+         * filling. A run that advances nothing is the design working.
+         */
+        ctx.log.info('nothing to advance: the next bucket has not completed', {
+          cursor: from - 1, head, lag, safe, boundary,
+          blocks_waiting: safe - boundary,
+          note: 'the slice may not end inside an incomplete bucket',
+        });
         pending.set(ctx.monitorId, { stored: 0 });
         return [];
       }
@@ -107,18 +131,32 @@ const adapter: SourceAdapter<{ token: string }> = {
           minLogSpanBlocks: cfg.minLogSpanBlocks, bucketBlocks: cfg.bucketBlocks,
           bucketOrigin: cfg.bucketOrigin, nativeFenceMultiple: cfg.nativeFenceMultiple,
         },
-        from, to, head,
+        from, to,
       );
+      /*
+       * PER BUCKET, NOT AGGREGATED. The previous version logged only the totals, and
+       * when a run's per-bucket detail was later asked for it was unrecoverable: the
+       * derivation persists nothing by design, so whatever it does not log is gone.
+       */
       ctx.log.info('eth/usd derived for this slice', {
-        buckets: px.prices.size, ticks: px.ticks,
-        discarded_by_fence: px.discarded, requests: px.requests,
-        partial_buckets: px.partialBuckets,
-        partial_note: 'a bucket whose span runs past head is derived from the ticks '
-          + 'available and counted here; nothing is persisted, and the alternative is '
-          + 'leaving the freshest rows unpriced',
-        prices: [...px.prices.entries()].map(([b, v]) => `${b}:$${v.toFixed(2)}`),
+        slice: `${from}..${to}`,
+        sweep_range: `${px.buckets[0]?.bucket ?? from}..${to}`,
+        buckets_total: px.buckets.length,
+        ticks_total: px.ticks,
+        discarded_by_fence_total: px.discarded,
+        requests: px.requests,
+        per_bucket: px.buckets.map((b) => ({
+          bucket: b.bucket,
+          whole: true,
+          bucket_range: `${b.bucket}..${b.bucket + cfg.bucketBlocks - 1}`,
+          ticks: b.ticks,
+          discarded: b.discarded,
+          price_usd: Number(b.price.toFixed(2)),
+          tick_blocks: `${b.firstTickBlock}..${b.lastTickBlock}`,
+        })),
         note: 'in memory only; native_usd_prices is owned by token-updates and is '
-          + 'not written here',
+          + 'not written here. Every bucket is whole by construction -- the slice ends '
+          + 'on a bucket boundary -- so there is no partial count to report.',
       });
 
       report = await sweepWatchlistActivity(

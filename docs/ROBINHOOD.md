@@ -2378,14 +2378,49 @@ DexScreener agreed on to 0.3%.
 **`native_usd_prices` was not touched**: its head is still 61,553,150 and its three
 provenances still hold 9,655 / 489 / 18 buckets. The ownership rule held.
 
-**One failure, reported rather than hidden.** The first run of this raised `block
-range extends beyond current head block`: widening the sweep to the trailing bucket
-boundary asks for blocks that do not exist yet. The range is clamped to head, and the
-trailing bucket is then INCOMPLETE — it is derived from the ticks available and
-**counted as `partial_buckets` on every run**. That is a deliberate narrowing of
-"only whole buckets are written": the rule protects the persisted series, where a
-partial bucket becomes permanent, and nothing is persisted here. The alternative was
-leaving the freshest rows of every slice unpriced, which is the whole defect.
+#### THE SLICE ENDS ON A WHOLE BUCKET BOUNDARY — decided 2026-09-13
+
+**The watcher never derives a partial bucket.** An earlier version clamped the
+derivation's sweep to head, which left the trailing bucket incomplete and derived it
+anyway from whatever ticks existed. That was recorded here as a deliberate narrowing
+of step 10's "only whole buckets are written". **The narrowing is withdrawn.** Step
+10's rule is absolute and needs no amendment: the fix belongs in what the watcher
+READS, not in what the rule allows.
+
+**The slice is capped at the last whole bucket boundary at or below `head - lag`:**
+
+```
+lag      = head_lag (200)
+safe     = head - lag                      the last block we are willing to read
+boundary = bucketOf(safe + 1, size, origin) - 1
+from     = cursor + 1   (or boundary - slice + 1 with no cursor)
+to       = min(from + slice - 1, boundary)
+if to < from  ->  nothing to advance; report and exit without sweeping
+```
+
+`boundary` is the last block of the last COMPLETE bucket at or below `safe`. The
+`safe + 1` form handles the exact-boundary case without a branch: at
+`safe = 61,595,692` it yields 61,593,149 — stop before the incomplete bucket
+61,593,150 — and at `safe = 61,593,149` it yields 61,593,149 itself.
+
+**Three consequences, and the third is the cost:**
+
+1. **Every bucket the derivation sees is whole, by construction.** `to` is a bucket
+   end, so the sweep range `bucketOf(from) .. to` contains only complete buckets. No
+   clamp to head is needed and `partial_buckets` can never be non-zero — which is why
+   it was removed from the run log rather than left reporting a constant zero.
+2. **The slice self-aligns.** After one run the cursor sits on a bucket end, so every
+   later slice starts on a bucket start and ends on a bucket end.
+3. **The watcher now lags head by up to one bucket width.** 10,000 blocks at 35,622
+   blocks/hour is **16.8 minutes**, against ~0.3 minutes under the old clamp. Blocks
+   past the boundary are not read this run; the cursor stops there and the next run
+   picks them up once their bucket completes. At a 30-minute cadence that sits inside
+   one cycle, but **the alert is now up to ~17 minutes stale and that is the price
+   paid for never pricing from a fraction of a bucket.**
+
+**A slice with no ETH/USD ticks at all raises.** The market has 52 trading pools with
+thousands of ticks per bucket, so an empty derivation is a defect rather than a quiet
+market — the filter-matched-nothing rule applied to this job.
 
 **The options as they stood, kept because the reasoning is the reusable part.** The
 first three each trade something real away; the fourth did not:

@@ -231,6 +231,25 @@ export async function tokenMeta(
 
 /* --------------------------------------------------------- pool classification */
 
+/**
+ * One derived bucket, reported individually rather than aggregated.
+ *
+ * The previous version logged only the totals, and when the per-bucket detail of a
+ * run was later asked for it was UNRECOVERABLE: the derivation persists nothing by
+ * design, and the run's own log had kept only `ticks: 8220` across two buckets and
+ * `partial_buckets: 1` without saying which. An in-memory derivation leaves no trace
+ * anywhere else, so whatever it does not log is gone.
+ */
+export interface BucketDetail {
+  bucket: number;
+  price: number;
+  ticks: number;
+  discarded: number;
+  /** First and last block that actually contributed a tick to this bucket. */
+  firstTickBlock: number;
+  lastTickBlock: number;
+}
+
 export interface PoolInfo {
   kind: 'v3' | 'v4' | 'not-a-pool';
   currency0: string | null;
@@ -675,19 +694,22 @@ export async function sweepWatchlistActivity(
  * for its own slice and persists nothing. The watcher now does the same thing every
  * other monitor already did.
  *
- * WHOLE BUCKETS WHERE THE CHAIN ALLOWS IT. The sweep is widened to the bucket
- * boundaries either side of the slice so a bucket is computed from all its ticks --
- * but the trailing boundary can sit BEYOND THE CURRENT HEAD, which the endpoint
- * refuses outright ("block range extends beyond current head block"). So the range
- * is clamped to head and any bucket whose span runs past it is counted and reported
- * as PARTIAL.
+ * WHOLE BUCKETS ONLY, AND BY CONSTRUCTION RATHER THAN BY CHECK. The caller caps the
+ * slice at the last COMPLETE bucket boundary at or below `head - lag`, so `toBlock`
+ * is always a bucket end and the sweep range `bucketOf(fromBlock) .. toBlock`
+ * contains only whole buckets. Nothing is clamped to head and no bucket is ever
+ * partial.
  *
- * A partial bucket is derived here rather than dropped, and that is a deliberate
- * narrowing of step 10's "only whole buckets are written". That rule protects the
- * PERSISTED series, where a bucket computed from a fraction of its ticks becomes
- * permanent and is never recomputed. Nothing is persisted here, the alternative is
- * leaving the freshest rows in every slice unpriced, and the count of partial
- * buckets is reported so the imprecision is visible rather than assumed away.
+ * An earlier version clamped to head instead and derived the incomplete trailing
+ * bucket from whatever ticks existed, recorded as a deliberate narrowing of step
+ * 10's "only whole buckets are written". THAT NARROWING IS WITHDRAWN: step 10's rule
+ * is absolute, and the fix belongs in what the watcher reads rather than in what the
+ * rule allows. It cost up to one bucket width of freshness -- 16.8 minutes at 35,622
+ * blocks/hour -- and that is the price of never pricing from a fraction of a bucket.
+ *
+ * The invariant is ASSERTED, not assumed: a `toBlock` that is not a bucket end
+ * raises, because a caller that drifted off the boundary would silently reintroduce
+ * exactly the partial bucket this removes.
  */
 export async function deriveSliceEthUsd(
   client: PoolClient,
@@ -699,10 +721,9 @@ export async function deriveSliceEthUsd(
   },
   fromBlock: number,
   toBlock: number,
-  headBlock: number,
 ): Promise<{
   prices: Map<number, number>; ticks: number; discarded: number; requests: number;
-  partialBuckets: number;
+  buckets: BucketDetail[];
 }> {
   const pools = await client.query<{ venue: string; pool: string; native_side: number }>(
     'select venue, pool, native_side from eth_usd_pools where chain = $1', [chain],
@@ -720,14 +741,27 @@ export async function deriveSliceEthUsd(
     );
   }
 
+  /*
+   * ASSERT THE BOUNDARY. toBlock must be the last block of a bucket, or the sweep
+   * would end mid-bucket and derive a partial one -- the exact fault this design
+   * removes. A caller that drifts off the grid fails here rather than quietly
+   * pricing from a fraction of a bucket.
+   */
   const lo = bucketOf(fromBlock, cfg.bucketBlocks, cfg.bucketOrigin);
-  const wanted = bucketOf(toBlock, cfg.bucketBlocks, cfg.bucketOrigin) + cfg.bucketBlocks - 1;
-  const hi = Math.min(wanted, headBlock);
+  const hi = toBlock;
+  if (bucketOf(hi + 1, cfg.bucketBlocks, cfg.bucketOrigin) !== hi + 1) {
+    throw new Error(
+      `the slice must end on a whole bucket boundary; ${hi} is not the last block of `
+      + `a ${cfg.bucketBlocks}-block bucket anchored at ${cfg.bucketOrigin}. Sweeping `
+      + 'to it would derive a partial bucket.',
+    );
+  }
   const sideOf = new Map(pools.rows.map((p) => [p.pool.toLowerCase(), p.native_side]));
   const v4 = pools.rows.filter((p) => p.venue === 'v4').map((p) => p.pool.toLowerCase());
   const v3 = pools.rows.filter((p) => p.venue === 'v3').map((p) => p.pool.toLowerCase());
 
-  const byBucket = new Map<number, number[]>();
+  /* Ticks AND the block each came from, so the contributing range is reportable. */
+  const byBucket = new Map<number, { tick: number; block: number }[]>();
   let requests = 0;
   const collect = (poolId: string, block: number, a0: bigint, a1: bigint): void => {
     const side = sideOf.get(poolId);
@@ -741,7 +775,7 @@ export async function deriveSliceEthUsd(
     if (!Number.isFinite(tick) || tick <= 0) return;
     const b = bucketOf(block, cfg.bucketBlocks, cfg.bucketOrigin);
     const list = byBucket.get(b);
-    if (list) list.push(tick); else byBucket.set(b, [tick]);
+    if (list) list.push({ tick, block }); else byBucket.set(b, [{ tick, block }]);
   };
 
   for (const c of chunk(v4, WALLET_CHUNK)) {
@@ -771,20 +805,41 @@ export async function deriveSliceEthUsd(
     }
   }
 
-  let ticks = 0; let discarded = 0; let partialBuckets = 0;
-  for (const [bucket, list] of byBucket) {
-    if (bucket + cfg.bucketBlocks - 1 > hi) partialBuckets += 1;
-    const first = median(list);
+  let ticks = 0; let discarded = 0;
+  const buckets: BucketDetail[] = [];
+  for (const [bucket, list] of [...byBucket.entries()].sort((a, b) => a[0] - b[0])) {
+    const values = list.map((x) => x.tick);
+    const first = median(values);
     if (first === null || first <= 0) { discarded += list.length; continue; }
-    const kept = list.filter((t) => t >= first / cfg.nativeFenceMultiple
-      && t <= first * cfg.nativeFenceMultiple);
-    const v = median(kept);
+    const kept = list.filter((x) => x.tick >= first / cfg.nativeFenceMultiple
+      && x.tick <= first * cfg.nativeFenceMultiple);
+    const v = median(kept.map((x) => x.tick));
     if (v === null) { discarded += list.length; continue; }
     prices.set(bucket, v);
     ticks += kept.length;
-    discarded += list.length - kept.length;
+    const dropped = list.length - kept.length;
+    discarded += dropped;
+    buckets.push({
+      bucket, price: v, ticks: kept.length, discarded: dropped,
+      firstTickBlock: Math.min(...kept.map((x) => x.block)),
+      lastTickBlock: Math.max(...kept.map((x) => x.block)),
+    });
   }
-  return { prices, ticks, discarded, requests, partialBuckets };
+
+  /*
+   * AN EMPTY DERIVATION IS A DEFECT, NOT A QUIET MARKET. 52 pools trade in this
+   * market with thousands of ticks per bucket, so zero buckets over a whole slice
+   * means the pools, the filter or the range is wrong -- and it would silently price
+   * every row null, which reads exactly like a slice of untracked memecoins.
+   */
+  if (buckets.length === 0) {
+    throw new Error(
+      `the ETH/USD market returned NO usable ticks over ${lo}..${hi} from `
+      + `${pools.rowCount} pools. That is a suspected defect, not a quiet market: it `
+      + 'would price every native-quoted row null.',
+    );
+  }
+  return { prices, ticks, discarded, requests, buckets };
 }
 
 function median(xs: number[]): number | null {
