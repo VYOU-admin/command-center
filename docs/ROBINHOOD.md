@@ -1632,6 +1632,44 @@ and that was stated rather than implied.
 that comparison after any collection; anything outside it is a defect to explain
 rather than an outlier to accept.
 
+**"THE TICKS THEY CAME FROM" MEANS THE ROW'S OWN BUCKET, AND CHECKING IT AGAINST
+THE SERIES' GLOBAL RANGE REFUSED A CORRECT WRITE.** The check took `min`/`max`
+over the whole of `<token>_usd_prices` and required every row to fall inside it.
+That silently assumes the token's own USD series spans its life — true for PONS,
+INDEX and AI, and **false in general**.
+
+CHUMP is the counter-example. 264,263 of its 274,985 swaps sit on one v3 WETH pool
+and only 2,331 are USDG-quoted, so its own series is **49 buckets covering
+45,293,150–61,693,150 — 1.3% of its life, all of it after the cohort window
+closed.** Its rows are priced from the COUNTER side across the whole life, and the
+token rose from **$0.0000022 at its first swap to $0.0425 at head, about
+19,000x.** 1,749 perfectly correct rows fell below a range derived from the last
+1.3% of the token's history, and the write was refused.
+
+**Proven on individual swaps before the check was changed, per the rule that an
+aggregate is a hypothesis.** Hand-computed from the pool's own amounts times the
+bucket's ETH/USD, on the charted v3 pool `0x714442e9…` where CHUMP is `amount1`:
+
+| block | transaction | WETH route | CHUMP's own USDG bucket |
+|---|---|---|---|
+| 23,794,012 (first swap) | `0x655220cda0f1df3522be9a3308f3d6ff2fd140d6935dd86df245d003a93f2df0` | **$0.0000022381** | — |
+| 40,002,855 | `0x5d81d811fd715801927d4f83da35bdb851f2f2fb1e2ebf2badf52251cd72866b` | $0.0014901 | — |
+| 44,993,181 (just after the window) | `0x01d98a1b0f943eb1aa15cad564a1254dde36910f06e0584c606d424697bd646c` | $0.0101957 | — |
+| 55,000,045 | `0x93eea3fa7c5baf35a0466203fe16fdd9df2cd1dcfcab2cdc871d36313d356ed0` | $0.0411014 | — |
+| **61,697,928** | `0x72154acac93af66efc6bf06461b1c45c0b947b1fc6c9993cab04fc1566ac41c1` | **$0.0424296** | **$0.0425254** |
+
+The first line is exactly the low the check rejected, and **the last line is the
+cross-check that settles it: two entirely independent routes — WETH × ETH/USD
+against a direct USDG quote — agree to 0.23%** in the one era where both exist.
+
+**The comparison is now per bucket, at the configured native fence.** Measured over
+CHUMP's 10,215 comparable swaps: **0 outside 10x**, worst ratio 6.58x, mean
+difference 13.1%. That spread is real intra-bucket movement across ~17 minutes on a
+token that rose 19,000x, and an order-of-magnitude error — the 2^39 degenerate tick
+this check exists to catch — still cannot hide inside 10x. **Rows sitting in a
+bucket the token's own series never priced are NOT comparable, and that count is
+reported rather than dropped from the denominator.**
+
 **Sanity-check the USD total against market cap ÷ supply** before reporting it. A
 sum is the cheapest tripwire there is.
 
@@ -3728,6 +3766,14 @@ against a 2,000,000 ceiling.
   optional `knownPool`, which the conventions loop already had and never used, and
   raises with a message naming the cause when neither is available. **The fix keeps one
   decode implementation** rather than a second written to avoid the line.
+- **FIXED 2026-09-13: `checkPricesAgainstTicks` compared every row against the
+  token's WHOLE USD series rather than against its own bucket**, which assumes the
+  series spans the token's life. CHUMP's covers 1.3% of it — 49 USDG-derived buckets,
+  all after its window closed — so **1,749 correct rows were rejected and the write
+  refused**. Now compared per bucket at the native fence: 0 of 10,215 outside 10x.
+  Proven on decoded swaps first, including a 0.23% agreement between the WETH route
+  and a direct USDG quote in the one era where both exist.
+
 - **FIXED 2026-09-13: the intake wrote `native_usd_prices` for every token, ignoring
   the one-owner-per-chain rule.** `pricing.derives_native_usd` has named the owner
   since the rule was written and the monitors honour it, but `plan.ts` never read the

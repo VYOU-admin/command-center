@@ -421,26 +421,88 @@ export async function loadBridgeUsd(
 export async function checkPricesAgainstTicks(
   client: PoolClient,
   cfg: IntakeConfig,
-): Promise<{ tickLo: number; tickHi: number; storedLo: number; storedHi: number; outside: number }> {
+): Promise<{
+  tickLo: number; tickHi: number; storedLo: number; storedHi: number;
+  compared: number; notComparable: number; outside: number; worstRatio: number;
+}> {
   const t = await client.query<{ lo: string; hi: string }>(
     `select min(pons_usd)::text lo, max(pons_usd)::text hi
        from ${cfg.tokenUsdTable} where chain = $1`,
     [cfg.chain],
   );
-  const r = await client.query<{ lo: string; hi: string; outside: number }>(
-    `select min(price_usd)::text lo, max(price_usd)::text hi,
+  /*
+   * COMPARED PER BUCKET, NOT AGAINST THE SERIES' GLOBAL RANGE.
+   *
+   * This took min/max over the WHOLE of `<token>_usd_prices` and required every
+   * row's price to fall inside it. That silently assumed the token's own USD
+   * series spans its life, which held for PONS, INDEX and AI and does not hold
+   * in general.
+   *
+   * CHUMP broke it. 264,263 of its 274,985 swaps sit on one v3 WETH pool and only
+   * 2,331 are USDG-quoted, so its own series is 49 buckets covering
+   * 45,293,150-61,693,150 -- 1.3% of its life, all of it AFTER the cohort window
+   * closed. Its rows are priced from the COUNTER side, across the whole life, and
+   * the token rose from $0.0000022 at its first swap to $0.0425 at head. 1,749
+   * perfectly correct rows fell below a range derived from the last 1.3% of the
+   * token's history, and the write was refused.
+   *
+   * Proven on individual swaps before this was changed, not argued from the
+   * aggregate. Block 23,794,012, CHUMP's first swap
+   * (0x655220cda0f1df3522be9a3308f3d6ff2fd140d6935dd86df245d003a93f2df0), hand-
+   * computed from the pool's own amounts times its bucket's ETH/USD, gives
+   * $0.0000022381 -- exactly the low the check rejected. And at block 61,697,928
+   * the WETH route gives $0.0424296 where the token's OWN USDG bucket says
+   * $0.0425254: two independent routes, 0.23% apart.
+   *
+   * So the comparison is per bucket, which is what "the ticks they came from"
+   * means, with the configured native fence as the multiple. Measured over
+   * CHUMP's 10,215 comparable swaps: 0 outside 10x, worst ratio 6.58x, mean
+   * difference 13.1% -- the spread is real intra-bucket movement across ~17
+   * minutes on a token that rose 19,000x, and an order-of-magnitude error still
+   * cannot hide in it.
+   *
+   * Rows in a bucket the token's own series never priced are NOT comparable, and
+   * that count is reported rather than quietly dropped from the denominator.
+   */
+  const fence = cfg.nativeFenceMultiple;
+  const r = await client.query<{
+    lo: string; hi: string; compared: number; not_comparable: number;
+    outside: number; worst: string | null;
+  }>(
+    `with rows_with_bucket as (
+       select w.price_usd,
+              w.block_number - ((w.block_number - $3::bigint) % $4::bigint) as bucket
+         from wallet_transactions w
+        where w.chain = $1 and w.token = $2 and w.price_usd is not null
+     ),
+     joined as (
+       select r.price_usd, p.pons_usd
+         from rows_with_bucket r
+         left join ${cfg.tokenUsdTable} p
+           on p.chain = $1 and p.bucket_block = r.bucket
+     )
+     select min(price_usd)::text lo,
+            max(price_usd)::text hi,
+            count(*) filter (where pons_usd is not null)::int as compared,
+            count(*) filter (where pons_usd is null)::int as not_comparable,
             count(*) filter (
-              where price_usd < (select min(pons_usd) from ${cfg.tokenUsdTable} where chain = $1)
-                 or price_usd > (select max(pons_usd) from ${cfg.tokenUsdTable} where chain = $1)
-            )::int as outside
-       from wallet_transactions
-      where chain = $1 and token = $2 and price_usd is not null`,
-    [cfg.chain, cfg.token],
+              where pons_usd is not null
+                and (price_usd > pons_usd * $5::numeric
+                  or price_usd < pons_usd / $5::numeric)
+            )::int as outside,
+            max(greatest(price_usd / nullif(pons_usd, 0),
+                         pons_usd / nullif(price_usd, 0)))::text as worst
+       from joined`,
+    [cfg.chain, cfg.token, cfg.bucketOrigin, cfg.bucketBlocks, fence],
   );
+  const row = r.rows[0];
   return {
     tickLo: Number(t.rows[0]?.lo ?? NaN), tickHi: Number(t.rows[0]?.hi ?? NaN),
-    storedLo: Number(r.rows[0]?.lo ?? NaN), storedHi: Number(r.rows[0]?.hi ?? NaN),
-    outside: r.rows[0]?.outside ?? 0,
+    storedLo: Number(row?.lo ?? NaN), storedHi: Number(row?.hi ?? NaN),
+    compared: row?.compared ?? 0,
+    notComparable: row?.not_comparable ?? 0,
+    outside: row?.outside ?? 0,
+    worstRatio: Number(row?.worst ?? NaN),
   };
 }
 

@@ -1092,11 +1092,13 @@ async function main(): Promise<void> {
       );
 
       const priceCheck = await checkPricesAgainstTicks(c, cfg);
+      log.info('stored prices against their own bucket', { ...priceCheck });
       if (priceCheck.outside > 0) {
         throw new Error(
-          `${priceCheck.outside} stored prices fall outside the range of the ticks ` +
-            `they came from (ticks ${priceCheck.tickLo}..${priceCheck.tickHi}, stored ` +
-            `${priceCheck.storedLo}..${priceCheck.storedHi}). That is a defect to explain.`,
+          `${priceCheck.outside} stored prices fall outside ${cfg.nativeFenceMultiple}x `
+            + `their OWN bucket's derived price (worst ratio ${priceCheck.worstRatio}, `
+            + `${priceCheck.compared} compared, ${priceCheck.notComparable} in buckets the `
+            + 'token\'s own series never priced). That is a defect to explain.',
         );
       }
       const supply = Number((await c.query<{ s: string }>(
