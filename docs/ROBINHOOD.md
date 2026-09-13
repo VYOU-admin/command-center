@@ -35,34 +35,38 @@ this is state.
 
 | token | role | cohorts | rows | wallets | swept to | monitor | scores |
 |---|---|---|---|---|---|---|---|
-| **PONS** `0x39dBED…4571` | tracked | `PONS-P1` 13,823 · `PONS-P1-T` 396 | 504,137 | 14,138 | 61,173,149 | `token-updates` ✅ | 13,823 |
-| **INDEX** `0x56910D…9870` | tracked | `INDEX-P1` 3,316 · `INDEX-P2` 4,267 | 156,981 | 7,230 | 61,193,149 | `index-updates` ✅ | 7,583 |
-| **AI** `0x2E8c31…1e18` | tracked | `AI-P1` 3,508 | 59,863 | 3,507 | 61,181,432 | `ai-updates` ✅ | 3,508 |
-| **CHUMP** `0x0E0d2C…C21B` | tracked — **IN PROGRESS** | `CHUMP-P1` not yet tagged | 0 | 0 | not swept | **none yet** | never |
+| **PONS** `0x39dBED…4571` | tracked | `PONS-P1` 13,823 · `PONS-P1-T` 396 | 504,502 | 14,138 | 61,173,149 | `token-updates` ✅ | 13,823 |
+| **INDEX** `0x56910D…9870` | tracked | `INDEX-P1` 3,316 · `INDEX-P2` 4,267 | 157,129 | 7,230 | 61,193,149 | `index-updates` ✅ | 7,583 |
+| **AI** `0x2E8c31…1e18` | tracked | `AI-P1` 3,508 | 59,923 | 3,507 | 61,181,432 | `ai-updates` ✅ | 3,508 |
+| **CHUMP** `0x0E0d2C…C21B` | tracked | `CHUMP-P1` 523 | 3,200 | 522 | 61,698,120 | `chump-updates` ✅ | 523 |
 | **NVDA** `0xd0601c…9eec` | **pricing-source** | none | 0 | 0 | 59,111,432 | none — correct | never |
 | **MOS** `4ChT49…91ZT` | tracked (**Solana**) | `MOS-P1..P4` 519 | 1,534 | 486 | none | none | **never** |
 | **USELESS** `Dz9mQ9…bonk` | tracked (**Solana**) | `USELESS-P1..P3` 1,615 | 10,458 | 1,462 | none | none | **never** |
 
 ```
-row breakdown  PONS  buy 115,084  sell 76,195  transfers 312,193
-               INDEX buy  58,934  sell 29,318  transfers  68,471
+row breakdown  PONS  buy 115,189  sell 76,298  transfers 313,015
+               INDEX buy  59,020  sell 29,365  transfers  68,744
                AI    buy  22,976  sell 14,764  transfers  21,852
-price series   pons 5,171  index 5,488  ai 4,171  bridge(NVDA) 4,065
+               CHUMP buy   1,292  sell  1,122  transfers     786   AT LOAD
+price series   pons 5,171  index 5,488  ai 4,171  chump 49  bridge(NVDA) 4,065
 native ETH/USD 10,159 buckets: 9,652 token-incidental, 489 market-derived,
                18 market-repaired.  trade rows with null USD: AI 169, PONS 67, INDEX 0
-watchlist      1,248 memberships, 1,151 distinct wallets, top 5%
-monitors       token-updates, index-updates, ai-updates, token-price, wallet-scores,
-               watchlist-watch, oil-prices, postgres-disk  all enabled, 0 failures/24h
+watchlist      1,275 memberships, 1,181 distinct wallets, top 5%  (CHUMP added 27)
+monitors       token-updates, index-updates, ai-updates, chump-updates, token-price,
+               wallet-scores, watchlist-watch, oil-prices, postgres-disk  all enabled
 watcher        watchlist_activity: 303 rows, 103 tokens (mostly UNTRACKED), cursor
                61,595,492.  67.6% of trades priced since it derives ETH/USD per slice.
                /watchlist tab: DOM-verified 303 rendered = 303 claimed, 0.38 MB
 ```
 
-**CHUMP IS PART-LOADED AND A FRESH SESSION MUST READ ITS FINDINGS SECTION BEFORE
-TOUCHING IT.** Steps 1–4 are complete and stored; steps 5–17 are not started. Its
-config is `intake/chump.yaml`, its state is in `token_intake_state`, and what is known
-about it — including two things that were measured the wrong way first — is in section
-8 under CHUMP, with the v3-path lessons in the V3-ONLY subsection that follows it.
+**CHUMP IS LOADED. Steps 1–17 complete, 2026-09-13**, at a total of **142,378 CU =
+$0.064**. It is the first token driven end to end through the RUNNER rather than the
+standalone CLIs, and that alone surfaced **nine defects**, one of which — a write that
+reported 3,200 rows stored over an empty table — is the worst failure recorded in this
+document. Its findings are in section 8 and every defect is in section 9.
+
+**Read the V3-ONLY subsection before loading CASHCAT.** CHUMP is the first token whose
+market is v3, and that subsection exists so the next one does not rediscover it.
 
 **PONS was rebuilt on 2026-09-11/12 and is no longer the odd one out.** It now
 carries the same rules as AI and INDEX: EIP-7702 accounts kept, 39 routers found
@@ -327,14 +331,39 @@ was an opinion rather than a number. Measured on the three loads:
 
 CHUMP, the first token driven through the RUNNER rather than the standalone CLIs,
 measured faster than all three on every early phase — 58 pools against AI's 5,040 is
-most of it:
+most of it. **Every phase, measured end to end, is now on record for one token**,
+which none of the other three has:
 
-| phase | CHUMP | CU | against estimate |
+| phase | CHUMP wall-clock | CU | against estimate |
 |---|---|---|---|
 | identity | **0.8 s** | 816 | ~800 — exact |
-| windows | **0.6 s** | 600 | ~1,040 for one bound — 42% under, because the start instant short-circuited |
+| windows | **0.6 s** | 600 | ~1,040 for one bound — 42% under, the start instant short-circuited |
 | pools | **1.3 s** | 490 | ~500 — exact |
-| scope | **0.6 s** | 478 | 2 `eth_call` × 10 distinct counters + head |
+| scope, first run | **0.6 s** | 478 | 2 `eth_call` × 10 distinct counters + head |
+| scope, RE-RUN after the sweep | **0.8 s** | 582 | + 4 `eth_getCode` for router detection |
+| sweep | **13.1 min** | 111,190 | ~56,880 — **1.95x over**, and the cause is the runner sweeping from block 0 |
+| conventions | **0.8 s** | 10 | one `eth_blockNumber`; the rest is stored logs |
+| cohort | **27.6 s** | 28,690 | ~28,000 estimated from 642 candidates — **exact** |
+| tags | **0.2 s** | 0 | no network |
+| timestamps | **3.1 s** | 0 | toFetch 0 — the sweep carried every one |
+| prices | **4.5 s** | 0 | no network |
+| dry run | seconds | 0 | no network |
+| write | **5.8 s** | 0 | no network |
+| scoring + watchlist, ALL 5 windows | **11.0 s** | 0 | database only |
+| | **total 142,378 CU** | | **$0.064** |
+
+**The cohort estimate was the one that mattered and it landed exactly.** 642 candidate
+wallets × 17.1 CU payment + ≤642 × 26 CU code check predicted ~28,000 CU; the run spent
+**28,690**, and it decomposes precisely: 670 transactions × 15 + 168 receipts × 15 =
+12,570 payment, plus 620 × 26 = 16,120 code checks. **Quote a cohort from the candidate
+count, derived before spending, and it is not an estimate at all.**
+
+**Two phases ran far over and both were defects, not slowness** — the 3x rule earning
+its place twice in one intake. `timestamps` sat **10m34s** active and CPU-bound on an
+unmaterialised query against an expected "near-free, seconds", and was cancelled;
+materialised, it takes **3.1 s**. `prices` finished in **9 ms** reporting zeros, which
+is the same rule from the other side: a phase far UNDER its expectation is as much a
+signal as one far over.
 | transfer sweep | not measured¹ | ~9 min (13.9M blocks) | ~40 min (57.4M blocks) | **~1 min per 1.5M blocks** |
 | swap load | not measured¹ | ~4 min | ~35 min | scales with blocks not in `v4_swaps_all` |
 | cohort | not measured¹ | ~2 min | ~6 min (two windows) | **minutes** |
@@ -3432,9 +3461,40 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 
 ### CHUMP — `0x0E0d2C89a5a019FE1cF762e5e33187631DACC21B`
 
-**PART-LOADED 2026-09-13. Steps 1–4 complete and stored; 5–17 not started.** "Chump
-Coin", 18 decimals, supply 1,000,000,000, deployed at block **23,791,950**
-(2026-07-31T01:44:31Z), 5,225 bytes of code. Cohort `CHUMP-P1` not yet tagged.
+**LOADED 2026-09-13, steps 1–17.** "Chump Coin", 18 decimals, supply 1,000,000,000,
+deployed at block **23,791,950** (2026-07-31T01:44:31Z), 5,225 bytes of code. Cohort
+`CHUMP-P1`, **523 wallets, 3,200 rows AT LOAD**, $779,206 of USD volume.
+**142,378 CU = $0.064 for the whole token.**
+
+**THE FIRST TOKEN DRIVEN END TO END THROUGH THE RUNNER, and that is the headline
+finding.** PONS, INDEX and AI were loaded with the standalone CLIs, which is a working
+path that hides whole classes of defect. Driving one token through `intake.js` from
+identity to write surfaced **nine**, listed in section 9, of which four would have
+produced a silent wrong answer rather than a failure:
+
+| what it reported | what was true |
+|---|---|
+| `write: rows_stored 3200`, `intake complete` | **the table was empty** — a swallowed error aborted the transaction and COMMIT silently became ROLLBACK |
+| `prices: 0 ticks, 0 buckets, 0 written` in 9 ms | the bounds were `0..0`; the real derivation is 2,331 USD and 271,935 native ticks |
+| `conventions: v4 tested 0` — passed | the sample never reached v4, and the after-window region holding 95.6% of the swaps was skipped |
+| `routers: probed 0, identified 0` | 4 probed, **3 routers**, two of them absent from the configured list |
+
+**None of these is a chain fact. Every one is the code reporting success over work it
+had not done**, which is exactly what this document exists to catch.
+
+```
+cohort         523 wallets from 636 candidates: 620 payment-proven, 16 unproven,
+               97 contracts excluded, 29 EIP-7702 delegated accounts KEPT
+rows           3,200 = buy 1,292 + sell 1,122 + transfer_out 580 + transfer_in 206
+               blocks 23,794,012..61,425,727
+priced         2,414 of 2,414 trade rows -- ZERO null-USD trades
+               786 transfer rows null by definition
+usd volume     $779,205.80
+scores         522 scored, 1 null, ALL 522 on full weight (1.000)
+               min 0.1199  p25 0.1461  median 0.1910  p75 0.2054  p90 0.2194  max 0.5754
+flags          inflated-pnl 1, low-weight 0, threshold 0.8 and NOT derivable
+watchlist      27 of 27 slots admitted, cutoff 0.2259, max 0.5754
+```
 
 ```
 window CHUMP-P1   23,791,950 .. 44,992,963    21,201,013 blocks
@@ -3525,6 +3585,160 @@ realistic                          ~28,000 CU  ~$0.013    ceiling 400,000
 its cohort step costs a twenty-fifth of PONS's. Quote the cost from this count, never
 from another token's.
 
+#### Steps 6–17 as measured, 2026-09-13
+
+**Sign conventions: unanimous, 1,944 of 1,944, and this is the first token where the
+v3 side carried the weight.** Every earlier measurement of the v3 POOL convention was
+made on a v4-dominant token.
+
+| venue | region | in region | sampled | tested | agreeing | convention |
+|---|---|---|---|---|---|---|
+| v3 | in-window | 12,013 | 800 | 380 | **380** | pool |
+| v4 | in-window | 18 | 18 | 18 | **18** | swapper |
+| v3 | after-window | 252,250 | 800 | 792 | **792** | pool |
+| v4 | after-window | 10,704 | 800 | 754 | **754** | swapper |
+| both | before-window | **0** | — | — | — | **RETURNED NO ROWS** |
+
+**before-window is empty because the window starts at the deployment block**, which
+the low-bound clamp guarantees — so `firstBlock..startBlock-1` is
+`23,791,950..23,791,949`, empty by construction rather than by absence of trading.
+Say so; do not omit the line.
+
+**The cohort, and it reconciles exactly:**
+
+```
+candidate wallets for payment       636      (derived 642 before the run, from SQL)
+  proven free from token_payment_logs  0     <- REPORTED, not omitted; see below
+  proven over RPC                    620
+  no payment in any transaction       16     636 = 620 + 16
+code-checked at the window's END block 620
+  excluded as deployed contracts      97
+  EIP-7702 delegated accounts KEPT    29
+COHORT                                523     620 - 97 = 523
+excluded earlier: infrastructure 285, round-trippers 1,806, pools 1
+unused exclusions: 0xb01ca24b... matched nothing -- reported
+```
+
+**`token_payment_logs` proved 0 of 636, against 12.8% on PONS, and that is expected
+rather than a defect.** It names wallets that sent a pricing asset straight to a
+*PONS* pool; a CHUMP buyer appears only if they also bought PONS. **The zero is
+reported because a fast path matching nothing is indistinguishable from one that never
+ran** — and step 7 already says it is not worth sweeping for a new token.
+
+**Costs $0.013 where PONS cost $0.11**, because the cost is the candidate count and
+CHUMP has 636 against PONS's 16,910. Quote it from the count, never from another token.
+
+**Timestamps cost NOTHING: 2,911 needed, 2,911 already stored, 0 to fetch.** The v3
+sweep carried `blockTimestamp` with every log, which is what the Alchemy route buys.
+Contrast AI, whose copied v4 swaps needed 7,945 blocks filled at $0.07. **A token
+swept rather than copied pays nothing here**, and that is now measured rather than
+assumed.
+
+**Prices, and CHUMP HAS ALMOST NO USD MARKET OF ITS OWN:**
+
+```
+                    swaps    pools
+v3 WETH           264,263        1   <- the charted pool, 96.1% of all swaps
+v4 ETH              8,388       20
+v4 USDG             2,331        8   <- 0.85%
+v4 WETH                 3        2
+```
+
+```
+usd ticks     2,331   discarded by the 100x fence   0
+native ticks 271,935  discarded by the 100x fence   0
+derived native buckets 49         discarded by the 10x fence  0   <- the soundness signal
+chump_usd_prices      49 buckets, 45,293,150..61,693,150, $0.0108..$0.2434
+buckets with no USDG side       2,231
+native buckets NOT written      49    -- CHUMP does not own the chain's series
+```
+
+**Its own USD series covers 1.3% of its life and NONE of its cohort window.** All 49
+buckets sit after block 45,293,150; the window closes at 44,992,963. **This does not
+affect a single row's USD**, because a trade row is priced from the counter side
+through `native_usd_prices`, and that series covers CHUMP's life **completely — 3,791
+of 3,791 buckets at residue 3150**. It affects only the dashboard's price line for the
+early era, exactly as it does for INDEX.
+
+**The price trajectory, hand-computed and cross-checked, is in step 10** — $0.0000022
+at the first swap to $0.0425 at head, with the WETH route and a direct USDG quote
+agreeing to **0.23%** in the one era where both exist. That comparison is what proved
+the row prices right when the price-range gate rejected them.
+
+**Rows: 3,200 planned, 3,200 stored, no loss to the unique key.** PONS lost 13,341
+transfers to the key before `log_index` was added; CHUMP loses none, which is the fix
+holding on a token whose transfers were collected from the start.
+
+**522 of 523 cohort wallets have rows, and the one that does not is fully explained.**
+`0x096fc56b…` received **0.51297777 CHUMP** from the charted pool at block 40,849,735
+and sent the identical amount back 32 blocks later. At that era's price (~$0.00149)
+each leg is worth **$0.0008**, below the **$0.01 USD floor**, so both were dropped. It
+is a genuine, payment-proven buyer whose entire activity is worth less than a cent —
+the floor doing its job, not a wallet lost.
+
+**Scores: the cleanest weight distribution of any token here.** All 522 scored wallets
+sit at `weight_used = 1.000`; none is partial. That follows directly from every trade
+row being priced — no money metric is ever null, so nothing drops out and nothing
+renormalises. **The `low-weight` threshold therefore cannot be derived and 0.8
+stands**, the same result AI and INDEX-P2 reached for the opposite reason: AI had one
+partial weight and no gap, CHUMP has no partial weights at all.
+
+```
+min 0.1199   p25 0.1461   median 0.1910   p75 0.2054   p90 0.2194   max 0.5754
+1 null score -- the zero-row wallet above, every metric null, correctly unranked
+flags: inflated-pnl 1, low-weight 0
+```
+
+#### METRIC 5 SEPARATES HERE, AND ITS CEILING IS STRUCTURAL
+
+**The document asked for this to be watched on every token, and it has now repeated.**
+PONS: >75% at zero, maximum exactly **1/3** on three pumps. CHUMP, measured rather than
+predicted:
+
+```
+pre-pump share exactly 0      350   67.0%
+strictly between 0 and 0.5     53   10.2%
+exactly 0.5                   119   22.8%
+MAXIMUM                       0.5 = 1/2, on TWO pumps
+```
+
+**"A maximum landing exactly on 1/n_pumps is the signature" — it has now landed there
+twice, on two tokens with different pump counts.** But CHUMP explains WHY, and the
+explanation is not a data artefact:
+
+**Both of CHUMP's pump points are at or after the window end, and pump 1 IS the window
+end** (`2026-08-24T16:00:00Z` for both). A wallet only enters the cohort by buying
+inside the window; the window closes at pump 1; so **no wallet can possibly have bought
+in the 48 hours before pump 2, which is four days later. The metric's ceiling is 1/2 by
+construction, and no cohort member can ever exceed it.**
+
+**The general rule: metric 5's maximum is bounded by the number of pump points a
+cohort member can physically precede, over the total number of pumps.** Where every
+pump sits at or after the window end, that is 1/n for the first pump and 0 for the
+rest. This is worth knowing before reading a pre-pump share as weak signal — on CHUMP
+it is not weak, it is capped.
+
+**And unlike PONS, it does separate.** 119 wallets at the ceiling against 350 at zero
+is a real 23%/67% split of the cohort, with 53 in between. The 5% weight is not wasted
+here. **Report the distribution; do not infer it from the maximum.**
+
+**Watchlist: CHUMP added 27 slots and the merged list moved by 28 added / 1 removed**,
+going 1,248 → **1,275 memberships** and 1,151 → **1,181 distinct wallets**. Its cutoff
+of **0.2259** is the lowest of the five windows — below AI's 0.2644 and well below
+PONS's 0.4546 — which is the cross-window incomparability this document already
+warns about, appearing again on a fifth window rather than a new finding.
+
+Invariants on a fresh connection, all zero: memberships with no score **0**, with no
+tag **0**, with a rank above their slot count **0**, null scores admitted **0**, and
+exactly **1** distinct `top_percent`.
+
+**Dashboard, verified by executing the served page in jsdom:** tab `CHUMP 523`, count
+line **"523 of 523 wallets · 3200 transactions"** matching the database exactly, 100
+rows on page 1 of 6, 0 unscored, **0 on a partial weight**, all **8 of 8 metrics
+contributing and 0 dropped as null**, and the row-expansion API call carrying CHUMP's
+own mint. The page is now **8.93 MB** with four tokens, against 4.92 MB recorded when
+there were three.
+
 **What surprised me, and both were my errors rather than the chain's:**
 
 1. **I called the v3-only premise contradicted on pool count, and pool count is the
@@ -3588,6 +3802,54 @@ CHUMP's window overlaps `v4_swaps_all` for 23,791,950–42,695,454 — **89% of 
 the copy shortcut is available, contradicting the assumption that a v3 token cannot use
 it. It delivers **13 swaps**. Copy anyway, because it is free and it is what router
 detection's swap-share discriminator divides by, but do not size any estimate around it.
+
+#### WHAT A v3-DOMINANT TOKEN CHANGES DOWNSTREAM — measured on the full load
+
+The venue split does not stop mattering at the sweep. Four consequences, none of
+which is obvious from the pool list:
+
+1. **The conventions sample must be taken per venue.** A v3-dominant token's early
+   blocks contain no v4 swaps at all — CHUMP's v3 starts at 23,794,012 and its v4 at
+   39,893,773 — so one `limit 800` ordered by block returns 800 v3 rows and never
+   reaches v4. See step 6; this is the defect it produced.
+2. **Timestamps are free.** The v3 sweep carries `blockTimestamp` on every log, so a
+   swept token needs **0 blocks filled**, against AI's 7,945 at $0.07 for copied v4
+   swaps. **The `v4_swaps_all` shortcut trades a timestamp bill for a sweep bill**, and
+   on a v3 token there is nothing to copy anyway.
+3. **The cohort query is direct.** A v3 pool contract IS the transfer counterparty, so
+   the buyer is found without the PoolManager indirection that cost the first PONS
+   cohort 3,067 wallets.
+4. **The token may have no USD market of its own.** This is the one to plan for.
+
+#### A v3 TOKEN'S OWN USD SERIES MAY COVER ALMOST NONE OF ITS LIFE
+
+**CHUMP's `chump_usd_prices` is 49 buckets — 1.3% of its life, all of it after the
+cohort window closed.** 96.1% of its swaps sit on a single v3 **WETH** pool and only
+0.85% are USDG-quoted, so there is almost nothing to derive a token/USD tick from.
+
+**This costs nothing at row level and everything at check level.** A trade row is
+priced from the COUNTER side through `native_usd_prices`, which is chain-level and
+market-derived, and covered CHUMP's life completely — **3,791 of 3,791 buckets**. Every
+one of its 2,414 trade rows is priced. What broke was the write phase's price-range
+gate, which compared rows against the token's own global tick range (step 10).
+
+**Before loading another v3 token, ask the cheap question first:** what share of its
+swaps are quoted against the USD asset? One SQL query over `token_swap_logs` joined to
+`pool_meta` answers it, and it predicts both the sparse own-series and the dashboard's
+blank early price line. **The rows are fine either way; the checks and the display are
+what to expect.**
+
+#### THE ROUTER SET IS SMALL AND CLEANLY SEPARATED
+
+**4 candidates cleared the 50-recipient bar, against PONS's 62 and INDEX's 40**, and
+the discriminator separated perfectly: **100.0%, 100.0%, 100.0% against 0.0%**, with
+nothing in between. The 0.0% address is also an EOA, so it fails two of the three parts
+independently.
+
+**Two of the three routers are absent from `config/infrastructure.yaml`**, which is the
+PONS defect caught before the cohort was built rather than after. **Run detection after
+the sweep on every token** — `npm run intake -- <cfg> --redo scope` now exists for
+exactly this.
 
 #### Rules that applied UNCHANGED
 
@@ -3794,12 +4056,17 @@ against a 2,000,000 ceiling.
   Moving detection into the cohort phase would also work and would remove the need to
   re-run anything at all; that is the better fix and is not done.
 
-- **The runner sweeps from block 0, not from the token's deployment block.** CHUMP's
-  sweep covered 61,698,121 blocks where the token has existed for 37.9M, so 23.8M
-  blocks that cannot contain it were read: ~238 requests, ~14,280 CU, $0.0064 per
-  stream-set. Step 5's "sweep full chain life" means the TOKEN's life. The deployment
-  block is already known — the identity phase stores it and passes it as `firstBlock`
-  to the windows phase — so this is a one-line scope fix, not a new measurement.
+- **STILL OPEN: the runner sweeps from block 0, not from the token's deployment
+  block.** CHUMP's sweep covered 61,698,121 blocks where the token has existed for
+  37.9M, so 23.8M blocks that cannot contain it were read: ~238 requests, ~14,280 CU,
+  $0.0064 per stream-set, and it is most of why the sweep came in **1.95x over
+  estimate — 111,190 CU against ~56,880**. Step 5's "sweep full chain life" means the
+  TOKEN's life. The deployment block is already known — the identity phase stores it
+  and passes it as `firstBlock` to the windows phase — so this is a one-line scope fix,
+  not a new measurement. **It was not fixed during CHUMP's load and CASHCAT pays the
+  same tax**: the sweep is by far the largest cost of an intake (111,190 of CHUMP's
+  142,378 CU, 78%), and this is a fixed ~14,280 CU of it wasted per stream-set on every
+  future token, growing as the chain does.
 - **`decodeSwap` threw a bare TypeError on a v4 log with no `topics[1]`.** FIXED
   2026-09-13. A v4 pool id lives in `topics[1]`, so a log reconstructed from stored
   columns has none, and the conventions phase died three frames down with
