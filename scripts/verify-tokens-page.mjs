@@ -6,14 +6,25 @@
  * scripts in jsdom, and counts what appears -- including the new score column
  * and the per-metric breakdown that loads when a row is expanded.
  *
- * usage: node scripts/verify-tokens-page.mjs <base-url> <mint>
+ * usage: node scripts/verify-tokens-page.mjs <base-url> <ticker> [expected-mint]
+ *
+ * THE SECOND ARGUMENT USED TO BE ACCEPTED AND NEVER READ. The harness verified
+ * whichever token tab happened to render first -- the page opens on the first
+ * token that has rows -- so a caller asking for CHUMP was shown a pass for AI
+ * and had no way to tell. Found 2026-09-13, and it is the THIRD fault this
+ * harness has had in itself rather than in the page.
+ *
+ * It now selects the tab by ticker and, when `expected-mint` is given, asserts
+ * that the row-expansion API call carries that mint -- so the tab label and the
+ * data behind it are both checked, rather than trusting the label.
  */
 import { JSDOM, VirtualConsole } from 'jsdom';
 
 const base = process.argv[2];
-const mint = process.argv[3];
-if (!base || !mint) {
-  console.error('usage: verify-tokens-page.mjs <base-url> <mint>');
+const ticker = process.argv[3];
+const expectedMint = process.argv[4];
+if (!base || !ticker) {
+  console.error('usage: verify-tokens-page.mjs <base-url> <ticker> [expected-mint]');
   process.exit(2);
 }
 
@@ -54,6 +65,29 @@ await new Promise((r) => setTimeout(r, 1500));
 
 const doc = window.document;
 const fail = (m) => { console.error('FAIL: ' + m); process.exitCode = 1; };
+
+/* ---- SELECT THE REQUESTED TOKEN'S TAB --------------------------------- */
+const tabs = Array.from(doc.querySelectorAll('#tokenTabs > *'));
+console.log(`token tabs           ${JSON.stringify(tabs.map((e) => e.textContent.trim()))}`);
+if (tabs.length === 0) {
+  console.error('FAIL: the page rendered no token tabs at all');
+  process.exit(1);
+}
+const wanted = tabs.find((e) => new RegExp(`^${ticker}\\b`, 'i').test(e.textContent.trim()));
+if (!wanted) {
+  console.error(`FAIL: no token tab for "${ticker}". A token absent from the page is not `
+    + 'a pass -- it is the token never having been rendered.');
+  process.exit(1);
+}
+if (!wanted.classList.contains('on')) {
+  wanted.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 1500));
+}
+const active = Array.from(doc.querySelectorAll('#tokenTabs > *')).find((e) => e.classList.contains('on'));
+console.log(`token tab selected   ${active ? JSON.stringify(active.textContent.trim()) : 'NONE'}`);
+if (!active || !new RegExp(`^${ticker}\\b`, 'i').test(active.textContent.trim())) {
+  fail(`clicking the "${ticker}" tab did not make it the active one`);
+}
 
 if (errors.length) {
   console.log(`script errors        ${errors.length}`);
@@ -187,6 +221,16 @@ await new Promise((r) => setTimeout(r, 2500));
 const exp = doc.querySelector('tr.exp');
 console.log(`expanded wallet      ${wallet}`);
 console.log(`api calls made       ${JSON.stringify(asked)}`);
+/*
+ * THE TAB LABEL IS NOT THE DATA. Asserting the expansion call carries the mint
+ * we asked for is what proves the rows under that tab belong to that token,
+ * rather than trusting a label that happens to read "CHUMP".
+ */
+if (expectedMint) {
+  const hit = asked.some((u) => u.toLowerCase().includes(expectedMint.toLowerCase()));
+  console.log(`expansion mint       ${hit ? 'MATCHES ' + expectedMint : 'DOES NOT MATCH ' + expectedMint}`);
+  if (!hit) fail(`the expansion API call carries no mint ${expectedMint}; the tab label and the data disagree`);
+}
 if (!exp) fail('clicking a row rendered no expansion');
 else {
   const text = exp.textContent;
