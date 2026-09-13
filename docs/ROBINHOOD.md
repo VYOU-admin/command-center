@@ -651,6 +651,31 @@ its window activity**, and NVDA has 512 pools against pricing assets carrying
 226,454 swaps. Without the hop, the token's main market is discarded entirely —
 those pools produce *no rows at all*, not null-priced rows.
 
+**A BRIDGE'S DECIMALS ARE READ, NEVER DEFAULTED — and the code defaulted them to
+18 until 2026-09-14.** The rule is step 1's, unchanged: *treat a `0x` return as
+unknown, not as 18 and not as 0*, because **USDG has 6** and assuming 18 inflates
+every figure quoted in it by **10^12**. The prices phase applied that rule to the
+token and not to its bridge, fifteen lines apart:
+
+```
+token   const decimals = identity?.decimals ?? (select decimals ...).rows[0]?.decimals;
+        if (typeof decimals !== 'number') throw ...            <- raises
+bridge  const bdec = (select decimals ...).rows[0]?.decimals ?? 18;   <- SILENTLY 18
+```
+
+`bdec` scales every bridge amount inside `deriveBridgeUsd`, so a bridge whose `tokens`
+row is missing — or whose `decimals` column is null, which `??` also catches —
+produces a complete, plausible, wrong bridge series. Nothing raises and no count comes
+back zero, which is what makes it worse than a crash.
+
+**It was dormant only because AI is the only token with a bridge and NVDA's `tokens`
+row exists. BONER is queued and needs a HIMS bridge, so it stops being dormant on the
+next intake.** A bridge is loaded far enough to have a `tokens` row *by a separate
+identity run*, and nothing in the prices phase checks that it happened first.
+
+**Two implementations of one rule, and only one of them was right.** That is the trap
+step 7 already names, appearing here between a variable and the one declared below it.
+
 **Two bucketed medians multiplied compound their error.** Report the spread
 against direct token/USD trades in the same buckets rather than assuming it small.
 
@@ -1079,6 +1104,20 @@ decoding two showed **four v4 swaps across four pools in one transaction**.
 `v4_swaps_all` holds every v4 swap on the chain for the blocks it covers and can
 see what the token's own table cannot; outside that range the test falls back to
 the token's own count and says so.
+
+**"AND SAYS SO" WAS NOT IMPLEMENTED, AND THE FALLBACK DEFAULTS PERMISSIVELY.** The
+join is `left join _allv4 av … coalesce(av.n, 1)`, so a transaction with no row in
+`v4_swaps_all` is treated as holding exactly one v4 swap — **unambiguous**. Inside the
+covered range that is a measurement: no row genuinely means no v4 swap. **Outside it,
+the same null means "not collected", and the test admits the leg rather than flagging
+it.** Both readings arrive as `NULL` and the code could not tell them apart.
+
+**The coalesce itself is correct and stays** — it *is* the documented fallback to the
+token's own count, `spt.n = 1`. What was missing is the disclosure the comment already
+promised. The conventions log now reports how many of the compared transactions sit
+outside `v4_swaps_all`'s coverage, so a reader knows for how many of them the v4
+ambiguity test was blind rather than satisfied. **A fallback that is not counted is
+indistinguishable from a test that passed.**
 
 **Direction comes from the transfer, never from the sign.** The sign convention
 establishes which side is the token and how large the counter amount is. A wallet
@@ -3124,6 +3163,41 @@ These are not about Robinhood Chain, but the code that loads it obeys them.
 - **Validate a population claim on individual records before acting on it.** An
   aggregate is a hypothesis; twice one pointed the wrong way and decoding twenty
   transactions settled it in minutes.
+- **THE ENVIRONMENT MAY BE SHARED, SO RECORD THE DEPLOYMENT ID BEFORE ANY LONG OR
+  PAID WORK AND RE-CHECK IT AFTER.** Two Claude Code sessions ran against this repo
+  and container on 2026-09-13. The container rebuilt at **08:08:06** with no push
+  behind it from the session that was working, and section 3's consequence duly
+  followed: **that session's `chump-*.log` files under `/app` were gone** when it
+  looked afterwards. Nothing was lost because only Postgres held anything that
+  mattered — which is exactly why every step writes progressively — but a paid job
+  replaced mid-run has **spent the compute units and lost the output**, and it would
+  have reported nothing at all.
+
+  **What a session CAN establish, measured from inside the container 2026-09-13:**
+
+  | check | how | what it tells you |
+  |---|---|---|
+  | container identity | `RAILWAY_DEPLOYMENT_ID` in the env | **the single best signal** — if it differs from the one you recorded, the container was replaced and everything under `/app` with it |
+  | source it was built from | `RAILWAY_GIT_COMMIT_SHA` in the env | which commit is actually running, without grepping `dist` |
+  | when it was replaced | `ps -o lstart= -p 1` | pid 1 started 08:08:30, matching the 08:08:06 build |
+  | when the build was produced | `stat -c '%y' /app/dist/<file>` | a build newer than your own push means somebody else deployed |
+  | another session's detached job | `ps -eo pid,etime,args` | only `node dist/index.js` was running, up 8h51m — nobody else had a job in flight |
+  | another session's queries | `pg_stat_activity` | long statements that are not yours |
+  | a monitor mid-cycle | `monitor_runs` | already required before running one by hand |
+
+  **What it CANNOT establish, and this is the part to accept rather than work
+  around:** *why* a redeploy happened, or who triggered it — nothing in the container
+  records the cause; whether another session is attached at all, since SSH leaves no
+  durable trace; and whether a service variable was changed, which needs
+  `railway variables` from outside and shows the current value, never the history.
+  **A rebuild with no push behind it is therefore indistinguishable from a variable
+  change, a manual redeploy and a platform restart.** Do not guess between them.
+
+  **The rule: capture `RAILWAY_DEPLOYMENT_ID` and the pid-1 start time before starting,
+  re-read both when the work ends, and treat any change as "the output is gone, the CU
+  is spent, re-run from what Postgres holds".** `grep`ping `/app/dist` for a marker
+  stays the proof that a FIX shipped; the deployment id is the proof that the container
+  you verified is the one you are still talking to.
 
 ---
 
@@ -4423,32 +4497,55 @@ Grepped for every `.catch` returning a value, every `??`/`||` default on a query
 result, every SQL `coalesce` to a numeric default, and the RPC error paths. **One is
 live.**
 
-**LIVE — `src/cli/intake.ts:1063`, a bridge's decimals default to 18.**
+**FIXED 2026-09-14 — `src/cli/intake.ts:1063`, a bridge's decimals defaulted to 18.**
 
 ```ts
 const bdec = (await c.query(`select decimals from tokens where mint=$1`, [bridge]))
-  .rows[0]?.decimals ?? 18;
+  .rows[0]?.decimals ?? 18;          // now: raises, naming the bridge
 ```
 
-A bridge with no `tokens` row silently becomes **18 decimals**, and `bdec` scales every
-bridge amount in `deriveBridgeUsd`. This is the exact case step 1 and step 4 name by
-name — *"treating an unreadable decimals as 18 is a factor-of-10^12 error waiting to
-happen"* — and **USDG has 6**. It is dormant rather than safe: `bridgeAssets` is
-non-empty only for AI, and NVDA's `tokens` row exists. The correct behaviour is the one
-`decodeUint8` already implements four lines away — raise, because the value is unknown,
-not 18. **Not fixed in this pass, by instruction.**
+A bridge with no `tokens` row — or a null `decimals`, which `??` also caught — silently
+became **18 decimals**, and `bdec` scales every bridge amount in `deriveBridgeUsd`.
+That is the factor-of-10^12 case steps 1 and 4 name by name, and **USDG has 6**. The
+token's own decimals raised fifteen lines above; the bridge's did not. It now raises
+with the bridge address in the message, matching `decodeUint8`'s *"the value is
+unknown, not zero"* four lines away.
 
-**WORTH KNOWING, deliberate and documented — `src/cli/build-cohort.ts:217–223`,
-`coalesce(av.n, 1)`.** A transaction with no `v4_swaps_all` row is treated as holding
-one swap, i.e. unambiguous. Step 7 records this fallback and says the test "falls back
-to the token's own count and says so", so it is by design — but the default is the
-*permissive* direction, and outside `v4_swaps_all`'s 15,115,267–42,695,454 coverage it
-admits legs the table cannot adjudicate. Worth re-reading whenever that coverage
-matters.
+**It was dormant, not safe, and it stops being dormant on the next intake:** AI is the
+only loaded token with a bridge and NVDA's `tokens` row exists, but **BONER is queued
+and needs a HIMS bridge**. A bridge gets its `tokens` row from a separate identity run,
+and nothing in the prices phase checked that this had happened.
 
-**LOW SEVERITY — `src/adapters/postgres-disk.ts:196`, WAL bytes `coalesce(…, 0)`.** An
-unavailable `pg_ls_waldir()` reports **0 bytes of WAL**, which on a disk monitor reads
-as "plenty of headroom" rather than "not measured". No evidence it has ever fired.
+**FIXED 2026-09-14, the disclosure half — `src/cli/build-cohort.ts:217–223`,
+`coalesce(av.n, 1)`.** **The coalesce stands**: it *is* the fallback to the token's own
+count that step 7 describes, and inside `v4_swaps_all`'s coverage a missing row
+genuinely means no v4 swap. What was wrong is that the same `NULL` means "not
+collected" outside that coverage, the test then admits the leg as unambiguous, and the
+code comment promised it "says so" while nothing counted it. The conventions log now
+reports how many compared transactions fall outside the covered range. **A fallback
+that is not counted is indistinguishable from a test that passed.**
+
+**STANDS, with the reasoning recorded so it is not re-flagged —
+`src/adapters/postgres-disk.ts:196`, WAL bytes `coalesce((select sum(size) from
+pg_ls_waldir()), 0)`.** I flagged this on 2026-09-13 and it does not survive
+measurement:
+
+- **The default is unreachable.** `sum()` returns `NULL` only over zero rows, and a
+  live WAL directory is never empty — measured 2026-09-14: **8 files, 134,217,728
+  bytes**, with the role holding permission. A role *without* permission makes
+  `pg_ls_waldir()` **raise**, failing the monitor visibly rather than returning zero.
+- **It feeds no decision.** The alert threshold is `volume.usedMB / volume.sizeMB` from
+  the provider, and the growth projection compares `volume_used_bytes` to
+  `volume_used_bytes` — deliberately, with a comment recording that using `total_bytes`
+  once produced *"2.2 days until full"* for a database that had just been emptied.
+  `wal_bytes` is context in a display field and a history column.
+- **Making it honest costs a migration.** `wal_bytes` and `total_bytes` are
+  `bigint NOT NULL`, so a genuine "not measured" needs `drop not null` on two live
+  columns — and the schema file already records that `create table if not exists` will
+  not do it.
+
+  **Unreachable, decision-free, and a migration to improve: it stays.** Were it ever to
+  feed a threshold, this reasoning expires with it.
 
 **Everything else checked and SAFE, with the reason in each case:**
 

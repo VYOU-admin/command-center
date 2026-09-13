@@ -1059,8 +1059,39 @@ async function main(): Promise<void> {
         const slice = await loadLegsInput(
           c, { ...cfg, token: bridge }, bridgePools, firstBlock, head,
         );
-        const bdec = (await c.query<{ decimals: number }>(
-          `select decimals from tokens where mint=$1`, [bridge])).rows[0]?.decimals ?? 18;
+        /*
+         * A BRIDGE'S DECIMALS ARE READ, NEVER DEFAULTED.
+         *
+         * This was `?? 18`. `bdec` scales every bridge amount inside
+         * deriveBridgeUsd, so a bridge with no `tokens` row -- or a null
+         * `decimals`, which `??` also caught -- produced a complete, plausible,
+         * WRONG bridge series with nothing raised and no count coming back zero.
+         *
+         * Steps 1 and 4: treat an unreadable decimals as unknown, not as 18 and
+         * not as 0. USDG has 6, so the assumption is a factor of 10^12. The
+         * token's own decimals raised fifteen lines above; only the bridge's did
+         * not -- two implementations of one rule, and one of them wrong.
+         *
+         * Dormant rather than safe until now: AI is the only loaded token with a
+         * bridge and NVDA's row exists, but BONER is queued and needs a HIMS
+         * bridge. A bridge's `tokens` row comes from a SEPARATE identity run, and
+         * nothing here checked that it had happened.
+         */
+        const bdecRow = await c.query<{ decimals: number | null }>(
+          `select decimals from tokens where mint=$1`, [bridge],
+        );
+        const bdec = bdecRow.rows[0]?.decimals;
+        if (typeof bdec !== 'number') {
+          throw new Error(
+            `bridge ${bridge} has no readable decimals: `
+              + (bdecRow.rowCount === 0
+                ? 'it has no `tokens` row at all, so its identity phase has not been run.'
+                : 'its `tokens` row carries a null `decimals`.')
+              + ' Its decimals scale every bridge-quoted amount, and defaulting to 18 '
+              + 'against an asset like USDG (6) is a factor-of-10^12 error in every '
+              + 'figure derived from it. Load the bridge first; do not assume a width.',
+          );
+        }
         const firstComplete =
           cfg.bucketOrigin +
           Math.ceil((firstBlock - cfg.bucketOrigin) / cfg.bucketBlocks) * cfg.bucketBlocks;

@@ -229,10 +229,64 @@ async function main(): Promise<void> {
         group by 1,2 order by 1,2`,
       [],
     );
+    /*
+     * SAY SO WHEN THE v4 AMBIGUITY TEST WAS BLIND.
+     *
+     * `coalesce(av.n, 1)` treats a transaction with no `v4_swaps_all` row as
+     * holding exactly one v4 swap -- unambiguous. INSIDE the covered range that
+     * is a measurement: no row genuinely means no v4 swap. OUTSIDE it the same
+     * NULL means "not collected", and the test admits the leg instead of
+     * flagging it. Both arrive as NULL and the query cannot tell them apart.
+     *
+     * The coalesce is right -- it IS the documented fallback to the token's own
+     * count -- but the comment above promised the test "says so" outside the
+     * range and nothing counted it. A fallback that is not counted is
+     * indistinguishable from a test that passed.
+     */
+    const cov = await c.query<{ lo: string | null; hi: string | null }>(
+      `select min(block_number)::text lo, max(block_number)::text hi
+         from v4_swaps_all where chain = $1`,
+      [cfg.chain],
+    );
+    const covLo = cov.rows[0]?.lo === null || cov.rows[0]?.lo === undefined
+      ? null : Number(cov.rows[0].lo);
+    const covHi = cov.rows[0]?.hi === null || cov.rows[0]?.hi === undefined
+      ? null : Number(cov.rows[0].hi);
+    let blind: { total: number; outside: number };
+    if (covLo === null || covHi === null) {
+      /*
+       * An EMPTY v4_swaps_all is not "everything is unambiguous" -- it is the
+       * ambiguity test having no data at all, for every transaction.
+       */
+      const all = await c.query<{ n: string }>('select count(*)::text n from _tok');
+      blind = { total: Number(all.rows[0]!.n), outside: Number(all.rows[0]!.n) };
+    } else {
+      const b = await c.query<{ total: string; outside: string }>(
+        `select count(*)::text total,
+                count(*) filter (
+                  where k.block_number < $1::bigint or k.block_number > $2::bigint
+                )::text outside
+           from _tok k`,
+        [covLo, covHi],
+      );
+      blind = { total: Number(b.rows[0]!.total), outside: Number(b.rows[0]!.outside) };
+    }
     log.info('sign conventions, measured on STORED data', {
       expectation: 'v3 = POOL perspective (pool sent the token => negative); '
         + 'v4 = SWAPPER perspective (swapper received => positive)',
       paired_only_where_unambiguous: 'one swap and one qualifying transfer in the transaction',
+      v4_ambiguity_coverage: {
+        v4_swaps_all_range: covLo === null ? 'EMPTY -- the table holds no rows for this chain'
+          : `${covLo}..${covHi}`,
+        token_swap_transactions: blind.total,
+        outside_that_range: blind.outside,
+        note: blind.outside === 0
+          ? 'every compared transaction sits inside v4_swaps_all, so the multi-hop '
+            + 'ambiguity test was a measurement for all of them'
+          : `${blind.outside} transaction(s) sit OUTSIDE it, where a missing row means `
+            + '"not collected" rather than "no v4 swap". For those the test falls back '
+            + "to the token's own count and admits the leg as unambiguous.",
+      },
       rows: conv.rows,
     });
     const bad = conv.rows.filter((r) => Number(r.disagree) > 0);
