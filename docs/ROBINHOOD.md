@@ -50,8 +50,10 @@ price series   pons 5,171  index 5,488  ai 4,171  bridge(NVDA) 4,065
 native ETH/USD 10,159 buckets: 9,652 token-incidental, 489 market-derived,
                18 market-repaired.  trade rows with null USD: AI 169, PONS 67, INDEX 0
 watchlist      1,248 memberships, 1,151 distinct wallets, top 5%
-monitors       token-updates, index-updates, ai-updates, token-price,
-               wallet-scores, oil-prices, postgres-disk    all enabled, 0 failures/24h
+monitors       token-updates, index-updates, ai-updates, token-price, wallet-scores,
+               watchlist-watch, oil-prices, postgres-disk  all enabled, 0 failures/24h
+watcher        watchlist_activity: 190 rows, 67 tokens (63 UNTRACKED), 54 wallets,
+               cursor 61,574,942.  ~500-600 CU/run, ~$0.35/month at 48 runs/day
 ```
 
 **PONS was rebuilt on 2026-09-11/12 and is no longer the odd one out.** It now
@@ -286,6 +288,7 @@ was an opinion rather than a number. Measured on the three loads:
 | rows (dry run + write) | not measured¹ | ~1 min | ~8 min | scales with rows |
 | scoring, all windows | — | — | ~60 s for 24,186 wallets | **seconds to a minute** |
 | scoring + watchlist rebuild | — | — | 80.9 s (9.1–11.9 s without the rebuild) | **about a minute** |
+| watcher, 20,000-block slice | — | — | 40.3 s first run, 15.3 s after | **seconds; the first run classifies pools** |
 
 ¹ PONS was loaded by the scratchpad scripts that were lost; no phase timing
 survives. ² 16.4 s when router detection ran with data present.
@@ -2266,10 +2269,126 @@ depends on a density nobody has measured, and **this document records twice that
 a density assumed from the wrong population was wrong by 16x and by 27%.** A
 wallet-keyed filter across all tokens has no measured density at all.
 
-**So the first thing the watcher does is a density probe over the range it will
-actually read**, reported before anything is swept, exactly as step 5 requires.
-Until that number exists the per-run cost is a guess, and it is recorded here as
-one.
+#### BUILT AND MEASURED 2026-09-13
+
+**Density, probed near head before anything was swept** — 6 samples of 20,000
+blocks, 120,000 blocks total, `watch-probe`, 2,170 CU / $0.00098:
+
+```
+transfer logs matching the watchlist   3,179
+logs per block                      0.026492   range 330-828 per 20,000 blocks
+natural span at the 6,000-log target 226,486 blocks
+```
+
+**The 100,000-block cap binds, not density.** That is the opposite of every other
+sweep here: a wallet-keyed filter across all tokens is *sparse*, so the slice size
+is limited by the endpoint rather than by log volume, and the request count is
+**6 per slice — 3 wallet chunks x 2 directions — whatever the slice size.**
+
+**Measured cost per run, first run and steady state:**
+
+```
+transfer filters, 6 requests                        360 CU
+Swap filters, v4 PoolManager + v3 addresses     ~120-240 CU
+                                                 ---------
+steady state                                    ~500-600 CU   ~$0.00025/run
+                                                              ~$0.35/month at 48/day
+
+first run, additionally: 104 pool classifications and 67 decimals reads
+measured total for a run with that backlog        1,134 CU     $0.00051
+```
+
+**Wall-clock: 40.3 s on the first run, 15.3 s on the second.** The difference is the
+classification backlog, which does not recur.
+
+**What it found, first 20,000-block slice (61,554,943–61,574,942):**
+
+```
+transfers matching a watchlist wallet    1,193
+candidates (a wallet side + a counterparty) 1,178
+TRADES                                     189    190 stored across two runs
+  wallet-to-wallet, skipped                   0
+  rejected: counterparty not a pool         932
+  rejected: no Swap on that pool             57
+  rejected: token not in that pool            0
+tokens                                      67    63 of them UNTRACKED
+wallets                                     54    of 1,151 watched
+buys 113   sells 77
+pools classified: 78 v4, 26 v3, 65 not-a-pool (negatives cached too)
+decimals: 67 tokens, 67 readable, 0 unreadable
+```
+
+**932 of 1,178 candidates rejected for having a non-pool counterparty is the test
+doing its job, not a loss.** A watchlist wallet's transfers are mostly not trades —
+they are funding, routing hops and wallet-to-wallet movement. The weaker
+"transaction contained a Swap" test would have admitted a large share of those 932.
+
+**63 of 67 tokens are outside the pipeline**, which is the point of the inversion:
+179 of 190 rows are activity on tokens no cohort was ever built for.
+
+#### USD: 75 of 189 priced, and the two reasons for the rest
+
+```
+priced                                                      75
+null: counter asset is not a recognised pricing asset       45   expected, by design
+null: no ETH/USD bucket within one bucket width             69   FIXABLE, see below
+```
+
+**THE WATCHER OUTRUNS THE ETH/USD SERIES, and that is the bigger half of the
+nulls.** `native_usd_prices` reaches 61,553,150 because the hourly job derives it
+and runs an hour behind; the watcher read to 61,574,942, **21,792 blocks past the
+series** — more than two bucket widths — so nothing in that region can price. This
+is step 15's "a stale series is not a present one" appearing from the other
+direction: not a series that ends before a slice, but a slice that starts after the
+series.
+
+It is a genuine trade-off rather than a bug, and the choice has not been made:
+
+| option | effect |
+|---|---|
+| cap the slice at the series head + one bucket | every row prices; the watcher lags up to an hour, which for a screener is the thing it is for |
+| widen the lookup to several bucket widths | prices more rows by dating them further from the trade — invents precision |
+| leave it | ~36% of rows unpriced for a fixable reason, token amounts always correct |
+
+Left as it is for now, and recorded in section 9.
+
+#### The alert, as it renders
+
+Aggregated by token, nothing per-wallet, sorted by USD descending:
+
+```
+Watchlist activity: 67 token(s), 189 trades
+Blocks 61554943-61574942. 67 token(s), aggregated.
+
+`0x39dbed…4571`  bought 0  sold 1   38,415.85 tokens     $4,616 (partial)
+`0x15d36b…5c4d`  bought 0  sold 2   566,530 tokens       $4,394
+`0xd9db30…1e18`  bought 2  sold 0   285,400.07 tokens    $3,276 (partial)
+```
+
+**`(partial)` appears when some rows in that token were unpriced**, so a total is
+never presented as complete when it is not. A token with no priced row at all reads
+`unpriced` rather than `$0` — a zero would be a measurement.
+
+**Channel `crypto_screener`, every 30 minutes, and NOTHING is sent on an empty
+period.** A recurring "0 wallets traded" line trains the reader to ignore the
+channel, and `monitor_runs` already distinguishes silence from a dead monitor.
+Failures alert on `system` like every other monitor.
+
+**`DISCORD_WEBHOOK_CRYPTO_SCREENER` does not exist yet**, so the first alert fell
+back to `DISCORD_WEBHOOK_URL` and said so — `via: "fallback"`, with the expected
+variable named. That is the designed behaviour: a missing channel is visible rather
+than silent. Adding the variable triggers a Railway redeploy, so it must not be set
+while a collection is running.
+
+**`AlertLevel` gained `info`.** The activity alert is none of critical, warning or
+recovery, and reusing `recovery` would colour a routine event as "a failure ended".
+
+**`run-once` races the scheduler.** The container boot ran `watchlist-watch` at
+01:43:22 and a manual `run-once` at 01:43:53 read the same range, because the first
+had not committed its cursor when the second read it. Nothing was corrupted — the
+row key is unique and the insert is `on conflict do nothing`, so the second run
+stored 1 row of 189 — but a concurrent run is possible and on a more expensive job
+it would double-spend. **Check `monitor_runs` before running a monitor by hand.**
 
 ---
 
@@ -2871,6 +2990,14 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   life"; 7.47M blocks of INDEX's life sit outside that span. Claims like this
   need checking against the series they name, in config as much as in this
   document.
+
+- **The watcher outruns the ETH/USD series by more than two bucket widths, so
+  about 36% of its rows are unpriced for a fixable reason.** `native_usd_prices`
+  reaches 61,553,150 because the hourly job derives it an hour behind, while the
+  watcher reads to within 200 blocks of head — 21,792 blocks past the series on its
+  first run, against a 10,000-block bucket. 69 of 189 rows could not price. The
+  three options and their costs are in step 17; **the choice has not been made.**
+  Token amounts are unaffected and always correct.
 
 One further limitation is a property of the chain rather than a gap in the code:
 
