@@ -270,69 +270,132 @@ const adapter: SourceAdapter<{ token: string }> = {
           return `$${v.toPrecision(3)}`;
         };
 
-        const lines = [...byToken.entries()]
-          .sort((a, b) => (b[1].boughtUsd + b[1].soldUsd) - (a[1].boughtUsd + a[1].soldUsd))
-          .map(([token, e]) => {
-            /*
-             * A SYMBOL IS A LABEL, NOT AN IDENTITY -- two tokens on this chain both
-             * answer symbol() with "NVDA" -- so the address is always shown, and a
-             * token answering neither name() nor symbol() shows the address rather
-             * than a label somebody invented for it.
-             */
-            const label = e.symbol && e.name ? `**${e.symbol}** — ${e.name}`
-              : e.symbol ? `**${e.symbol}**`
-                : e.name ? `**${e.name}**`
-                  : `\`${short(token)}\``;
-            const chart = `https://dexscreener.com/robinhood/${token}`;
-            const nb = e.buyers.size; const ns = e.sellers.size;
-            const sideLine = (
-              wallets: number, trades: number, v: number, unpriced: number,
-            ): string => (trades === 0 ? '—'
-              : `${wallets} wallet${wallets === 1 ? '' : 's'}  ${usd(v, unpriced, trades)}`);
-            /*
-             * SLICE-IMPLIED PRICE, NOT THE STORED SERIES. Total USD over total token
-             * amount across this token's PRICED rows in this slice, both sides
-             * combined, from the rows already aggregated above -- no series read and
-             * no extra request. It is a volume-weighted average over one wallet set's
-             * trades in ~10,000 blocks: a signal figure, not the accounting record,
-             * and never to be compared with a <token>_usd_prices bucket as though it
-             * were. Where nothing priced it reads `unpriced` rather than being
-             * omitted -- a missing line would read as "no price exists".
-             */
-            const priceLine = e.pricedTokens > 0 && e.pricedUsd > 0
-              ? px(e.pricedUsd / e.pricedTokens)
-              : 'unpriced';
-            return `[${label}](${chart})  \`${short(token)}\`\n`
-              + `　bought   ${sideLine(nb, e.boughtTrades, e.boughtUsd, e.boughtUnpriced)}\n`
-              + `　sold     ${sideLine(ns, e.soldTrades, e.soldUsd, e.soldUnpriced)}\n`
-              + `　price    ${priceLine}`;
-          });
-
         /*
-         * DISCORD CAPS AN EMBED DESCRIPTION AT 4,096 CHARACTERS, and a description
-         * over it is REJECTED rather than trimmed -- the alert would vanish. So the
-         * list is capped and the tokens left out are COUNTED IN THE MESSAGE: a silent
-         * trim would read as "that is all that happened".
+         * ORDERED BY DISTINCT BUYING WALLETS, then USD bought. It was total USD
+         * across both sides, which was wrong twice over: two wallets buying the same
+         * token is the coordination signal this system exists to find, and a USD-first
+         * order sorted every token with no USD route off the end -- a token with
+         * nothing priced totals zero, so it landed last by construction and was always
+         * the first cut. Sell-only tokens now sort below every token with a buyer,
+         * which is deliberate: the alert leads with accumulation.
          */
-        const LIMIT = 20;
-        const shown = lines.slice(0, LIMIT);
-        const omitted = lines.length - shown.length;
+        const ordered = [...byToken.entries()].sort((a, b) =>
+          (b[1].buyers.size - a[1].buyers.size) || (b[1].boughtUsd - a[1].boughtUsd));
+
+        const block = ([token, e]: [string, Agg]): string => {
+          /*
+           * A SYMBOL IS A LABEL, NOT AN IDENTITY -- two tokens on this chain both
+           * answer symbol() with "NVDA" -- so the address is always shown, and a
+           * token answering neither name() nor symbol() shows the address rather
+           * than a label somebody invented for it.
+           */
+          const label = e.symbol && e.name ? `**${e.symbol}** — ${e.name}`
+            : e.symbol ? `**${e.symbol}**`
+              : e.name ? `**${e.name}**`
+                : `\`${short(token)}\``;
+          const chart = `https://dexscreener.com/robinhood/${token}`;
+          const nb = e.buyers.size; const ns = e.sellers.size;
+          const sideLine = (
+            wallets: number, trades: number, v: number, unpriced: number,
+          ): string => (trades === 0 ? '—'
+            : `${wallets} wallet${wallets === 1 ? '' : 's'}  ${usd(v, unpriced, trades)}`);
+          /*
+           * SLICE-IMPLIED PRICE, NOT THE STORED SERIES. Total USD over total token
+           * amount across this token's PRICED rows in this slice, both sides
+           * combined, from the rows already aggregated above -- no series read and
+           * no extra request. It is a volume-weighted average over one wallet set's
+           * trades in ~10,000 blocks: a signal figure, not the accounting record,
+           * and never to be compared with a <token>_usd_prices bucket as though it
+           * were. Where nothing priced it reads `unpriced` rather than being
+           * omitted -- a missing line would read as "no price exists".
+           */
+          const priceLine = e.pricedTokens > 0 && e.pricedUsd > 0
+            ? px(e.pricedUsd / e.pricedTokens)
+            : 'unpriced';
+          return `[${label}](${chart})  \`${short(token)}\`\n`
+            + `　bought   ${sideLine(nb, e.boughtTrades, e.boughtUsd, e.boughtUnpriced)}\n`
+            + `　sold     ${sideLine(ns, e.soldTrades, e.soldUsd, e.soldUnpriced)}\n`
+            + `　price    ${priceLine}`;
+        };
+
         const totalUsd = [...byToken.values()].reduce((n, e) => n + e.boughtUsd + e.soldUsd, 0);
         const unpricedRows = report.usdNull;
-        ctx.queueAlert({
-          title: `Watchlist: ${report.trades} trades, ${byToken.size} tokens, `
-            + `${new Set(report.rows.map((r) => r.wallet)).size} wallets`,
-          description: `Blocks ${from}–${to}  ·  $${n0(totalUsd)} priced`
+        const nothingPriced = (e: Agg): boolean => !(e.pricedTokens > 0 && e.pricedUsd > 0);
+
+        /*
+         * THE CAP IS 12 AND THE GUARD IS THE REAL LIMIT.
+         *
+         * Discord's embed description caps at 4,096 characters and the sink slices to
+         * 4,000 BEFORE posting, so an overrun does not make the alert vanish -- it
+         * silently removes the tail, which is the "and N more" footer and the tab
+         * link, the two elements that say something was omitted. A truncated alert
+         * would look complete.
+         *
+         * A cap alone cannot guarantee the fit because a block's length is not fixed:
+         * names run from FAB to Large Language Model, USD from $40 to $8,537+, prices
+         * from $0.0000350 to $2,524.13. 20 blocks measured 3,801 characters. So the
+         * body is MEASURED and blocks are dropped from the tail until it fits inside
+         * MARGIN -- 3,600, which is 400 below the slice, room for one more four-line
+         * block plus footer growth. The margin is a round number, not a measurement.
+         */
+        const CAP = 12;
+        const MARGIN = 3600;
+        const render = (count: number): string => {
+          const shown = ordered.slice(0, count);
+          const omitted = ordered.slice(count);
+          const omittedUnpriced = omitted.filter(([, e]) => nothingPriced(e)).length;
+          return `Blocks ${from}–${to}  ·  $${n0(totalUsd)} priced`
             + (unpricedRows > 0 ? `  ·  ${unpricedRows} of ${report.trades} rows unpriced` : '')
-            + `\n\n${shown.join('\n\n')}`
-            + (omitted > 0
-              ? `\n\n_…and ${omitted} more token${omitted === 1 ? '' : 's'}, ordered by USD._`
+            + `\n\n${shown.map(block).join('\n\n')}`
+            /*
+             * THE FOOTER STATES WHAT THE GUARD ACTUALLY DROPPED, not the cap.
+             * Reporting the cap arithmetic after dropping to fit would understate what
+             * was left out -- a silent trim one step removed. The unpriced count says
+             * whether the tail went for being quiet or for being unpriceable.
+             */
+            + (omitted.length > 0
+              ? `\n\n_…and ${omitted.length} more token${omitted.length === 1 ? '' : 's'}`
+                + `, ${omittedUnpriced} with nothing priced._`
               : '')
             + (ctx.publicUrl
               ? `\n\n**[Every trade on the watchlist tab →](${ctx.publicUrl}/watchlist)**`
                 + `  ·  filterable by token and by wallet`
               : `\n\nAll ${report.trades} trades are in \`watchlist_activity\`; the `
-                + 'watchlist tab has no public URL configured.'),
+                + 'watchlist tab has no public URL configured.');
+        };
+
+        let shownCount = Math.min(CAP, ordered.length);
+        let description = render(shownCount);
+        while (description.length > MARGIN && shownCount > 1) {
+          shownCount -= 1;
+          description = render(shownCount);
+        }
+        /*
+         * A SINGLE BLOCK THAT STILL OVERRUNS IS REPORTED, NOT SILENTLY SENT. It cannot
+         * happen at current lengths -- one block plus footer is ~450 characters -- and
+         * if it ever does, the sink would slice and the tail would vanish, so say so.
+         */
+        if (description.length > MARGIN) {
+          ctx.log.warn('alert body exceeds the margin at a single token block', {
+            characters: description.length, margin: MARGIN,
+            note: 'the sink slices at 4,000 and the footer would be lost',
+          });
+        }
+        ctx.log.info('alert body sized', {
+          tokens_total: ordered.length,
+          tokens_shown: shownCount,
+          tokens_omitted: ordered.length - shownCount,
+          omitted_with_nothing_priced:
+            ordered.slice(shownCount).filter(([, e]) => nothingPriced(e)).length,
+          characters: description.length,
+          cap: CAP, margin: MARGIN, sink_slice: 4000,
+          dropped_by_guard: Math.min(CAP, ordered.length) - shownCount,
+        });
+
+        ctx.queueAlert({
+          title: `Watchlist: ${report.trades} trades, ${byToken.size} tokens, `
+            + `${new Set(report.rows.map((r) => r.wallet)).size} wallets`,
+          description,
           level: 'info',
         }, 'crypto');
       }

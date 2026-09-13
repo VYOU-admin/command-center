@@ -42,7 +42,16 @@ async function load(path) {
     rendered: dataRows.length,
     claimShown: m ? Number(m[1].replace(/,/g, '')) : null,
     claimTotal: m ? Number(m[2].replace(/,/g, '')) : null,
-    firstTokenHref: doc.querySelector('tbody tr td.tk a')?.getAttribute('href') ?? null,
+    firstTokenHref: doc.querySelector('tbody tr td.tk > a')?.getAttribute('href') ?? null,
+    /*
+     * EVERY token cell's link, so a href built from a missing field is caught. A
+     * template that interpolates an absent value yields ".../undefined" or a bare
+     * prefix, which renders as a working-looking link that resolves to nothing --
+     * the same shape of failure as a filter matching nothing.
+     */
+    tokenHrefs: [...doc.querySelectorAll('tbody tr td.tk > a')]
+      .map((a) => a.getAttribute('href') ?? ''),
+    chartLinks: doc.querySelectorAll('tbody tr td.tk a[href*="dexscreener"]').length,
     tokenOptions: doc.querySelectorAll('#token option').length,
     countText,
   };
@@ -77,6 +86,21 @@ if (all.rendered === 0) {
 if (all.firstTokenHref && all.firstTokenHref.startsWith('https://dexscreener.com/robinhood/')) {
   ok(`DexScreener link built: ${all.firstTokenHref}`);
 } else fail(`first row has no DexScreener link (got ${all.firstTokenHref})`);
+
+/*
+ * EVERY row's token link must be a complete DexScreener URL with a real address.
+ * A href built from a missing field looks live and resolves to nothing.
+ */
+const GOOD = /^https:\/\/dexscreener\.com\/robinhood\/0x[0-9a-f]{40}$/;
+const bad = all.tokenHrefs.filter((h) => !GOOD.test(h));
+console.log(`token links           ${all.tokenHrefs.length} of ${all.rendered} rows`);
+console.log(`malformed token links ${bad.length}`);
+if (all.tokenHrefs.length !== all.rendered) {
+  fail(`${all.rendered} rows but ${all.tokenHrefs.length} token links — a row is missing its link`);
+} else ok(`every rendered row carries a token link (${all.tokenHrefs.length})`);
+if (bad.length > 0) {
+  fail(`${bad.length} token link(s) are not a complete DexScreener URL, e.g. ${bad[0]}`);
+} else ok('every token link is a complete DexScreener URL with a real address');
 
 /* ---- the filters, exercised rather than assumed ---- */
 const firstTokenOpt = all.doc.querySelectorAll('#token option')[1]?.getAttribute('value');

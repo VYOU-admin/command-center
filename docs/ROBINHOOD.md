@@ -2457,6 +2457,19 @@ shareable URL and scales past what a browser can hold.
 address should show everything rather than nothing; a filter matching nothing is the
 failure shape this project keeps hitting.
 
+**The token name IS the DexScreener link, the same URL the alert renders**, so both
+surfaces send a reader to the same place. **The separate "chart" link was removed and
+it is the only thing removed** — it pointed at that identical URL, so keeping it would
+be two links to one destination. The address link stays, because it goes to Blockscout,
+and so does the transaction link.
+
+**The DOM harness checks every row's link, not just the first.** A href built from a
+missing field yields `.../undefined` or a bare prefix, which renders as a working-looking
+link that resolves to nothing — the same shape of failure as a filter matching nothing.
+Every token link must match `https://dexscreener.com/robinhood/0x<40 hex>` and the link
+count must equal the rendered row count, so a row missing its link fails rather than
+passing unnoticed.
+
 **Verified by executing the served page in jsdom**, per step 14 — a green build
 proves nothing about whether the table has rows:
 
@@ -2542,29 +2555,47 @@ tokens on this chain both answer `symbol()` with "NVDA" (step 16). Name and symb
 are read once per token and cached with its decimals; a token that answers neither
 is rendered as its address rather than given an invented label.
 
-**The list is capped at 20 tokens and the remainder is COUNTED IN THE MESSAGE.**
-Discord rejects an embed description over 4,096 characters outright rather than
-trimming it, so an uncapped list would make the alert vanish. A silent trim would read
-as "that is all that happened"; the footer names the count and says where the rest are.
+**The list is capped at 12 tokens, and a HARD GUARD enforces the real limit.**
 
-**MEASURED 2026-09-13, AND THE HEADROOM IS NOW THIN.** At three lines per token the
-delivered body ran **3,801 characters against the sink's 4,000-character slice — 199
-characters of headroom, about 5%, or roughly ONE more token line.** The cap of 20 was
-set when a token took two lines; it now takes four. Beyond 4,000 the sink slices
-before posting, so the alert would not vanish — **it would silently lose its tail,
-which is the "…and N more" line and the link to the tab**, i.e. exactly the two things
-that tell a reader something was left out. Lowering the cap to ~14 tokens restores the
-margin; it has not been changed.
+The cap was 20 when a token took two lines. At three lines plus a label it takes four,
+and 20 tokens measured **3,801 characters against the sink's 4,000-character slice** —
+199 characters of headroom, roughly one more token block. **Past 4,000 the sink slices
+before posting, so the alert does not vanish: it silently loses its tail, which is the
+"…and N more" footer and the link to the tab** — precisely the two elements that tell a
+reader something was omitted. A truncated alert would look complete.
 
-**THE `unpriced` MARKERS SORT TO THE BOTTOM AND ARE THEREFORE THE FIRST CUT.** Ordering
-by USD descending puts every token with nothing priced at the end of the list, because
-its total is zero. Measured on the 61,603,150–61,613,149 slice: of 30 tokens, **6 had
-an unpriced price line, 5 a fully-unpriced buy side and 3 a fully-unpriced sell side —
-and all of them fell in the 10 omitted tokens.** The delivered alert showed the
-partly-unpriced form (`$8,537+`, `$411+`) and no fully-unpriced one. The markers work;
-the ordering means the cases they exist for are the least likely to be seen. Whether
-that is right is an operator judgement — an unpriced token is also the least
-interesting by USD — and it is recorded rather than decided.
+**A cap alone is not enough, because a block's length is not fixed.** Token names run
+from `FAB` to `Large Language Model`, USD figures from `$40` to `$8,537+`, and a price
+line from `$0.0000350` to `$2,524.13`. Twelve blocks is comfortable at typical lengths
+and could still overrun at atypical ones, so the body is **measured before posting and
+token blocks are dropped from the tail until it fits inside 3,600 characters** — 400
+below the slice, about 10%. The margin is a round number chosen to hold one more
+four-line block plus footer growth, not a measurement.
+
+**The footer states the count the guard actually dropped, not the cap.** Dropping to fit
+and then reporting "…and 18 more" from the cap arithmetic would understate what was
+left out, which is the same failure as a silent trim one step removed.
+
+#### Ordering: buying wallets first, USD second
+
+**Tokens are ordered by DISTINCT BUYING WALLETS descending, then total USD bought.** It
+was total USD across both sides, and that was wrong twice over:
+
+- **Two wallets buying the same token is the coordination signal this system exists to
+  find.** A single wallet moving $8,000 is one wallet's opinion; five wallets buying the
+  same thing in one slice is the thing worth waking up for. Ordering by USD buried it
+  under whichever token happened to carry the largest single trade.
+- **A USD-first order sorted every token with no USD route off the end.** A token with
+  nothing priced totals zero, so it landed last by construction and was always the
+  first cut — measured on the 61,603,150–61,613,149 slice, **all 6 tokens with an
+  unpriced price line fell in the 10 omitted.** An unpriced token whose buyers are
+  stacking up is exactly the case the ordering must not hide.
+
+Sell-side activity now sorts below every token with a buyer, since a sell-only token has
+zero buying wallets. That is deliberate: the alert leads with accumulation.
+
+**The footer also states how many of the omitted tokens had nothing priced**, so a
+reader can tell whether the tail was dropped for being quiet or for being unpriceable.
 
 **Channel: `crypto`, which IS the Discord channel #crypto-screener.** The webhook
 named "Crypto" is `DISCORD_WEBHOOK_CRYPTO` and `env.ts` already registers it, so

@@ -82,10 +82,20 @@ export function renderWatchlistPage(args: {
   const body = rows.length === 0
     ? `<tr><td colspan="7" class="empty">No trades match this filter.
          ${total === 0 ? 'The watcher has stored nothing yet.' : ''}</td></tr>`
+    /*
+     * THE TOKEN NAME IS THE DEXSCREENER LINK, the same URL the alert renders, so the
+     * two surfaces send a reader to the same place.
+     *
+     * THE SEPARATE "chart" LINK IS REMOVED and that is the only thing removed: it
+     * pointed at this identical URL, so leaving it would be two links to one
+     * destination. The ADDRESS link stays -- it goes to Blockscout, a different
+     * destination -- and so does the transaction link.
+     */
     : rows.map((r) => `<tr>
-        <td class="tk">${label(r)}
-          <div class="addr"><a href="${chart(r.token)}" target="_blank" rel="noopener noreferrer">chart</a>
-            <a href="${explorerAddr(r.token)}" target="_blank" rel="noopener noreferrer"
+        <td class="tk"><a href="${chart(r.token)}" target="_blank"
+             rel="noopener noreferrer">${label(r)}</a>
+          <div class="addr"><a href="${explorerAddr(r.token)}" target="_blank"
+               rel="noopener noreferrer"
                title="${esc(r.token)}">${esc(short(r.token))}</a></div></td>
         <td><a href="${explorerAddr(r.wallet)}" target="_blank" rel="noopener noreferrer"
                title="${esc(r.wallet)}">${esc(short(r.wallet))}</a></td>
@@ -162,6 +172,8 @@ export function renderWatchlistPage(args: {
     color:var(--faint);margin-top:2px}
   .addr a{color:var(--faint);margin-right:8px}
   a{color:var(--accent)}
+  td.tk > a{color:var(--text);text-decoration:none}
+  td.tk > a:hover{color:var(--accent);text-decoration:underline}
   .nul{color:var(--faint);font-style:italic}
   td.empty{text-align:center;color:var(--muted);padding:28px}
   .wrapx{overflow-x:auto}
