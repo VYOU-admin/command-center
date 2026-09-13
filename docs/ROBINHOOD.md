@@ -52,8 +52,9 @@ native ETH/USD 10,159 buckets: 9,652 token-incidental, 489 market-derived,
 watchlist      1,248 memberships, 1,151 distinct wallets, top 5%
 monitors       token-updates, index-updates, ai-updates, token-price, wallet-scores,
                watchlist-watch, oil-prices, postgres-disk  all enabled, 0 failures/24h
-watcher        watchlist_activity: 190 rows, 67 tokens (63 UNTRACKED), 54 wallets,
-               cursor 61,574,942.  ~500-600 CU/run, ~$0.35/month at 48 runs/day
+watcher        watchlist_activity: 303 rows, 103 tokens (mostly UNTRACKED), cursor
+               61,595,492.  67.6% of trades priced since it derives ETH/USD per slice.
+               /watchlist tab: DOM-verified 303 rendered = 303 claimed, 0.38 MB
 ```
 
 **PONS was rebuilt on 2026-09-11/12 and is no longer the odd one out.** It now
@@ -2356,8 +2357,38 @@ This is not a fixed 36% tax. **The watcher drifts away from the series at the ra
 the chain produces blocks, and every hour it runs unaided the priced share falls.**
 An alert reading "$4 priced" on 42 trades is not a screener.
 
-**There is a fourth option, and it is the one to take.** The three below all trade
-something real away; this one does not:
+**IMPLEMENTED 2026-09-13: the watcher derives ETH/USD for its own slice, in memory.**
+The cause is gone, not reduced:
+
+| slice | derivation | trades | priced | share |
+|---|---|---|---|---|
+| 61,554,943–61,574,942 | stored series only | 190 | 76 | 40.0% |
+| 61,574,943–61,585,390 | stored series only | 42 | 1 | **2.4%** |
+| 61,585,391–61,595,492 | **slice derivation** | 71 | **48** | **67.6%** |
+
+**The "no ETH/USD bucket" reason is now ZERO.** All 23 remaining nulls on the third
+slice are `counter asset is not a recognised pricing asset`, which is the irreducible
+category — a token traded against another memecoin has no USD route at any price.
+
+The derivation itself, per run: **2 buckets from 8,220 ticks, 0 discarded by the 10x
+fence** — the soundness signal step 10 names — in **3 requests**. It read
+$2,524.13 and $2,522.65, consistent with the $2,480.88 the PONS series and
+DexScreener agreed on to 0.3%.
+
+**`native_usd_prices` was not touched**: its head is still 61,553,150 and its three
+provenances still hold 9,655 / 489 / 18 buckets. The ownership rule held.
+
+**One failure, reported rather than hidden.** The first run of this raised `block
+range extends beyond current head block`: widening the sweep to the trailing bucket
+boundary asks for blocks that do not exist yet. The range is clamped to head, and the
+trailing bucket is then INCOMPLETE — it is derived from the ticks available and
+**counted as `partial_buckets` on every run**. That is a deliberate narrowing of
+"only whole buckets are written": the rule protects the persisted series, where a
+partial bucket becomes permanent, and nothing is persisted here. The alternative was
+leaving the freshest rows of every slice unpriced, which is the whole defect.
+
+**The options as they stood, kept because the reasoning is the reusable part.** The
+first three each trade something real away; the fourth did not:
 
 | option | effect |
 |---|---|
@@ -2374,8 +2405,48 @@ an exception to it. The market's own pools are enumerated and cached
 (`eth_usd_pools`), so a slice needs one v4 filter plus one v3 filter over its own
 20,000 blocks: **two requests, ~120 CU, against the ~550 the run already spends.**
 
-Not implemented. Recorded in section 9 as the recommendation with the choice
-outstanding.
+#### The watchlist tab — `/watchlist`
+
+The alert is capped at 20 tokens; **this page is where the rest lives**, one row per
+trade: token with name, symbol, address and a DexScreener link, wallet, side, token
+amount, USD, time with block, and the transaction. **Filterable by token and by
+wallet**, and the alert footer links to it.
+
+**Filtering and the row cap are in SQL, not the browser.** 191,728 rows once produced
+a 69.3 MB page (step 14). The cap is stated on the page beside the total matching
+count — "Showing 303 of 303" — so a truncation is visible rather than reading as
+"that is all that happened". Filters are query-string, so a filtered view is a
+shareable URL and scales past what a browser can hold.
+
+**A malformed address is treated as NO filter, not as an error.** A half-typed
+address should show everything rather than nothing; a filter matching nothing is the
+failure shape this project keeps hitting.
+
+**Verified by executing the served page in jsdom**, per step 14 — a green build
+proves nothing about whether the table has rows:
+
+```
+page size            399,100 bytes (0.38 MB)
+rendered data rows   303
+page claims          303 of 303        <- the check that matters
+token filter         32 of 303 rows
+wallet filter        2 rows
+malformed filter     ignored, result unchanged
+script errors        0
+```
+
+The rendered-versus-claimed check is the point: a page can claim 500 rows in its
+header and render none. `verify-watchlist-page.mjs` also exercises both filters and
+asserts a malformed one is ignored, because a filter that silently matches nothing
+would pass any check that only counted rows.
+
+Both pages are in the build's parse gate with a sample carrying a priced row, an
+unpriced row and an unnamed token, so those branches fail the deploy rather than
+production.
+
+**The footer link is omitted when no public domain is configured**, never printed
+broken — step 14's rule that a dead link which looks live is the same failure shape as
+a filter matching nothing.
 
 #### The alert, as it renders
 
@@ -3045,15 +3116,12 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   need checking against the series they name, in config as much as in this
   document.
 
-- **The watcher outruns the ETH/USD series and the gap GROWS, so its priced share
-  falls every hour it runs.** 2.2 bucket widths ahead on the first slice (75 of 189
-  priced), 3.2 ahead on the second (**1 of 42**). **Recommendation: derive ETH/USD
-  in memory per slice, persisting nothing** — the pattern every other monitor
-  already follows, ~120 CU a run, which fixes it without costing freshness or
-  inventing precision. Step 17 has the four options. Not implemented; the choice is
-  outstanding.
-- **(superseded wording, kept for the measurement) It was first recorded as a fixed
-  ~36% of rows unpriced.** That was wrong: it is not a constant. `native_usd_prices`
+- **FIXED 2026-09-13: the watcher derives ETH/USD for its own slice in memory.** The
+  priced share went 40.0% → 2.4% (as the gap to the stored series grew) → **67.6%**,
+  and the "no ETH/USD bucket" reason is now zero. Kept here for two lessons: a figure
+  I first reported as a fixed ~36% was **not a constant but a growing gap**, and the
+  fix was a fourth option none of the three I first listed — worth pausing for when
+  every available option costs something. `native_usd_prices`
   reaches 61,553,150 because the hourly job derives it an hour behind, while the
   watcher reads to within 200 blocks of head — 21,792 blocks past the series on its
   first run, against a 10,000-block bucket. 69 of 189 rows could not price. The
