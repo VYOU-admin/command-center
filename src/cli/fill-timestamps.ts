@@ -25,7 +25,7 @@ import type { PoolClient } from '../store/db.js';
 import { errorFields, log } from '../logger.js';
 import { loadIntakeConfig } from '../intake/plan.js';
 import { RpcClient } from '../adapters/token-updates/rpc.js';
-import { NEEDED_BLOCKS_SQL, fetchTimestamps, planTimestamps } from '../intake/write.js';
+import { fetchTimestamps, planTimestamps } from '../intake/write.js';
 import {
   PUBLIC_BATCH, PUBLIC_PACE_MS, fillFromPublicRpc, verifyAgainstAlchemy,
 } from '../intake/blocktimes.js';
@@ -125,14 +125,22 @@ async function main(): Promise<void> {
   const c = await app.pool.connect();
   try {
     if (forPrices) {
+      /*
+       * NOT `select ...::text ... order by 1`. ORDER BY binds to the first OUTPUT
+       * column, which was the ::text rendering, so the sort was lexicographic and
+       * put '10003150' before '5363150' -- the trap section 7 of
+       * docs/ROBINHOOD.md records. `select distinct` forbids ordering by an
+       * expression outside the select list, so the cast is dropped instead of
+       * aliased: node-pg returns an int8 as a string regardless.
+       */
       const missing = await c.query<{ block_number: string }>(
-        `select distinct s.block_number::text from token_swap_logs s
+        `select distinct s.block_number from token_swap_logs s
            join pool_meta m on m.chain = s.chain and m.token = s.token
                            and m.venue = s.venue and m.pool = s.pool
           where s.chain = $1 and s.token = $2
             and not exists (select 1 from block_times b
                              where b.chain = s.chain and b.block_number = s.block_number)
-          order by 1`,
+          order by s.block_number`,
         [cfg.chain, cfg.token],
       );
       const blocks = missing.rows.map((r) => Number(r.block_number));
@@ -199,13 +207,24 @@ async function main(): Promise<void> {
       note: 'the work set is the blocks the rows will need, not every block in the swap table',
     });
     if (usePublic) {
-      const missing = await c.query<{ block_number: string }>(
-        `select n.block_number::text from (${NEEDED_BLOCKS_SQL}) n
+      /*
+       * `_needed_blocks` was materialised by planTimestamps just above, so this
+       * reads the identical rows the plan counted rather than re-running the
+       * derivation.
+       *
+       * ORDERED BY THE BIGINT, NOT BY ITS ::text RENDERING. This said `order by 1`,
+       * which binds to the first OUTPUT column -- `block_number::text` -- and sorts
+       * lexicographically, putting '10003150' before '5363150'. Section 7 of
+       * docs/ROBINHOOD.md records that exact trap. The cast is aliased and the sort
+       * is qualified, so neither can resolve to the text column.
+       */
+      const missing = await c.query<{ blk: string }>(
+        `select n.block_number::text as blk from _needed_blocks n
            left join block_times b on b.chain = $1 and b.block_number = n.block_number
-          where b.block_number is null order by 1`,
+          where b.block_number is null order by n.block_number`,
         [cfg.chain, cfg.token],
       );
-      const blocks = missing.rows.map((r) => Number(r.block_number));
+      const blocks = missing.rows.map((r) => Number(r.blk));
       if (blocks.length !== plan.toFetch) {
         throw new Error(
           `the plan said ${plan.toFetch} blocks and the fetch found ${blocks.length}. `

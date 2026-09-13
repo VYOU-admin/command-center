@@ -1227,6 +1227,39 @@ once two queries scoped differently, so the plan printed a small number and the
 fetch would have done a much larger job. If the two disagree, the job stops
 rather than spending against a figure nobody saw.
 
+**THE WORK-SET DERIVATION MUST BE MATERIALISED, AND ON CHUMP IT HUNG FOR 10m34s.**
+It was a single statement whose body was an `exists` holding two
+`in (select wallet from wallet_tags ...)` subqueries. The planner has no statistics
+for either and no index it can use across them, so against CHUMP's 274,985 swaps,
+412,997 transfers and 523-wallet cohort it sat **active and CPU-bound, in
+`pg_stat_activity`, having emitted nothing** — the phase log never even printed its
+work-set line, because the plan query itself had not returned.
+
+**This is the third time this exact shape has appeared here**, after the 19-minute
+router query and the 17-minute conventions query in section 4, and the remedy is the
+one those two already established: materialise each input into an indexed temp table
+and `analyze` it. Three steps — cohort wallets, then the transactions touching them,
+then the swap blocks in those transactions — each a primary-keyed temp table.
+
+**The "one derivation" rule got STRONGER, not weaker.** The estimate and the fetch
+used to share a SQL *string*; they now read the same materialised *rows*, so they
+cannot drift even if one call site is edited.
+
+**The wall-clock rule is what caught it.** The phase's expectation is "near-free,
+seconds"; at ten minutes it was past 3x, and `pg_stat_activity` named the cause in
+one query. Waiting would not have worked: the statement had no path to completing
+usefully.
+
+**Two `order by 1` text sorts were found alongside it, both in
+`fill-timestamps`.** `select … block_number::text … order by 1` binds ORDER BY to the
+first OUTPUT column — the text rendering — so the blocks came back in lexicographic
+order with `'10003150'` before `'5363150'`. It changes no value, since every block in
+the list is fetched either way, but it is the section 7 trap sitting live in the
+code. One is fixed by aliasing the cast and ordering by the qualified column; the
+other is a `select distinct`, which forbids ordering by an expression outside the
+select list, so the cast is dropped instead — node-pg returns an `int8` as a string
+regardless.
+
 On Alchemy this step is usually free: `blockTimestamp` arrives with the logs
 during the sweep. It exists for the blocks that arrive without one.
 
@@ -3539,6 +3572,14 @@ against a 2,000,000 ceiling.
   **nothing**, which is the opposite of the property step 5 requires and which the
   standalone `sweep-transfers` CLI does provide. Progress is also unobservable while it
   runs, so the 3x wall-clock rule has nothing to check.
+- **FIXED 2026-09-13: the timestamp work-set derivation was a single unmaterialised
+  statement and hung for 10m34s on CHUMP.** Kept because it is the THIRD instance of
+  one shape — after the 19-minute router query and the 17-minute conventions query —
+  and because the tell was a `pg_stat_activity` row rather than anything in the job's
+  own log, which had not yet printed its work-set line. Two `order by 1` sorts over a
+  `::text` cast were fixed in `fill-timestamps` at the same time; they ordered blocks
+  lexicographically and changed no value.
+
 - **The conventions check sampled ACROSS venues and skipped regions computed from
   unset bounds.** FIXED 2026-09-13, found on CHUMP. Two independent faults in one
   phase, and both of them report a pass:

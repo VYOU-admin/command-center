@@ -53,28 +53,83 @@ export interface TimestampPlan {
  * There is now one SQL text. A future edit cannot move one copy and leave the
  * other behind, because there is no other copy.
  */
-export const NEEDED_BLOCKS_SQL = `
-  select distinct s.block_number
-    from token_swap_logs s
-    join pool_meta m
-      on m.chain = $1 and m.token = $2 and m.venue = s.venue and m.pool = s.pool
-   where s.chain = $1 and s.token = $2
-     and exists (
-       select 1 from token_transfer_logs t
-        where t.chain = s.chain and t.token = s.token and t.tx_hash = s.tx_hash
-          and (t.to_addr in (select wallet from wallet_tags where mint = $2)
-            or t.from_addr in (select wallet from wallet_tags where mint = $2))
-     )`;
+/**
+ * THE WORK SET, MATERIALISED. One derivation, used by the estimate and the fetch.
+ *
+ * This was a single statement whose body was an `exists` holding two
+ * `in (select wallet from wallet_tags ...)` subqueries. The planner has no
+ * statistics for either and no index it can use across them, so on CHUMP --
+ * 274,985 swaps, 412,997 transfers, a 523-wallet cohort -- it ran **10 minutes
+ * 34 seconds** active and CPU-bound before being cancelled, having emitted
+ * nothing. docs/ROBINHOOD.md section 4 already records this exact shape twice: a
+ * 19-minute router query and a 17-minute conventions query, both of which became
+ * ~5 seconds once their inputs were materialised into indexed temp tables. This
+ * is the third, and the remedy is the same.
+ *
+ * The three steps are the original statement read inside out, and the semantics
+ * are unchanged: the original correlated `t.chain = s.chain and t.token = s.token`
+ * against an `s` already filtered to this chain and token, so filtering the
+ * transfers directly is the same set.
+ *
+ * Both callers read `_needed_blocks`, so the estimate and the fetch cannot drift
+ * apart -- they are now literally the same rows rather than the same SQL text.
+ */
+export async function materialiseNeededBlocks(
+  client: PoolClient,
+  cfg: IntakeConfig,
+): Promise<number> {
+  await client.query(
+    'create temp table if not exists _cohort_w (wallet text primary key) on commit drop',
+  );
+  await client.query(
+    'create temp table if not exists _cohort_tx (tx_hash text primary key) on commit drop',
+  );
+  await client.query(
+    'create temp table if not exists _needed_blocks (block_number bigint primary key) on commit drop',
+  );
+  await client.query('truncate _cohort_w, _cohort_tx, _needed_blocks');
+
+  await client.query(
+    `insert into _cohort_w (wallet)
+     select distinct wallet from wallet_tags where mint = $1`,
+    [cfg.token],
+  );
+  await client.query('analyze _cohort_w');
+
+  await client.query(
+    `insert into _cohort_tx (tx_hash)
+     select distinct t.tx_hash
+       from token_transfer_logs t
+      where t.chain = $1 and t.token = $2
+        and (exists (select 1 from _cohort_w w where w.wallet = t.to_addr)
+          or exists (select 1 from _cohort_w w where w.wallet = t.from_addr))`,
+    [cfg.chain, cfg.token],
+  );
+  await client.query('analyze _cohort_tx');
+
+  const ins = await client.query(
+    `insert into _needed_blocks (block_number)
+     select distinct s.block_number
+       from token_swap_logs s
+       join pool_meta m
+         on m.chain = $1 and m.token = $2 and m.venue = s.venue and m.pool = s.pool
+       join _cohort_tx x on x.tx_hash = s.tx_hash
+      where s.chain = $1 and s.token = $2`,
+    [cfg.chain, cfg.token],
+  );
+  await client.query('analyze _needed_blocks');
+  return ins.rowCount ?? 0;
+}
 
 export async function planTimestamps(
   client: PoolClient,
   cfg: IntakeConfig,
 ): Promise<TimestampPlan> {
+  await materialiseNeededBlocks(client, cfg);
   const res = await client.query<{ needed: number; stored: number }>(
-    `with needed as (${NEEDED_BLOCKS_SQL})
-     select count(*)::int as needed,
+    `select count(*)::int as needed,
             count(b.block_number)::int as stored
-       from needed n
+       from _needed_blocks n
        left join block_times b on b.chain = $1 and b.block_number = n.block_number`,
     [cfg.chain, cfg.token],
   );
@@ -103,10 +158,10 @@ export async function fetchTimestamps(
   ceilingCu: number,
   onProgress?: (done: number, total: number) => void,
 ): Promise<{ fetched: number; remaining: number; stoppedAtCeiling: boolean }> {
+  // planTimestamps materialises `_needed_blocks`; the fetch reads the same rows.
   const plan = await planTimestamps(client, cfg);
   const missing = await client.query<{ block_number: number }>(
-    `with needed as (${NEEDED_BLOCKS_SQL})
-     select n.block_number from needed n
+    `select n.block_number from _needed_blocks n
        left join block_times b on b.chain = $1 and b.block_number = n.block_number
       where b.block_number is null
       order by n.block_number`,
