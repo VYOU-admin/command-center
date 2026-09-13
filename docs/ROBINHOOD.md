@@ -1294,6 +1294,16 @@ block bucket.
 token/USDG swap gives the token in dollars, a token/WETH swap gives it in ETH,
 and the ratio is ETH/USD.
 
+**A PRICES PHASE THAT DERIVES NOTHING IS A DEFECT, AND IT REPORTED A CLEAN PASS.**
+CHUMP's prices phase finished in **9 ms** with `usdTicks 0, natTicks 0, derived 0,
+buckets written 0` — for a token with 274,985 swaps across 51 in-scope pools quoted
+in USDG, WETH and native ETH. Nothing raised, because every count was a legitimate
+zero in isolation. The cause was `derivePricesForLife(…, firstBlock, head)` being
+handed **0 and 0** on a resumed run: the identity phase produces both, a STOP ends
+the process, and the prices phase never fetched either. **Every tick count coming
+back zero at once is the signature of an empty RANGE, not a token with no market** —
+check the bounds before the data.
+
 **Bucketed medians, not per-tick pairing.** Bucket both series by block, take the
 median of each side per bucket, then divide. A single bad tick cannot move a
 median; pairing individual ticks lets it straight through.
@@ -3579,6 +3589,34 @@ against a 2,000,000 ceiling.
   own log, which had not yet printed its work-set line. Two `order by 1` sorts over a
   `::text` cast were fixed in `fill-timestamps` at the same time; they ordered blocks
   lexicographically and changed no value.
+
+- **FIXED 2026-09-13 — EVERY PHASE AFTER `identity` RAN WITH UNRESOLVED BOUNDS ON A
+  RESUMED RUN, and this is the FOURTH time that defect has produced a clean pass over
+  an empty range.** `firstBlock` and `head` are produced by the identity phase and
+  held in local variables; a STOP ends the process, so on any resumed run both are
+  **0** and each consuming phase either re-fetched `head` itself or silently used
+  zero. The roll-call:
+
+  | token | phase | what it reported |
+  |---|---|---|
+  | AI | scope / routers | detection over `between 0 and 0` — *0 routers*, a clean pass |
+  | INDEX | windows | fell back to raw config bounds, both `undefined` |
+  | CHUMP | conventions | after-window region `44,992,964..0`, dropped — **262,954 swaps, 95.6% of the token**, unverified |
+  | CHUMP | **prices** | `derivePricesForLife(…, 0, 0)` — **0 ticks, 0 buckets, 0 written, in 9 ms**, reported as success |
+
+  **`dryrun` and `write` take the same two variables and were never reached with
+  them**, so this was caught one phase before it mattered most: the write counts
+  existing rows with `block_number between firstBlock and head`, which over `0..0`
+  returns **0** — and zero is that check's *passing* answer. It would have stored
+  nothing and reported success.
+
+  The fix is one resolver, `ensureBounds`, called by `run()` before every phase after
+  `identity`: it fetches `head` from the chain, reads the deployment block back from
+  the stored identity report, and **raises rather than defaulting**. Putting it in
+  `run()` rather than in each phase means a phase cannot be added that forgets it,
+  and it is deliberately the ONLY implementation — the bespoke copy written for the
+  conventions phase an hour earlier was deleted, because two implementations of one
+  rule drift.
 
 - **The conventions check sampled ACROSS venues and skipped regions computed from
   unset bounds.** FIXED 2026-09-13, found on CHUMP. Two independent faults in one

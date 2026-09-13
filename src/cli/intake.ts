@@ -257,6 +257,55 @@ async function main(): Promise<void> {
    * Resolved per phase rather than once at startup: the scope phase is what
    * discovers the routers, so a phase running after it must pick them up.
    */
+  /*
+   * THE TOKEN'S BOUNDS, RESOLVED ONCE, FOR EVERY PHASE. The single implementation.
+   *
+   * `firstBlock` and `head` are produced by the identity phase, and a STOP ends the
+   * process -- so on every resumed run they were both 0 and each phase that needed
+   * them either re-fetched head itself or silently used zero. That has now caused
+   * FOUR separate silent passes over an empty range:
+   *
+   *   AI       router detection over `between 0 and 0`, reported 0 routers
+   *   INDEX    windows fell back to raw config bounds, both undefined
+   *   CHUMP    the conventions after-window region became 44,992,964..0 and was
+   *            dropped -- 262,954 swaps, 95.6% of the token
+   *   CHUMP    the PRICES phase ran `derivePricesForLife(.., 0, 0)` and reported
+   *            0 ticks, 0 buckets, 0 written, in 9 ms, as a clean pass
+   *
+   * `dryrun` and `write` take the same two variables, so the write would have
+   * counted 0 existing rows -- a safety check whose passing answer is zero -- and
+   * stored nothing while reporting success.
+   *
+   * It is called by `run()` before every phase after `identity`, so a phase cannot
+   * be added that forgets it, and it RAISES rather than defaulting: an unresolved
+   * bound must never become a range.
+   */
+  const ensureBounds = async (rpc: RpcClient, c: PoolClient): Promise<void> => {
+    if (!head) head = await rpc.blockNumber();
+    if (!firstBlock) {
+      const row = await c.query<{ detail: { deployment_block?: number } | null }>(
+        `select detail from token_intake_state
+          where chain = $1 and token = $2 and phase = 'identity'`,
+        [cfg.chain, cfg.token],
+      );
+      const stored = row.rows[0]?.detail?.deployment_block;
+      if (typeof stored !== 'number') {
+        throw new Error(
+          'the token\'s deployment block is not in memory and the stored identity '
+            + 'report does not carry one. Every phase after identity bounds its work '
+            + 'with it, and a phase given 0 reads an empty range and reports a pass.',
+        );
+      }
+      firstBlock = stored;
+    }
+    if (!head || !firstBlock) {
+      throw new Error(
+        `unresolved bounds: firstBlock=${firstBlock}, head=${head}. A range built `
+          + 'from either is empty, and an empty range reads exactly like a clean pass.',
+      );
+    }
+  };
+
   const effective = async (c: PoolClient): Promise<Set<string>> => {
     const e = await effectiveExclusions(
       c, cfg.chain, cfg.token, exclusions.map((x) => x.address),
@@ -274,7 +323,12 @@ async function main(): Promise<void> {
     const started = Date.now();
     let out: { report: Record<string, unknown>; value?: T };
     try {
-      out = await withTransaction(app.pool, (c) => fn(rpc, c));
+      out = await withTransaction(app.pool, async (c) => {
+        // The identity phase is what PRODUCES the bounds; everything after it
+        // consumes them. See ensureBounds.
+        if (phase !== 'identity') await ensureBounds(rpc, c);
+        return fn(rpc, c);
+      });
     } catch (err) {
       await withTransaction(app.pool, (c) =>
         writePhase(c, cfg.chain, cfg.token, {
@@ -660,37 +714,10 @@ async function main(): Promise<void> {
     });
 
     /* ---- 6. sign conventions -------------------------------------------- */
-    await run('conventions', async (rpc, c) => {
+    await run('conventions', async (_rpc, c) => {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
-      /*
-       * RESOLVED FROM STORED STATE, NOT FROM VARIABLES A RESUMED RUN NEVER SET.
-       *
-       * `head` and `firstBlock` are set by the phases that fetch them, and a
-       * resumed run skips every one of those because they are already complete.
-       * On CHUMP both were 0, so the after-window region came out as
-       * `44,992,964..0`, failed `to <= from`, and was dropped in silence --
-       * 262,954 swaps, 95.6% of the token's total, never verified. Step 7 has
-       * said since AI that a STOP ends the process and anything a later phase
-       * needs must be PERSISTED; this is its third appearance.
-       */
-      if (!head) head = await rpc.blockNumber();
-      if (!firstBlock) {
-        const idRow = await c.query<{ detail: { deployment_block?: number } }>(
-          `select detail from token_intake_state
-            where chain=$1 and token=$2 and phase='identity'`,
-          [cfg.chain, cfg.token],
-        );
-        const stored = idRow.rows[0]?.detail?.deployment_block;
-        if (typeof stored !== 'number') {
-          throw new Error(
-            'the conventions phase has no deployment block: it is not in memory and '
-              + 'the stored identity report does not carry one. A region computed from '
-              + 'an unset bound is dropped rather than checked, which reads as a pass.',
-          );
-        }
-        firstBlock = stored;
-      }
-
+      // Bounds come from ensureBounds, called by run() before every phase after
+      // identity. ONE implementation -- a second one written here would drift.
       const w0 = windows[0]!;
       const regions: { label: string; from: number; to: number }[] = [
         { label: 'in-window', from: w0.startBlock!, to: w0.endBlock! },
