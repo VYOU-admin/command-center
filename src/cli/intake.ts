@@ -106,7 +106,34 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const configPath = args.find((a) => !a.startsWith('--'));
   const clearOneStop = args.includes('--continue');
-  if (!configPath) throw new Error('usage: intake <config.yaml> [--continue]');
+  /*
+   * `--redo <phase>` EXISTS BECAUSE THE DOCUMENT REQUIRES A PHASE TO BE RE-RUN.
+   *
+   * ROBINHOOD.md step 7: "ROUTER DETECTION MUST RUN AFTER THE SWEEP, NOT IN THE
+   * SCOPE PHASE... Re-run scope after the sweep, or move detection to the cohort
+   * step." Detection lives in `scope`, `scope` runs before `sweep`, and `run()`
+   * returns immediately for any phase already stored `complete` -- so the
+   * documented remedy had no way to be carried out through the runner, and the
+   * alternative was a hand-written UPDATE outside every dry-run discipline here.
+   *
+   * CHUMP is why: its scope phase probed 0 candidates and persisted 0 routers,
+   * which is indistinguishable from a token with none, and the cohort would then
+   * have been built against config/infrastructure.yaml alone -- the exact defect
+   * recorded against PONS's 13,095-wallet cohort.
+   *
+   * It clears the stored status for EXACTLY the named phase and nothing else, and
+   * it reports the row it cleared rather than asserting it did.
+   */
+  const redoIdx = args.indexOf('--redo');
+  const redoArg = redoIdx >= 0 ? args[redoIdx + 1] : undefined;
+  if (redoIdx >= 0 && (!redoArg || redoArg.startsWith('--'))) {
+    throw new Error(`--redo needs a phase name. One of: ${PHASES.join(', ')}`);
+  }
+  if (redoArg && !(PHASES as readonly string[]).includes(redoArg)) {
+    throw new Error(`--redo "${redoArg}" is not a phase. One of: ${PHASES.join(', ')}`);
+  }
+  const redo = redoArg as Phase | undefined;
+  if (!configPath) throw new Error('usage: intake <config.yaml> [--continue] [--redo <phase>]');
 
   const cfg = await loadIntakeConfig(configPath);
   const app = await bootstrap();
@@ -122,6 +149,51 @@ async function main(): Promise<void> {
     await c.query(TOKEN_UPDATE_SCHEMA);
     await c.query(STATE_SCHEMA);
   });
+
+  /*
+   * The redo is applied BEFORE the phase statuses are read, so the cleared phase
+   * is simply not `complete` when `done` is computed. The previous report is not
+   * discarded silently: it is copied to `<phase>:superseded` first, because the
+   * state table is the only record of what a phase actually did and overwriting
+   * it would destroy the very figure a re-run is meant to be compared against.
+   */
+  if (redo) {
+    await withTransaction(app.pool, async (c) => {
+      const before = await c.query<{ status: string; cu_spent: string }>(
+        `select status, cu_spent::text from token_intake_state
+          where chain = $1 and token = $2 and phase = $3`,
+        [cfg.chain, cfg.token, redo],
+      );
+      if (before.rowCount === 0) {
+        log.warn('--redo names a phase with NO STORED ROW; it would have run anyway', {
+          phase: redo,
+        });
+        return;
+      }
+      await c.query(
+        `insert into token_intake_state (chain, token, phase, status, detail, cu_spent)
+         select chain, token, phase || ':superseded', status, detail, cu_spent
+           from token_intake_state
+          where chain = $1 and token = $2 and phase = $3
+         on conflict (chain, token, phase) do update
+           set status = excluded.status, detail = excluded.detail,
+               cu_spent = excluded.cu_spent`,
+        [cfg.chain, cfg.token, redo],
+      );
+      const cleared = await c.query(
+        `update token_intake_state set status = 'redo-requested'
+          where chain = $1 and token = $2 and phase = $3`,
+        [cfg.chain, cfg.token, redo],
+      );
+      log.warn('PHASE CLEARED FOR RE-RUN', {
+        phase: redo,
+        previous_status: before.rows[0]!.status,
+        previous_cu_spent: before.rows[0]!.cu_spent,
+        rows_cleared: cleared.rowCount,
+        previous_report_kept_as: `${redo}:superseded`,
+      });
+    });
+  }
 
   const done = new Set<Phase>();
   let stoppedOn: Phase | null = null;

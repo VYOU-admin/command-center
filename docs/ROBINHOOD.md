@@ -3431,6 +3431,32 @@ against a 2,000,000 ceiling.
   **nothing**, which is the opposite of the property step 5 requires and which the
   standalone `sweep-transfers` CLI does provide. Progress is also unobservable while it
   runs, so the 3x wall-clock rule has nothing to check.
+- **FIXED 2026-09-13 — `--redo <phase>`. The runner had NO WAY TO RE-RUN A
+  COMPLETED PHASE, and step 7 requires exactly that for `scope`.** Step 7 says router detection must run after the sweep and
+  names the remedy — "Re-run scope after the sweep, or move detection to the cohort
+  step". Detection lives inside the `scope` phase, `scope` runs before the sweep, and
+  `run()` returns immediately for any phase whose stored status is `complete`. So the
+  documented remedy cannot be carried out through the runner at all: there is no
+  `--redo <phase>` and no flag of any kind.
+
+  CHUMP is the worked case. Its scope phase probed **0** candidates and persisted
+  **0** routers, which is indistinguishable from a token with none, and the cohort
+  phase would then have run against `config/infrastructure.yaml` alone — **the exact
+  defect recorded against PONS**, whose 13,095-wallet cohort was built with zero
+  behavioural routers persisted.
+
+  Without it the phase's stored status had to be reset by hand, which is a database
+  write outside the runner and therefore outside the dry-run discipline every other
+  write here obeys. `npm run intake -- <cfg> --redo scope` now clears the stored
+  status for exactly the named phase and nothing else, rejects a name that is not a
+  phase, and **copies the previous report to `<phase>:superseded` before clearing
+  it** — the state table is the only record of what a phase actually did, and
+  overwriting it would destroy the figure the re-run exists to be compared against.
+  It reports the row it cleared rather than asserting it did.
+
+  Moving detection into the cohort phase would also work and would remove the need to
+  re-run anything at all; that is the better fix and is not done.
+
 - **The runner sweeps from block 0, not from the token's deployment block.** CHUMP's
   sweep covered 61,698,121 blocks where the token has existed for 37.9M, so 23.8M
   blocks that cannot contain it were read: ~238 requests, ~14,280 CU, $0.0064 per

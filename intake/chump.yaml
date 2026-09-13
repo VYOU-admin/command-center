@@ -17,18 +17,24 @@ charted_pair: "0x714442e9a611f8561a7df108d6d925132937cfb8"
 
 # THE START BOUND IS AN INSTANT ONE SECOND BEFORE THE DEPLOYMENT BLOCK'S SECOND.
 #
-# The intent was "start where the token starts". An instant cannot name a block
-# here -- ten blocks share each timestamp (section 3) -- so this resolves to
-# 23,791,940, which is 10 blocks before the deployment block 23,791,950. That is
-# harmless: no CHUMP exists before it was deployed, so the cohort is identical and
-# only metric 3's denominator moves, by 10 blocks in 21,201,023.
+# The intent was "start where the token starts", and THROUGH THE RUNNER IT LANDS
+# EXACTLY THERE: `resolveWindows` passes the deployment block as the search's low
+# bound and `blockForInstant` opens `if (target <= loTs) return lo`, so this instant
+# returns 23,791,950 itself. Verified against the stored `windows:resolved` row.
 #
-# A block-valued bound would express the intent exactly and is recorded in section
-# 9 as a PROPOSAL. It was deliberately not made inside this intake: a window bound
-# decides cohort membership, metric 3 and the token_windows row.
+# CORRECTED 2026-09-13. This comment previously said the bound resolves to
+# 23,791,940 -- which is what the same instant gives when the search starts at
+# block 1, and is NOT what the runner produced. A config comment asserting
+# something the data contradicts is the defect section 9 already records against
+# `intake/index.yaml`; it is fixed here rather than repeated.
+#
+# An instant still cannot NAME a block here -- ten blocks share each timestamp
+# (section 3) -- so a block-valued bound is recorded in section 9 as a PROPOSAL.
+# It was deliberately not made inside this intake: a window bound decides cohort
+# membership, metric 3 and the token_windows row.
 windows:
   - label: CHUMP-P1
-    start: "2026-07-31T01:44:30+00:00"     # -> block 23,791,940, measured
+    start: "2026-07-31T01:44:30+00:00"     # -> block 23,791,950, measured (clamped)
     end:   "2026-08-24T12:00:00-04:00"     # -> block 44,992,963, measured
 
 # Both pump points sit at or after the window end. That is intended; step 13's
