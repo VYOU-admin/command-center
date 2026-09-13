@@ -1338,10 +1338,68 @@ independently — blocks 1,680,559, 3,005,932 and 5,354,209 — give 1,708.53,
 by a run that saw the whole bucket; recomputing gains nothing and silently
 replaces reviewed history. Three were rewritten before this was caught.
 
-That rule is why the ~30 divergent buckets above were **left exactly as they
-are**, and it is now in tension with evidence that some of them are wrong by up to
-43%. The tension is real and unresolved; it is an operator decision recorded in
-section 9, not something to settle by quietly overwriting history.
+#### THE ONE EXCEPTION, approved 2026-09-13
+
+**"Never rewrite a stored bucket" now has a single exception: when the stored
+value is KNOWN WRONG and the replacement is BETTER FOUNDED.** Both halves are
+required, and neither is a matter of opinion:
+
+- **Known wrong** is a same-bucket disagreement against an independent derivation,
+  not a hunch and not a thin tick count on its own.
+- **Better founded** means, precisely: the replacement is derived from the market
+  that *is* the quantity being measured, from **1,710–6,421 ticks** per bucket
+  against the stored value's **1–11**, and it agrees with transactions decoded by
+  hand while the stored value does not. Blocks 1,680,559, 3,005,932 and 5,354,209
+  give 1,708.53, 1,771.72 and 1,743.24; the stored buckets nearby say $1,239.
+
+**A tighter number is NOT grounds on its own.** The original rule exists because
+recomputing a bucket gains nothing and silently replaces reviewed history, and
+that still holds for a bucket that merely has more ticks. What lifts it here is
+that the two derivations disagree materially *on the same bucket* and one of them
+is independently corroborated.
+
+**The measurement, same-bucket rather than adjacent.** An earlier figure of "~30
+wrong buckets" came from comparing each market bucket with a token-derived bucket
+within ±20,000 blocks, which double-counts. Deriving the market value **for the
+same bucket** gives 291 comparable buckets:
+
+```
+compared                        291
+mean disagreement              4.47%
+median                         3.22%
+maximum                       43.15%
+over 10%                         18   <- the set overwritten
+over  5%                         94
+over  2%                        194
+```
+
+**The threshold is 10%, and the reason it is not lower is this document's own
+tolerance.** Section 1 says dollar approximation is acceptable; the calibration in
+use is that USD error up to about 5% changes no decision. So 2–5% is noise nobody
+acts on and rewriting it would spend reviewed history to gain nothing. **Between 5%
+and 10% is a judgement call that was NOT taken** — 76 further buckets sit there and
+they stand.
+
+**Every overwrite is recorded, not replaced.** `native_usd_prices_history` keeps
+the old value, its tick count, its source and the reason, so the rewrite is
+auditable and reversible. Overwriting reviewed history without a trail would be
+worse than the error.
+
+**What it moved, measured before writing:**
+
+```
+buckets overwritten                18   of 291 compared
+rows in those buckets, INDEX      786   506 trades, 280 transfers
+rows in those buckets, PONS       161   137 trades,  24 transfers
+rows in those buckets, AI           0   <- AI reads residue 1433, not 3150
+trade rows that actually REPRICE  621   484 INDEX/ETH + 137 PONS/WETH
+INDEX USDG trade rows unchanged    22   a stablecoin resolves to 1, no series read
+transfer rows unchanged           304   null by definition
+```
+
+**AI's zero is the fragmentation in section 9 showing through.** AI's buckets sit
+at residue 1433 and it never reads a residue-3150 bucket, so a repair on this grid
+cannot reach it. AI's own series has the same defect and has not been examined.
 
 **Only whole buckets are written.** A bucket straddling the edge of a range is
 computed from a fraction of its ticks.
@@ -2692,16 +2750,16 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   further. The fix is a chain anchor for `native_usd_prices` plus a resolver that
   uses it for the native series while keeping the token's anchor for the token's
   own and for bridges.
-- **Roughly 30 stored ETH/USD buckets are wrong by more than 10%, up to 42.91%,
-  and the rule against rewriting them is protecting the error.** Measured
-  2026-09-13 against the market series on 245 adjacent pairs: mean 5.70%, median
-  3.63%, max **42.91%**, and every one of the worst rests on **2–3 USD ticks**.
-  Three independently decoded transactions side with the market. The dedicated
-  market could replace each with a median 2,201 ticks. "Never rewrite a stored
-  bucket" is the older rule and it won, so they stand — **but they are now known
-  to be wrong, not merely thin**, and every AI, PONS and INDEX row priced in them
-  carries that error. Resolving the tension is an operator decision and has not
-  been made.
+- **76 stored ETH/USD buckets disagree with the market by 5–10% and still stand.**
+  The 18 over 10% were overwritten on 2026-09-13 under the exception recorded in
+  step 10; 2–5% is inside the tolerance nobody acts on; **5–10% was a judgement
+  call that was not taken.** Same-bucket measurement: 291 compared, mean 4.47%,
+  median 3.22%, 194 over 2%, 94 over 5%, 18 over 10%.
+- **AI's own ETH/USD buckets have never been examined for this.** The repair ran on
+  the residue-3150 grid, which AI does not read — **0 AI rows were affected**. Its
+  4,172 buckets at residue 1433 were derived the same by-product way and are
+  presumed to carry the same defect. Examining them needs the market derivation run
+  on AI's grid, which is cheap now that the market swaps are stored.
 - **The chain's ETH/USD series was an accident of which tokens were loaded, and
   a dedicated market existed that nothing read.** FIXED 2026-09-13; kept for the
   lesson. `native_usd_prices` is
