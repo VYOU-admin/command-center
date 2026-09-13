@@ -679,6 +679,42 @@ out-of-scope pool look like a distributor.
 of 2,459,873 swaps — 31%**. The other 1.46M happened after it closed, and they
 are exactly the sell-side data that cost basis and realised PnL depend on.
 
+**"FULL CHAIN LIFE" MEANS THE TOKEN'S LIFE, AND THE SWEEP STARTS AT THE DEPLOYMENT
+BLOCK.** A block before the token existed cannot contain one of its logs, so every
+request over that range is guaranteed to match nothing. CHUMP swept from block 0 and
+the waste is measured, not estimated — from `token_sweep_progress`, which records one
+row per request:
+
+```
+sweep ranges recorded                         1,853   x 60 CU = 111,180 CU
+   + one eth_blockNumber                                        111,190  <- the phase cost, exactly
+ranges ENTIRELY BELOW the deployment block      711   237 per stream x 3 streams
+logs those 711 requests returned                  0   <- the proof they could hold nothing
+                                             ------
+wasted                                       42,660 CU = $0.0192
+```
+
+**That is 38.4% of the sweep and 30.0% of CHUMP's whole 142,378 CU intake**, spent
+reading 23,791,950 blocks that pre-date the token. An earlier figure here of
+"~238 requests, ~14,280 CU" was **per stream and understated the total threefold** —
+there are three streams (`swap-v3`, `swap-v4`, `transfer`) and each paid the tax.
+
+**The waste grows with how LATE the token was deployed**, which is the opposite of
+the intuition that an old token is the expensive one. It is
+`ceil(deployment_block / max_log_span_blocks) x 3 streams x 60 CU`, so at the
+100,000-block cap that is **180 CU per 100,000 blocks of chain the token missed**:
+
+| deployed at | wasted requests | wasted CU | |
+|---|---|---|---|
+| 23.8M (CHUMP) | 711 | 42,660 | $0.019 |
+| 40M | 1,200 | 72,000 | $0.032 |
+| 55M | 1,650 | 99,000 | $0.045 |
+| a token launched today | ~1,854 | ~111,000 | ~$0.050 |
+
+**A token launched now would spend its ENTIRE sweep budget on blocks that cannot
+contain it.** CASHCAT's deployment block is not known until its identity phase runs,
+so quote its saving from that figure and not from CHUMP's.
+
 ```
 v3   address = the in-scope pool addresses, topic0 = Swap_v3
 v4   address = the PoolManager, topic0 = Swap_v4, topics[1] = the pool ids
@@ -4056,17 +4092,35 @@ against a 2,000,000 ceiling.
   Moving detection into the cohort phase would also work and would remove the need to
   re-run anything at all; that is the better fix and is not done.
 
-- **STILL OPEN: the runner sweeps from block 0, not from the token's deployment
-  block.** CHUMP's sweep covered 61,698,121 blocks where the token has existed for
-  37.9M, so 23.8M blocks that cannot contain it were read: ~238 requests, ~14,280 CU,
-  $0.0064 per stream-set, and it is most of why the sweep came in **1.95x over
-  estimate — 111,190 CU against ~56,880**. Step 5's "sweep full chain life" means the
-  TOKEN's life. The deployment block is already known — the identity phase stores it
-  and passes it as `firstBlock` to the windows phase — so this is a one-line scope fix,
-  not a new measurement. **It was not fixed during CHUMP's load and CASHCAT pays the
-  same tax**: the sweep is by far the largest cost of an intake (111,190 of CHUMP's
-  142,378 CU, 78%), and this is a fixed ~14,280 CU of it wasted per stream-set on every
-  future token, growing as the chain does.
+- **FIXED 2026-09-14: the runner swept from block 0 rather than the token's
+  deployment block — and it had ALREADY BEEN FIXED BY ACCIDENT, which nobody
+  checked.** CHUMP's sweep read 23,791,950 blocks that cannot contain the token:
+  **711 of its 1,853 recorded requests, 42,660 CU, $0.0192 — 38.4% of the sweep and
+  30.0% of the whole intake** — and those 711 requests returned **0 logs between
+  them**, which is the proof rather than the argument.
+
+  **The accident is the part worth recording.** `ensureBounds`, added the day before
+  for an unrelated defect, resolves `firstBlock` from the stored identity report
+  before every phase after `identity` — so from that commit onward the sweep was
+  already starting at the deployment block. Nothing said so, no test covered it, and
+  the document still carried the defect as open. **A fix that arrives as a side
+  effect of another fix is indistinguishable from no fix at all until someone reads
+  the code path end to end.** The `|| 1` fallbacks at the `windows` and `pools` call
+  sites were dead for the same reason and are removed, because a fallback that can
+  never fire hides the guarantee it was standing in for.
+
+  **A SECOND DEFECT WAS INTRODUCED BY THAT SAME FIX, and it is live.** `ensureBounds`
+  resolves `head` from `max(to_block)` over `token_sweep_progress` whenever a sweep
+  exists. That is right for every phase AFTER the sweep — they must be bounded by
+  blocks actually read — and **wrong for the sweep itself**: on `--redo sweep` the
+  sweep would be bounded by where the *previous* sweep stopped, could never extend to
+  the current head, and `checkCoverage` would report clean coverage over a stale
+  range. The same applies to `pools` and `scope`, which enumerate against the chain.
+  `LIVE_HEAD_PHASES` now names the four phases that read the chain — `windows`,
+  `pools`, `scope`, `sweep` — and they take the live head; everything after takes the
+  swept one. **A bound that is correct for one half of a pipeline and wrong for the
+  other cannot be a single value**, which is what the first version of `ensureBounds`
+  assumed.
 - **`decodeSwap` threw a bare TypeError on a v4 log with no `topics[1]`.** FIXED
   2026-09-13. A v4 pool id lives in `topics[1]`, so a log reconstructed from stored
   columns has none, and the conventions phase died three frames down with

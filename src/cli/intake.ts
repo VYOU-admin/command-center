@@ -68,6 +68,25 @@ import { compareToList, detectRouters, effectiveExclusions } from '../intake/rou
 
 const INFRASTRUCTURE_PATH = 'config/infrastructure.yaml';
 
+/**
+ * THE PHASES THAT READ THE CHAIN, AND THEREFORE NEED THE LIVE HEAD.
+ *
+ * `ensureBounds` resolves `head` from `max(to_block)` over `token_sweep_progress`
+ * once a sweep exists, which is right for every phase AFTER the sweep -- they must
+ * be bounded by blocks that were actually read -- and wrong for the sweep itself.
+ * On `--redo sweep` the sweep would otherwise be bounded by where the PREVIOUS
+ * sweep stopped, never extend to the current head, and `checkCoverage` would
+ * report clean coverage over a stale range.
+ *
+ * A bound that is correct for one half of a pipeline and wrong for the other
+ * cannot be a single value. These four enumerate or sweep against the chain and
+ * all carry a real CU ceiling, so an `eth_blockNumber` is affordable in them; the
+ * phases after the sweep carry a ceiling of 0 and must take the free route.
+ */
+const LIVE_HEAD_PHASES: ReadonlySet<Phase> = new Set<Phase>([
+  'windows', 'pools', 'scope', 'sweep',
+]);
+
 class Stop extends Error {
   constructor(
     readonly phase: Phase,
@@ -280,7 +299,9 @@ async function main(): Promise<void> {
    * be added that forgets it, and it RAISES rather than defaulting: an unresolved
    * bound must never become a range.
    */
-  const ensureBounds = async (rpc: RpcClient, c: PoolClient): Promise<void> => {
+  const ensureBounds = async (
+    rpc: RpcClient, c: PoolClient, phase: Phase,
+  ): Promise<void> => {
     /*
      * HEAD COMES FROM WHAT WAS SWEPT, NOT FROM THE CHAIN, ONCE A SWEEP EXISTS.
      *
@@ -299,13 +320,18 @@ async function main(): Promise<void> {
      * all carry a real ceiling, so the RPC route is taken then.
      */
     if (!head) {
-      const swept = await c.query<{ to_block: string | null }>(
-        `select max(to_block)::text as to_block from token_sweep_progress
-          where chain = $1 and token = $2`,
-        [cfg.chain, cfg.token],
-      );
-      const sweptHead = Number(swept.rows[0]?.to_block ?? 0);
-      head = sweptHead > 0 ? sweptHead : await rpc.blockNumber();
+      if (LIVE_HEAD_PHASES.has(phase)) {
+        // Reads the chain, so it must see where the chain actually is.
+        head = await rpc.blockNumber();
+      } else {
+        const swept = await c.query<{ to_block: string | null }>(
+          `select max(to_block)::text as to_block from token_sweep_progress
+            where chain = $1 and token = $2`,
+          [cfg.chain, cfg.token],
+        );
+        const sweptHead = Number(swept.rows[0]?.to_block ?? 0);
+        head = sweptHead > 0 ? sweptHead : await rpc.blockNumber();
+      }
     }
     if (!firstBlock) {
       const row = await c.query<{ detail: { deployment_block?: number } | null }>(
@@ -351,7 +377,7 @@ async function main(): Promise<void> {
       out = await withTransaction(app.pool, async (c) => {
         // The identity phase is what PRODUCES the bounds; everything after it
         // consumes them. See ensureBounds.
-        if (phase !== 'identity') await ensureBounds(rpc, c);
+        if (phase !== 'identity') await ensureBounds(rpc, c, phase);
         return fn(rpc, c);
       });
     } catch (err) {
@@ -413,7 +439,11 @@ async function main(): Promise<void> {
     /* ---- 2. windows ----------------------------------------------------- */
     const win = await run('windows', async (rpc, c) => {
       if (!head) head = await rpc.blockNumber();
-      const resolved = await resolveWindows(rpc, cfg, firstBlock || 1, head);
+      /*
+       * `firstBlock` is the DEPLOYMENT BLOCK, guaranteed non-zero by ensureBounds.
+       * The `|| 1` that stood here could never fire and hid that guarantee.
+       */
+      const resolved = await resolveWindows(rpc, cfg, firstBlock, head);
       /*
        * PERSISTED, because a later phase may run in a LATER INVOCATION. Every
        * STOP ends the process, so the phase after it starts with none of this
@@ -477,7 +507,7 @@ async function main(): Promise<void> {
         );
       };
       const found = await discoverPools(
-        rpc, cfg, firstBlock || 1, head, sweepStream, head,
+        rpc, cfg, firstBlock, head, sweepStream, head,
       );
       /*
        * ROBINHOOD.md step 3: if a token resolves to a very large number of
@@ -631,7 +661,44 @@ async function main(): Promise<void> {
     /* ---- 5. sweep -------------------------------------------------------- */
     await run('sweep', async (rpc, c) => {
       pools = await loadPools(c, cfg.chain, cfg.token);
-      if (!head) head = await rpc.blockNumber();
+      /*
+       * STEP 5'S "FULL CHAIN LIFE" MEANS THE TOKEN'S LIFE. A block before the
+       * token existed cannot hold one of its logs, so every request over that
+       * range is guaranteed to match nothing.
+       *
+       * CHUMP swept from block 0 and paid for it: 711 of its 1,853 recorded
+       * requests fell entirely below block 23,791,950 and returned 0 logs between
+       * them -- 42,660 CU, 38.4% of the sweep.
+       *
+       * The start comes from ensureBounds, and this ASSERTS it rather than
+       * trusting it. The block-0 sweep was fixed as an accidental side effect of
+       * ensureBounds and stayed unnoticed because nothing checked; a silent
+       * dependency regresses silently, and the only symptom is a larger bill.
+       */
+      const idRow = await c.query<{ detail: { deployment_block?: number } | null }>(
+        `select detail from token_intake_state
+          where chain = $1 and token = $2 and phase = 'identity'`,
+        [cfg.chain, cfg.token],
+      );
+      const deployment = idRow.rows[0]?.detail?.deployment_block;
+      if (typeof deployment !== 'number' || deployment <= 0) {
+        throw new Error(
+          'the sweep has no stored deployment block to start from. Sweeping from 0 '
+            + 'reads every block before the token existed, which can only ever return '
+            + 'nothing while costing 60 CU a request.',
+        );
+      }
+      if (firstBlock !== deployment) {
+        throw new Error(
+          `the sweep would start at ${firstBlock} but ${cfg.ticker} was deployed at `
+            + `${deployment}. Sweeping below the deployment block reads ranges that `
+            + 'cannot contain the token; sweeping above it misses real logs.',
+        );
+      }
+      log.info('sweep range', {
+        from: firstBlock, to: head, blocks: head - firstBlock + 1,
+        blocks_before_deployment_skipped: firstBlock,
+      });
       const v3 = [...pools.values()].filter((p) => p.venue === 'v3').map((p) => p.pool);
       const v4 = [...pools.values()].filter((p) => p.venue === 'v4').map((p) => p.pool);
       const totals: Record<string, number> = { v3: 0, v4: 0, transfer: 0 };
