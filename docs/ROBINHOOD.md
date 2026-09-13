@@ -246,12 +246,20 @@ one-second ambiguity on a bound specified to the hour changes no cohort, so
 **PONS, AI and INDEX are unaffected and their bounds are not in question.**
 
 What it does mean is that **a bound given as an instant lands on the first block of
-its second, which may be up to nine blocks earlier than a specific block somebody
-had in mind.** Where the intended bound IS a specific block, say so and check which
-block the instant resolves to rather than assuming they coincide. CHUMP is the
-worked example: `2026-07-31T01:44:30+00:00` resolves to 23,791,940, ten blocks
-before its deployment at 23,791,950, which is harmless because no CHUMP exists
-before deployment.
+its second within the range searched**, which may be earlier than a specific block
+somebody had in mind. Where the intended bound IS a specific block, check which block
+the instant resolves to rather than assuming they coincide.
+
+**The low bound of the search matters as much as the instant, and that is what
+settles it in practice.** `resolveWindows` passes the token's DEPLOYMENT BLOCK as
+`firstBlock`, and `blockForInstant` opens with `if (target <= loTs) return lo` — so
+an instant at or before the deployment block's timestamp returns the deployment block
+itself. CHUMP is the worked example: `2026-07-31T01:44:30+00:00` against a deployment
+at 23,791,950 whose timestamp is 1785462271 resolves to **23,791,950**, not to
+23,791,940 which is where the same instant lands when the search starts at block 1.
+**A window cannot begin before the token exists, and the clamp is what guarantees
+it** — worth knowing, because the same instant gives two answers depending on the
+low bound, and only one of them is reachable through the runner.
 
 **Blockscout is not usable programmatically.** Every API path tested returns
 HTTP 403 behind a Cloudflare interstitial. It is a link target for humans.
@@ -3272,8 +3280,10 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   this chain** (section 3), so where the intended bound is a specific block — a
   deployment block, a window that starts where the token starts — an instant cannot
   express it exactly. Evidence: ten blocks share timestamp 1785462270, and
-  CHUMP-P1's start instant resolves to 23,791,940 where its deployment is
-  23,791,950.
+  CHUMP-P1's start instant would resolve to 23,791,940 if the search began at block
+  1. Through the runner it resolves to the deployment block 23,791,950, because
+  `resolveWindows` clamps the low bound to it — so the proposal is about expressing
+  intent directly, not about a wrong answer being produced today.
 
   It is recorded as a proposal because **a window bound is the most load-bearing
   definition in this document** — it decides cohort membership, metric 3's
