@@ -281,3 +281,312 @@ export const swapV3Topic = TOPICS.swapV3;
 export const swapV4Topic = TOPICS.swapV4;
 
 void log;
+
+/* ------------------------------------------------------------------- the sweep */
+
+const NATIVE_ETH = '0x0000000000000000000000000000000000000000';
+const BATCH_ROWS = 500;
+
+export interface WatchRow {
+  wallet: string;
+  token: string;
+  side: 'buy' | 'sell';
+  venue: 'v3' | 'v4';
+  pool: string;
+  counterparty: string;
+  txHash: string;
+  logIndex: number;
+  block: number;
+  blockTime: Date;
+  tokenAmount: string;
+  usdAmount: number | null;
+}
+
+export interface SweepReport {
+  transfersMatched: number;
+  candidates: number;
+  trades: number;
+  rejectedNoPoolCounterparty: number;
+  rejectedNoSwapOnThatPool: number;
+  rejectedTokenNotInPool: number;
+  walletToWallet: number;
+  poolsClassified: number;
+  decimalsRead: number;
+  usdPriced: number;
+  usdNull: number;
+  nullReasons: Record<string, number>;
+  rows: WatchRow[];
+}
+
+const signed = (hex: string): bigint => {
+  let v = BigInt('0x' + hex);
+  if (v >= 1n << 255n) v -= 1n << 256n;
+  return v;
+};
+
+const formatUnits = (raw: bigint, decimals: number): string => {
+  const neg = raw < 0n; const abs = neg ? -raw : raw;
+  const s = abs.toString().padStart(decimals + 1, '0');
+  const whole = s.slice(0, s.length - decimals);
+  const frac = decimals > 0 ? '.' + s.slice(s.length - decimals) : '';
+  return (neg ? '-' : '') + whole + frac;
+};
+
+/**
+ * ETH/USD at a block, by NEAREST PRECEDING BUCKET.
+ *
+ * Everywhere else an exact-bucket lookup is required, because a token's rows live
+ * on that token's fixed grid. The watcher has no grid: it prices arbitrary tokens,
+ * and `native_usd_prices` holds two interleaved residues. Taking the greatest
+ * bucket at or below the block, within one bucket width, reads whichever grid is
+ * nearer rather than missing both. Documented in step 17 as a deliberate
+ * departure; this is a signal feed, not the accounting record.
+ */
+async function ethUsdAt(
+  client: PoolClient, chain: string, block: number, bucketBlocks: number,
+): Promise<number | null> {
+  const r = await client.query<{ px: string }>(
+    `select eth_usd::text px from native_usd_prices
+      where chain = $1 and block_number <= $2 and block_number > $2 - $3
+      order by block_number desc limit 1`,
+    [chain, block, bucketBlocks],
+  );
+  const v = r.rows[0] ? Number(r.rows[0].px) : null;
+  return v !== null && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+export async function sweepWatchlistActivity(
+  client: PoolClient,
+  rpc: RpcClient,
+  chain: string,
+  cfg: {
+    v4PoolManager: string; usdAsset: string; nativeAssets: string[];
+    maxLogSpanBlocks: number; minLogSpanBlocks: number; sparseLogSpanBlocks: number;
+    bucketBlocks: number;
+  },
+  wallets: string[],
+  fromBlock: number,
+  toBlock: number,
+): Promise<SweepReport> {
+  const walletSet = new Set(wallets);
+  const poolManager = cfg.v4PoolManager.toLowerCase();
+  const usdAsset = cfg.usdAsset.toLowerCase();
+  const natives = new Set(cfg.nativeAssets.map((a) => a.toLowerCase()));
+  const rep: SweepReport = {
+    transfersMatched: 0, candidates: 0, trades: 0,
+    rejectedNoPoolCounterparty: 0, rejectedNoSwapOnThatPool: 0,
+    rejectedTokenNotInPool: 0, walletToWallet: 0,
+    poolsClassified: 0, decimalsRead: 0, usdPriced: 0, usdNull: 0,
+    nullReasons: {}, rows: [],
+  };
+  const nullBecause = (why: string): void => {
+    rep.usdNull += 1;
+    rep.nullReasons[why] = (rep.nullReasons[why] ?? 0) + 1;
+  };
+
+  /* 1. the wallet-keyed transfer filters, chunked at 500 per step 5 */
+  const seen = new Set<string>();
+  const transfers: LogEntry[] = [];
+  for (const c of chunk(wallets, WALLET_CHUNK)) {
+    const topics = c.map(addressTopic);
+    for (const position of [1, 2] as const) {
+      const filter = position === 1
+        ? { topics: [TOPICS.transfer, topics] }
+        : { topics: [TOPICS.transfer, null, topics] };
+      const got = await rpc.getLogs(
+        filter, fromBlock, toBlock, cfg.maxLogSpanBlocks, cfg.minLogSpanBlocks,
+      );
+      for (const l of got) {
+        // A transfer with both sides on the watchlist matches both filters.
+        const k = `${l.transactionHash}:${l.logIndex}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        transfers.push(l);
+      }
+    }
+  }
+  rep.transfersMatched = transfers.length;
+  if (transfers.length === 0) return rep;
+
+  /* 2. candidates: a watchlist side, a counterparty, an amount */
+  interface Cand {
+    log: LogEntry; token: string; wallet: string; side: 'buy' | 'sell';
+    counterparty: string; raw: bigint; block: number;
+  }
+  const cands: Cand[] = [];
+  for (const l of transfers) {
+    const t1 = l.topics[1]; const t2 = l.topics[2];
+    if (!t1 || !t2) continue;
+    const body = l.data.replace(/^0x/, '');
+    if (body.length < 64) continue; // non-standard Transfer; no amount to read
+    const raw = BigInt('0x' + body.slice(0, 64));
+    if (raw === 0n) continue;
+    const from = addressFromTopic(t1); const to = addressFromTopic(t2);
+    const token = l.address.toLowerCase();
+    const block = Number(BigInt(l.blockNumber));
+    const fromIn = walletSet.has(from); const toIn = walletSet.has(to);
+    if (fromIn && toIn) { rep.walletToWallet += 1; continue; }
+    if (toIn) cands.push({ log: l, token, wallet: to, side: 'buy', counterparty: from, raw, block });
+    else if (fromIn) cands.push({ log: l, token, wallet: from, side: 'sell', counterparty: to, raw, block });
+  }
+  rep.candidates = cands.length;
+  if (cands.length === 0) return rep;
+
+  /* 3. the Swap logs. Step 11's second half, and for v4 the only source of pool identity. */
+  const v3Candidates = [...new Set(cands.map((c) => c.counterparty)
+    .filter((a) => a !== poolManager && a !== NATIVE_ETH))];
+  const v4Swaps = new Map<string, { pool: string; a0: bigint; a1: bigint }[]>();
+  const v3Swaps = new Map<string, { pool: string; a0: bigint; a1: bigint }[]>();
+
+  if (cands.some((c) => c.counterparty === poolManager)) {
+    const logs = await rpc.getLogs(
+      { address: poolManager, topics: [TOPICS.swapV4] },
+      fromBlock, toBlock, cfg.maxLogSpanBlocks, cfg.minLogSpanBlocks,
+    );
+    for (const l of logs) {
+      const body = l.data.replace(/^0x/, '');
+      if (body.length < 128 || !l.topics[1]) continue;
+      const list = v4Swaps.get(l.transactionHash) ?? [];
+      list.push({ pool: l.topics[1].toLowerCase(), a0: signed(body.slice(0, 64)), a1: signed(body.slice(64, 128)) });
+      v4Swaps.set(l.transactionHash, list);
+    }
+  }
+  if (v3Candidates.length) {
+    const logs = await rpc.getLogs(
+      { address: v3Candidates, topics: [TOPICS.swapV3] },
+      fromBlock, toBlock, cfg.maxLogSpanBlocks, cfg.minLogSpanBlocks,
+    );
+    for (const l of logs) {
+      const body = l.data.replace(/^0x/, '');
+      if (body.length < 128) continue;
+      const list = v3Swaps.get(l.transactionHash) ?? [];
+      list.push({ pool: l.address.toLowerCase(), a0: signed(body.slice(0, 64)), a1: signed(body.slice(64, 128)) });
+      v3Swaps.set(l.transactionHash, list);
+    }
+  }
+
+  /* 4. classify, match, price */
+  const poolCache = await loadPoolCache(client, chain);
+  const decCache = new Map<string, number | null>();
+  const cacheSizeBefore = poolCache.size;
+  const head = toBlock;
+
+  for (const c of cands) {
+    const isV4 = c.counterparty === poolManager;
+    let matched: { venue: 'v3' | 'v4'; pool: string; info: PoolInfo; a0: bigint; a1: bigint } | null = null;
+
+    if (isV4) {
+      const swaps = v4Swaps.get(c.log.transactionHash) ?? [];
+      if (swaps.length === 0) { rep.rejectedNoSwapOnThatPool += 1; continue; }
+      let sawPool = false;
+      for (const s of swaps) {
+        const info = await classifyV4(client, rpc, chain, s.pool, poolCache,
+          poolManager, head, cfg.sparseLogSpanBlocks);
+        if (info.kind !== 'v4') continue;
+        sawPool = true;
+        if (info.currency0 === c.token || info.currency1 === c.token) {
+          matched = { venue: 'v4', pool: s.pool, info, a0: s.a0, a1: s.a1 };
+          break;
+        }
+      }
+      if (!matched) { if (sawPool) rep.rejectedTokenNotInPool += 1; else rep.rejectedNoSwapOnThatPool += 1; continue; }
+    } else {
+      const info = await classifyV3(client, rpc, chain, c.counterparty, poolCache, head);
+      if (info.kind !== 'v3') { rep.rejectedNoPoolCounterparty += 1; continue; }
+      if (info.currency0 !== c.token && info.currency1 !== c.token) {
+        rep.rejectedTokenNotInPool += 1; continue;
+      }
+      const s = (v3Swaps.get(c.log.transactionHash) ?? []).find((x) => x.pool === c.counterparty);
+      if (!s) { rep.rejectedNoSwapOnThatPool += 1; continue; }
+      matched = { venue: 'v3', pool: c.counterparty, info, a0: s.a0, a1: s.a1 };
+    }
+
+    const dec = await tokenDecimals(client, rpc, chain, c.token, decCache);
+    if (dec === null) {
+      /*
+       * NO DECIMALS MEANS NO AMOUNT WE CAN STATE. token_amount is NOT NULL by
+       * design -- a row that cannot say how much moved is not a row -- so this is
+       * skipped rather than written with a guessed 18.
+       */
+      nullBecause('token decimals unreadable; row skipped entirely');
+      continue;
+    }
+
+    /* USD from the counter side, which needs no series for the token itself. */
+    const tokenIsSide0 = matched.info.currency0 === c.token;
+    const counter = (tokenIsSide0 ? matched.info.currency1 : matched.info.currency0) ?? '';
+    const counterRaw = tokenIsSide0 ? matched.a1 : matched.a0;
+    const tokenRaw = tokenIsSide0 ? matched.a0 : matched.a1;
+    let usd: number | null = null;
+    if (counter === usdAsset) {
+      usd = Math.abs(Number(counterRaw)) / 1e6;
+    } else if (natives.has(counter)) {
+      const px = await ethUsdAt(client, chain, c.block, cfg.bucketBlocks);
+      if (px === null) nullBecause('no ETH/USD bucket within one bucket width');
+      else usd = (Math.abs(Number(counterRaw)) / 1e18) * px;
+    } else {
+      nullBecause('counter asset is not a recognised pricing asset and has no series');
+    }
+    /*
+     * Allocate by this wallet's share of the token the swap moved, so two
+     * watchlist wallets in one swap do not each claim the whole of it.
+     */
+    if (usd !== null) {
+      const swapTok = Math.abs(Number(tokenRaw));
+      const mine = Number(c.raw);
+      const share = swapTok > 0 ? Math.min(1, mine / swapTok) : 1;
+      usd *= share;
+      rep.usdPriced += 1;
+    }
+
+    const ts = c.log.blockTimestamp;
+    if (!ts || ts === '0x0') {
+      /*
+       * block_time is NOT NULL, and a 0x0 is what the public RPC returns for every
+       * log. Storing it would stamp the row 1970 with nothing raised.
+       */
+      throw new Error(
+        `transfer ${c.log.transactionHash}:${c.log.logIndex} has blockTimestamp `
+        + `${String(ts)}. On Alchemy that is a defect, not midnight 1970.`,
+      );
+    }
+    rep.trades += 1;
+    rep.rows.push({
+      wallet: c.wallet, token: c.token, side: c.side, venue: matched.venue,
+      pool: matched.pool, counterparty: c.counterparty,
+      txHash: c.log.transactionHash, logIndex: Number(BigInt(c.log.logIndex)),
+      block: c.block, blockTime: new Date(Number(BigInt(ts)) * 1000),
+      tokenAmount: formatUnits(c.raw, dec), usdAmount: usd,
+    });
+  }
+  rep.poolsClassified = poolCache.size - cacheSizeBefore;
+  rep.decimalsRead = decCache.size;
+  return rep;
+}
+
+/** Batched, per section 7: one row per statement fsyncs the WAL per row. */
+export async function persistWatchRows(
+  client: PoolClient, chain: string, rows: WatchRow[],
+): Promise<number> {
+  let stored = 0;
+  for (let i = 0; i < rows.length; i += BATCH_ROWS) {
+    const batch = rows.slice(i, i + BATCH_ROWS);
+    const vals: string[] = [];
+    const params: unknown[] = [chain];
+    for (const r of batch) {
+      const b = params.length;
+      vals.push(`($1,$${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12})`);
+      params.push(r.wallet, r.token, r.side, r.venue, r.pool, r.counterparty,
+        r.txHash, r.logIndex, r.block, r.blockTime, r.tokenAmount, r.usdAmount);
+    }
+    const res = await client.query(
+      `insert into watchlist_activity
+         (chain, wallet, token, side, venue, pool, counterparty, tx_hash, log_index,
+          block_number, block_time, token_amount, usd_amount)
+       values ${vals.join(',')} on conflict do nothing`,
+      params,
+    );
+    stored += res.rowCount ?? 0;
+  }
+  return stored;
+}

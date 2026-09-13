@@ -1,0 +1,45 @@
+# The watcher: what the watchlist wallets trade, on ANY token on the chain.
+#
+# ITS OWN MONITOR, not part of wallet-scores. The watchlist REBUILD lives beside
+# scoring because both are free and have no cursor; this is cursor-driven and
+# spends compute units, and step 13 is explicit that coupling a free job to a
+# metered one means a ceiling or a rate limit stops the free one too.
+#
+# MEASURED before it was built: the wallet-keyed transfer filter runs at
+# 0.026492 logs/block over 120,000 blocks sampled near head, so the natural span
+# at the 6,000-log target is 226,486 blocks and the 100,000-block cap binds
+# instead of density. That means 6 requests per slice -- 3 wallet chunks x 2
+# directions -- regardless of slice size, for 360 CU and $0.00016 a run.
+
+id: watchlist-watch
+name: Watchlist Watch
+source: watchlist-watch
+
+enabled: true
+
+# Every 30 minutes, matching wallet-scores, so the watchlist a run uses is never
+# more than one scoring cycle stale.
+schedule: 30m
+
+alerts:
+  # FAILURES go to system like every other monitor. The activity alert itself is
+  # routed to crypto_screener from inside the adapter.
+  channel: system
+  discord_on_consecutive_failures: 2
+
+options:
+  chain: robinhood
+  # Supplies the venues, the pricing assets and the bucket width. INDEX's config
+  # is used because it reads the residue-3150 native grid; the watcher's own
+  # lookup is nearest-preceding-bucket, so the anchor does not bind it.
+  config: intake/index.yaml
+  # 30 minutes is ~17,800 blocks at 35,622 blocks/hour. 20,000 keeps the cursor
+  # moving slightly faster than the chain so a missed run catches up.
+  slice_blocks: 20000
+  # ~200 blocks, so a reorg at the tip cannot strand rows. Step 15: this chain's
+  # actual reorg depth has never been measured -- it is a margin, not a finding.
+  head_lag: 200
+  # Measured at 360 CU a run for the transfer filters plus the Swap filters. The
+  # first runs also classify every pool the watchlist touches, one-off, so the
+  # ceiling has room for that and still stops a run whose scope went wrong.
+  ceiling: 100000

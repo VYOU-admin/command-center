@@ -6,18 +6,27 @@
 import { redact } from '../env.js';
 import { log } from '../logger.js';
 
-export type AlertLevel = 'critical' | 'warning' | 'recovery';
+/*
+ * `info` exists because the watchlist activity alert is none of the other three.
+ * It is not critical, it is not a warning, and it is not a recovery -- it is a
+ * routine report of something that happened. Reusing `recovery` for it would
+ * colour a normal event as "a failure ended", which is the kind of small lie that
+ * makes a channel unreadable.
+ */
+export type AlertLevel = 'critical' | 'warning' | 'recovery' | 'info';
 
 const COLORS: Record<AlertLevel, number> = {
   critical: 0xd7263d,
   warning: 0xf2a33c,
   recovery: 0x2ecc71,
+  info: 0x5865f2,
 };
 
 const ICONS: Record<AlertLevel, string> = {
   critical: '🔴',
   warning: '🟠',
   recovery: '🟢',
+  info: '🔵',
 };
 
 export interface AlertFile {
