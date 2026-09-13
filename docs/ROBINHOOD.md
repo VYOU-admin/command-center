@@ -29,15 +29,15 @@ built on it.
 
 ## 0. What is loaded right now
 
-*Updated whenever a token is loaded or a defect is found. Last: 2026-09-12.*
+*Updated whenever a token is loaded or a defect is found. Last: 2026-09-13.*
 **This is the first thing a session needs.** Everything below it is procedure;
 this is state.
 
 | token | role | cohorts | rows | wallets | swept to | monitor | scores |
 |---|---|---|---|---|---|---|---|
-| **PONS** `0x39dBED…4571` | tracked | `PONS-P1` 13,823 · `PONS-P1-T` 396 | 503,472 | 14,138 | 61,173,149 | `token-updates` ✅ | 13,823 |
-| **INDEX** `0x56910D…9870` | tracked | `INDEX-P1` 3,316 · `INDEX-P2` 4,267 | 156,723 | 7,230 | 61,193,149 | `index-updates` ✅ | 7,583 |
-| **AI** `0x2E8c31…1e18` | tracked | `AI-P1` 3,508 | 59,592 | 3,507 | 61,181,432 | `ai-updates` ✅ | 3,508 |
+| **PONS** `0x39dBED…4571` | tracked | `PONS-P1` 13,823 · `PONS-P1-T` 396 | 504,137 | 14,138 | 61,173,149 | `token-updates` ✅ | 13,823 |
+| **INDEX** `0x56910D…9870` | tracked | `INDEX-P1` 3,316 · `INDEX-P2` 4,267 | 156,981 | 7,230 | 61,193,149 | `index-updates` ✅ | 7,583 |
+| **AI** `0x2E8c31…1e18` | tracked | `AI-P1` 3,508 | 59,863 | 3,507 | 61,181,432 | `ai-updates` ✅ | 3,508 |
 | **NVDA** `0xd0601c…9eec` | **pricing-source** | none | 0 | 0 | 59,111,432 | none — correct | never |
 | **MOS** `4ChT49…91ZT` | tracked (**Solana**) | `MOS-P1..P4` 519 | 1,534 | 486 | none | none | **never** |
 | **USELESS** `Dz9mQ9…bonk` | tracked (**Solana**) | `USELESS-P1..P3` 1,615 | 10,458 | 1,462 | none | none | **never** |
@@ -46,7 +46,10 @@ this is state.
 row breakdown  PONS  buy 115,084  sell 76,195  transfers 312,193
                INDEX buy  58,934  sell 29,318  transfers  68,471
                AI    buy  22,976  sell 14,764  transfers  21,852
-price series   pons 5,171  index 5,450  ai 4,171  native 9,586  bridge(NVDA) 4,065
+price series   pons 5,171  index 5,488  ai 4,171  bridge(NVDA) 4,065
+native ETH/USD 10,159 buckets: 9,652 token-incidental, 489 market-derived,
+               18 market-repaired.  trade rows with null USD: AI 169, PONS 67, INDEX 0
+watchlist      1,248 memberships, 1,151 distinct wallets, top 5%
 monitors       token-updates, index-updates, ai-updates, token-price,
                wallet-scores, oil-prices, postgres-disk    all enabled, 0 failures/24h
 ```
@@ -121,12 +124,20 @@ Deriving the bounds back from the rows would silently redefine the period as
 whatever happened to trade, and shrink a quiet window to nothing.
 
 **Each window is scored separately, and the score-quality thresholds are
-properties of the WINDOW, not of the token.** INDEX is the first token to prove
-it: the `low-weight` threshold **derived to 0.625 for INDEX-P1**, from a real gap
-across two distinct partial weights, and **could not be derived for INDEX-P2**,
-which has no partial weights at all and kept the 0.8 default. One token, one
-scoring run per tag, two different thresholds — and reporting a single
-token-level threshold would have been wrong for one of them.
+properties of the WINDOW, not of the token.** INDEX proved it: the `low-weight`
+threshold **derived to 0.625 for INDEX-P1** from a real gap across two distinct
+partial weights, while **INDEX-P2 had no partial weights at all** and kept the 0.8
+default. One token, one scoring run per tag, two different thresholds — and
+reporting a single token-level threshold would have been wrong for one of them.
+
+**That example is now historical, and how it ENDED is the better lesson.** After
+the ETH/USD fix of 2026-09-13 filled INDEX-P1's unpriced era, its partial weights
+disappeared and **its threshold can no longer be derived either** — it is 0.8,
+undrivable, exactly like INDEX-P2. The gap the threshold was derived from was not a
+property of the cohort at all; it was missing price data. **A threshold derived
+from a gap should be re-derived whenever the data underneath it changes**, and a
+derived value that stops being derivable is a signal about the data rather than a
+failure.
 
 **A wallet that bought in two windows belongs to both cohorts.** It gets **two
 tag rows and one set of rows**: `wallet_transactions` is not window-scoped and
@@ -1388,14 +1399,43 @@ worse than the error.
 **What it moved, measured before writing:**
 
 ```
-buckets overwritten                18   of 291 compared
+buckets overwritten                18   of 291 compared; 10.55% to 43.15%, median 14.76%
 rows in those buckets, INDEX      786   506 trades, 280 transfers
 rows in those buckets, PONS       161   137 trades,  24 transfers
 rows in those buckets, AI           0   <- AI reads residue 1433, not 3150
-trade rows that actually REPRICE  621   484 INDEX/ETH + 137 PONS/WETH
-INDEX USDG trade rows unchanged    22   a stablecoin resolves to 1, no series read
 transfer rows unchanged           304   null by definition
 ```
+
+**What moved, measured before and after:**
+
+| rows | USD before | USD after | change |
+|---|---|---|---|
+| INDEX / ETH, 484 trades | $351,100.38 | $389,123.88 | **+$38,023.50 (+10.83%)** |
+| PONS / WETH, 137 trades | $13,340.68 | $13,821.41 | **+$480.73 (+3.60%)** |
+| INDEX / USDG, 22 trades | $4,215.77 | $4,077.61 | **−$138.16 (−3.28%)** |
+
+**A USDG-quoted row is NOT insulated from the ETH/USD series, and predicting that
+it was is a mistake worth recording.** A stablecoin resolves to 1 without reading
+any series, so those 22 rows were expected not to move. They moved, and the reason
+is step 11's allocation rule: `groupUsd` is summed over a GROUP, a group can span
+pools (`group.pools.size > 1`), and **11 of the 22 transactions also contain an
+ETH-pool swap of the token**. Re-pricing the ETH leg changed the group total and
+therefore the USDG row's allocated share.
+
+The correct statement: **a USDG row is insulated only when its transaction
+contains no ETH-quoted leg.** Checking the stored ROWS for a second pool is not
+enough either — the first check looked there, found 0, and was wrong; the ETH
+swaps produced no rows of their own. Check `token_swap_logs`.
+
+**A side effect worth having: PONS trade rows with a null USD fell from 80 to 67.**
+The 489 buckets the market ADDED include some inside PONS's life, and the reinsert
+picked them up.
+
+**Verified after: 0 of 291 buckets on this grid still disagree by more than 10%**,
+and the 76 between 5% and 10% stand as recorded in section 9. Watchlist membership
+did not change at all — 0 added, 0 removed — so the repair was correct and
+immaterial to the cut. Both are worth saying: a fix that changes real money need
+not change a decision.
 
 **AI's zero is the fragmentation in section 9 showing through.** AI's buckets sit
 at residue 1433 and it never reads a residue-3150 bucket, so a repair on this grid
@@ -1928,7 +1968,9 @@ and will be tuned. Measured sensitivity on the four scored windows, merged:
 | **5%** | **1,248** | **1,176** |
 | 10% | 2,493 | 2,354 |
 
-Per window, at 5%, on 2026-09-12:
+Per window, at 5%, **as measured on 2026-09-12, BEFORE the ETH/USD fix** — kept
+because the INDEX-P1 figures are what the artefact looked like, and the corrected
+figures are in the "artefact is gone" block below:
 
 | window | cohort | top 5% | score at cutoff | max | median |
 |---|---|---|---|---|---|
@@ -1953,7 +1995,9 @@ on its own:
    quality thresholds are per-window too — `low-weight` derived to 0.625 for
    INDEX-P1 and could not be derived for INDEX-P2.
 
-**`INDEX-P1`'s top 5% is an artefact, and it is the clearest case.** All **166 of
+**`INDEX-P1`'s top 5% WAS an artefact, and it is the clearest case.** (Fixed
+2026-09-13; the mechanism is kept because it will recur on any window whose era is
+unpriced.) All **166 of
 166** are flagged `low-weight`, with a **median `weight_used` of 0.300** — every
 one of them is scored on 30% of the weight. The cause is known: INDEX-P1 spans
 blocks 1,693,406–9,800,208, which is exactly the era where 6,052 INDEX rows have
