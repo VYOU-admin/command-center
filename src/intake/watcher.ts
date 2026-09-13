@@ -89,6 +89,14 @@ create table if not exists token_decimals_cache (
  */
 alter table token_decimals_cache add column if not exists name text;
 alter table token_decimals_cache add column if not exists symbol text;
+/*
+ * A SETTLED NEGATIVE IS CACHED TOO. Without this flag, a token that genuinely does
+ * not answer name() or symbol() has null in both columns for ever, and a guard
+ * keyed on "symbol is null" re-asks the chain every time the token appears -- the
+ * exact trap step 3 records, where a classifier spent five rounds re-asking 1,664
+ * settled questions. The flag says the read HAPPENED; the nulls say what it found.
+ */
+alter table token_decimals_cache add column if not exists meta_read boolean not null default false;
 `;
 
 export async function loadWatchlistWallets(
@@ -177,10 +185,10 @@ export async function tokenMeta(
   const hit = cache.get(token);
   if (hit) return hit;
   const stored = await client.query<{
-    decimals: number | null; name: string | null; symbol: string | null;
-  }>('select decimals, name, symbol from token_decimals_cache where chain=$1 and token=$2',
-    [chain, token]);
-  if (stored.rowCount && stored.rows[0]!.symbol !== null) {
+    decimals: number | null; name: string | null; symbol: string | null; meta_read: boolean;
+  }>(`select decimals, name, symbol, meta_read from token_decimals_cache
+       where chain=$1 and token=$2`, [chain, token]);
+  if (stored.rowCount && stored.rows[0]!.meta_read) {
     const m = stored.rows[0]!;
     const meta = { decimals: m.decimals, name: m.name, symbol: m.symbol };
     cache.set(token, meta);
@@ -209,11 +217,12 @@ export async function tokenMeta(
   const meta: TokenMeta = { decimals, name, symbol };
   cache.set(token, meta);
   await client.query(
-    `insert into token_decimals_cache (chain, token, decimals, name, symbol)
-     values ($1,$2,$3,$4,$5)
+    `insert into token_decimals_cache (chain, token, decimals, name, symbol, meta_read)
+     values ($1,$2,$3,$4,$5,true)
      on conflict (chain, token) do update
-       set name = coalesce(excluded.name, token_decimals_cache.name),
-           symbol = coalesce(excluded.symbol, token_decimals_cache.symbol)`,
+       set name      = coalesce(excluded.name, token_decimals_cache.name),
+           symbol    = coalesce(excluded.symbol, token_decimals_cache.symbol),
+           meta_read = true`,
     [chain, token, decimals, name, symbol],
   );
   return meta;

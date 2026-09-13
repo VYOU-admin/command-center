@@ -2342,15 +2342,40 @@ is step 15's "a stale series is not a present one" appearing from the other
 direction: not a series that ends before a slice, but a slice that starts after the
 series.
 
-It is a genuine trade-off rather than a bug, and the choice has not been made:
+**IT GETS WORSE THE LONGER IT RUNS, and the second slice proved it.** The series
+head has not moved since 61,553,150 while the watcher advanced to 61,585,390 — now
+**3.2 bucket widths ahead**. The first slice priced 75 of 189 rows; the second
+priced **1 of 42**:
+
+| slice | blocks past the series | priced | unpriced |
+|---|---|---|---|
+| 61,554,943–61,574,942 | 21,792 (2.2 buckets) | 75 of 189 | 114 |
+| 61,574,943–61,585,390 | 32,240 (3.2 buckets) | **1 of 42** | 41 |
+
+This is not a fixed 36% tax. **The watcher drifts away from the series at the rate
+the chain produces blocks, and every hour it runs unaided the priced share falls.**
+An alert reading "$4 priced" on 42 trades is not a screener.
+
+**There is a fourth option, and it is the one to take.** The three below all trade
+something real away; this one does not:
 
 | option | effect |
 |---|---|
-| cap the slice at the series head + one bucket | every row prices; the watcher lags up to an hour, which for a screener is the thing it is for |
+| **derive ETH/USD in memory, per slice** | **RECOMMENDED.** Every row prices, freshness is untouched, ~120 CU a run, and it persists nothing so the ownership rule holds |
+| cap the slice at the series head + one bucket | every row prices, but the watcher lags an hour behind — the freshness a screener exists for |
 | widen the lookup to several bucket widths | prices more rows by dating them further from the trade — invents precision |
-| leave it | ~36% of rows unpriced for a fixable reason, token amounts always correct |
+| leave it | the priced share keeps falling; token amounts stay correct |
 
-Left as it is for now, and recorded in section 9.
+**Why deriving in memory is not a new ownership violation.** Step 10 says exactly
+one monitor per chain *persists* `native_usd_prices` — `token-updates` owns it — and
+that **every other monitor already derives the series in memory for its own slice
+and persists nothing.** The watcher doing the same is the established pattern, not
+an exception to it. The market's own pools are enumerated and cached
+(`eth_usd_pools`), so a slice needs one v4 filter plus one v3 filter over its own
+20,000 blocks: **two requests, ~120 CU, against the ~550 the run already spends.**
+
+Not implemented. Recorded in section 9 as the recommendation with the choice
+outstanding.
 
 #### The alert, as it renders
 
@@ -3020,8 +3045,15 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   need checking against the series they name, in config as much as in this
   document.
 
-- **The watcher outruns the ETH/USD series by more than two bucket widths, so
-  about 36% of its rows are unpriced for a fixable reason.** `native_usd_prices`
+- **The watcher outruns the ETH/USD series and the gap GROWS, so its priced share
+  falls every hour it runs.** 2.2 bucket widths ahead on the first slice (75 of 189
+  priced), 3.2 ahead on the second (**1 of 42**). **Recommendation: derive ETH/USD
+  in memory per slice, persisting nothing** — the pattern every other monitor
+  already follows, ~120 CU a run, which fixes it without costing freshness or
+  inventing precision. Step 17 has the four options. Not implemented; the choice is
+  outstanding.
+- **(superseded wording, kept for the measurement) It was first recorded as a fixed
+  ~36% of rows unpriced.** That was wrong: it is not a constant. `native_usd_prices`
   reaches 61,553,150 because the hourly job derives it an hour behind, while the
   watcher reads to within 200 blocks of head — 21,792 blocks past the series on its
   first run, against a 10,000-block bucket. 69 of 189 rows could not price. The
