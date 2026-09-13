@@ -701,16 +701,26 @@ async function main(): Promise<void> {
       const results: unknown[] = [];
       const emptyRegions: Record<string, string> = {};
       for (const region of regions) {
-        if (region.to < region.from) {
-          /*
-           * A region whose bounds are inverted is not an empty region, it is an
-           * unresolved bound. Raising is the point: the old code skipped it.
-           */
+        /*
+         * `to === from - 1` IS THE EMPTY REGION, NOT AN UNRESOLVED ONE. A window
+         * that starts at the token's deployment block leaves before-window as
+         * `firstBlock .. firstBlock - 1`, which is empty BY CONSTRUCTION and
+         * correct -- CHUMP is exactly that, since its start instant clamps to the
+         * deployment block. Anything further inverted than that is a bound nobody
+         * resolved, which is what dropped the after-window region.
+         */
+        if (region.to < region.from - 1) {
           throw new Error(
             `conventions region "${region.label}" is ${region.from}..${region.to}, `
-              + 'which is inverted. That is an unresolved bound, not a quiet region, '
-              + 'and skipping it reports a pass over data nobody looked at.',
+              + 'inverted by more than one block. That is an unresolved bound, not a '
+              + 'quiet region, and skipping it reports a pass over data nobody looked at.',
           );
+        }
+        if (region.to === region.from - 1) {
+          emptyRegions[region.label] =
+            `RETURNED NO ROWS -- ${region.from}..${region.to} is empty by construction, `
+            + 'the window bound and the range bound coincide';
+          continue;
         }
         /*
          * PER VENUE. One `limit 800` shared by both venues samples whichever

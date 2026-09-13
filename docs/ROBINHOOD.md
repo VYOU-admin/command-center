@@ -849,6 +849,17 @@ before-window region really does hold zero swaps, because its window starts at i
 deployment block — that is a result, and it is distinguishable from a region that was
 dropped only if it is printed.
 
+**`to == from - 1` IS THE EMPTY REGION; ANYTHING FURTHER INVERTED IS AN UNRESOLVED
+BOUND.** The two must not share a branch, and the first attempt at this fix collapsed
+them and raised on CHUMP's legitimate `23,791,950..23,791,949`. A window that starts
+at the token's deployment block leaves `before-window` as `firstBlock..firstBlock-1`
+by construction — the window bound and the range bound coincide — and that is the
+normal shape for any token whose window opens where the token opens, which the
+low-bound clamp in section 3 makes the *common* case rather than a rare one. An
+unresolved bound looks different: `44,992,964..0`, inverted by 45 million blocks.
+The old `to <= from` test was wrong in the other direction, silently dropping a
+one-block region as well.
+
 This is a check, not a source of direction. See the next step.
 
 ---
