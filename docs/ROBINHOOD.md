@@ -3611,8 +3611,20 @@ against a 2,000,000 ceiling.
   nothing and reported success.
 
   The fix is one resolver, `ensureBounds`, called by `run()` before every phase after
-  `identity`: it fetches `head` from the chain, reads the deployment block back from
-  the stored identity report, and **raises rather than defaulting**. Putting it in
+  `identity`: it reads the deployment block back from the stored identity report and
+  **raises rather than defaulting**.
+
+  **`head` comes from what was SWEPT, not from the chain, once a sweep exists** —
+  `max(to_block)` over `token_sweep_progress`. Two reasons, and the second is the
+  stronger. `prices`, `dryrun` and `write` carry a CU ceiling of **0**, because they
+  read the database and nothing else, so resolving head over RPC made the ceiling
+  refuse `eth_blockNumber` — the ceiling working exactly as designed, and the bound
+  had to come from somewhere free. More importantly, **a phase after the sweep must
+  be bounded by the blocks that were READ**, not by where the chain has since got to:
+  the live head includes blocks nothing has swept, and a range running past the data
+  is how a count over an unread region reads as a real zero. Before any sweep exists
+  there is nothing stored and those earlier phases all carry a real ceiling, so the
+  RPC route is taken then. Putting it in
   `run()` rather than in each phase means a phase cannot be added that forgets it,
   and it is deliberately the ONLY implementation — the bespoke copy written for the
   conventions phase an hour earlier was deleted, because two implementations of one

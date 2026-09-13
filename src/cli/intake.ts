@@ -281,7 +281,32 @@ async function main(): Promise<void> {
    * bound must never become a range.
    */
   const ensureBounds = async (rpc: RpcClient, c: PoolClient): Promise<void> => {
-    if (!head) head = await rpc.blockNumber();
+    /*
+     * HEAD COMES FROM WHAT WAS SWEPT, NOT FROM THE CHAIN, ONCE A SWEEP EXISTS.
+     *
+     * Two reasons, and the second is the stronger one:
+     *
+     *   - `prices`, `dryrun` and `write` carry a CU ceiling of 0, because they
+     *     read the database and nothing else. Resolving head over RPC made the
+     *     ceiling refuse `eth_blockNumber`, which is the ceiling working exactly
+     *     as designed -- the bound had to come from somewhere free.
+     *   - A phase after the sweep must be bounded by the blocks that were READ,
+     *     not by where the chain has since got to. The live head includes blocks
+     *     nothing has swept, and a range that runs past the data is how a count
+     *     over an unread region reads as a real zero.
+     *
+     * Before any sweep exists there is nothing stored, and those earlier phases
+     * all carry a real ceiling, so the RPC route is taken then.
+     */
+    if (!head) {
+      const swept = await c.query<{ to_block: string | null }>(
+        `select max(to_block)::text as to_block from token_sweep_progress
+          where chain = $1 and token = $2`,
+        [cfg.chain, cfg.token],
+      );
+      const sweptHead = Number(swept.rows[0]?.to_block ?? 0);
+      head = sweptHead > 0 ? sweptHead : await rpc.blockNumber();
+    }
     if (!firstBlock) {
       const row = await c.query<{ detail: { deployment_block?: number } | null }>(
         `select detail from token_intake_state
