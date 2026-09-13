@@ -2544,9 +2544,27 @@ is rendered as its address rather than given an invented label.
 
 **The list is capped at 20 tokens and the remainder is COUNTED IN THE MESSAGE.**
 Discord rejects an embed description over 4,096 characters outright rather than
-trimming it, so an uncapped list of 67 tokens would make the alert vanish. A silent
-trim would read as "that is all that happened"; the footer names the count and says
-where the rest are.
+trimming it, so an uncapped list would make the alert vanish. A silent trim would read
+as "that is all that happened"; the footer names the count and says where the rest are.
+
+**MEASURED 2026-09-13, AND THE HEADROOM IS NOW THIN.** At three lines per token the
+delivered body ran **3,801 characters against the sink's 4,000-character slice — 199
+characters of headroom, about 5%, or roughly ONE more token line.** The cap of 20 was
+set when a token took two lines; it now takes four. Beyond 4,000 the sink slices
+before posting, so the alert would not vanish — **it would silently lose its tail,
+which is the "…and N more" line and the link to the tab**, i.e. exactly the two things
+that tell a reader something was left out. Lowering the cap to ~14 tokens restores the
+margin; it has not been changed.
+
+**THE `unpriced` MARKERS SORT TO THE BOTTOM AND ARE THEREFORE THE FIRST CUT.** Ordering
+by USD descending puts every token with nothing priced at the end of the list, because
+its total is zero. Measured on the 61,603,150–61,613,149 slice: of 30 tokens, **6 had
+an unpriced price line, 5 a fully-unpriced buy side and 3 a fully-unpriced sell side —
+and all of them fell in the 10 omitted tokens.** The delivered alert showed the
+partly-unpriced form (`$8,537+`, `$411+`) and no fully-unpriced one. The markers work;
+the ordering means the cases they exist for are the least likely to be seen. Whether
+that is right is an operator judgement — an unpriced token is also the least
+interesting by USD — and it is recorded rather than decided.
 
 **Channel: `crypto`, which IS the Discord channel #crypto-screener.** The webhook
 named "Crypto" is `DISCORD_WEBHOOK_CRYPTO` and `env.ts` already registers it, so
