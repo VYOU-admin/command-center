@@ -810,6 +810,45 @@ Assuming one convention for both would have inverted every v4 buy into a sell
 across 480,924 rows, with plausible totals throughout and nothing to indicate a
 problem. **Verify both, inside and outside the window, before writing anything.**
 
+**THE SAMPLE MUST BE TAKEN PER VENUE, AND A VENUE WITH NOTHING TESTED MUST RAISE.**
+Found on CHUMP 2026-09-13, and it is the filter-matched-nothing failure landing in
+the one check whose whole purpose is to catch a silent inversion. The phase drew
+`order by block_number limit 800` over the region and handed one result to both
+venues. CHUMP's v3 activity starts at 23,794,012 and its v4 at 39,893,773, so the
+first 800 in-window swaps are **800 v3 and 0 v4** — the 18 v4 swaps inside the window
+were never reached. It reported `v4 tested: 0, convention: undetermined` and
+**passed**, because the raise fired only on `tested > 0 && undetermined`.
+
+```
+in-window      v3  12,013   v4     18     sampled: v3 800, v4 0
+before-window  v3       0   v4      0     RETURNED NO ROWS -- and correctly so
+after-window   v3 252,250   v4 10,704     NOT TESTED AT ALL -- see below
+```
+
+Take up to the sample cap **per venue per region**, and raise when a region contains
+swaps of a venue and none were tested. A venue whose market opens later than the
+other is the normal case, not an exotic one.
+
+**THE REGIONS MUST BE RESOLVED FROM STORED STATE, NOT FROM VARIABLES A RESUMED RUN
+NEVER SET.** The same CHUMP run skipped the after-window region entirely. `head` is
+fetched by the phases that need it, and on a resumed run every one of those was
+already `complete`, so `head` was **0**, the region became `44,992,964..0`, failed
+`region.to <= region.from`, and was dropped without a word. **That region holds
+262,954 swaps — 95.6% of the token's total.** `firstBlock` was 0 for the same reason;
+it was harmless only because no CHUMP swap can precede its deployment.
+
+This is the third appearance of one defect — step 7's rule that **a STOP ends the
+process, so anything a later phase needs must be PERSISTED rather than carried in a
+variable.** It cost AI a router detection over `0..0` reported as a clean pass, it
+cost INDEX a fallback to unresolved window bounds, and here it cost the conventions
+check its largest region. **A region computed from an unset bound must raise, never
+be skipped.**
+
+**Report a region that is genuinely empty as "RETURNED NO ROWS".** CHUMP's
+before-window region really does hold zero swaps, because its window starts at its
+deployment block — that is a result, and it is distinguishable from a region that was
+dropped only if it is printed.
+
 This is a check, not a source of direction. See the next step.
 
 ---
@@ -3259,6 +3298,64 @@ exactly what the document already records for INDEX. Six configured infrastructu
 addresses matched nothing and were reported as such. Detection has to be re-run after
 the sweep.
 
+#### Step 6–7 prerequisites: scope RE-RUN after the sweep, 2026-09-13
+
+**Router detection went from `probed: 0` to `probed: 4` purely by running after the
+sweep, and it is the first CHUMP result that could not have been obtained before.**
+The scope phase was re-run with the new `--redo scope` (section 9) once
+`token_swap_logs` held 274,985 rows and `token_transfer_logs` 412,997:
+
+```
+duration            762 ms        cost 582 CU   (first run: 478 CU, kept as scope:superseded)
+calls               18 eth_call, 4 eth_getCode, 1 eth_blockNumber
+routers probed        4   identified 3   rejected 1
+in scope             51   rejected 7     -- unchanged from the first run, as expected
+```
+
+| address | recipients | sends | in a swap tx | code | verdict |
+|---|---|---|---|---|---|
+| `0xda549474…` | 502 | 513 | **0.0%** | **eoa** | **not a router** — a distributor |
+| `0x5a705de8…` | 118 | 251 | **100.0%** | contract | router — **not in the configured list** |
+| `0xb92fe925…` | 94 | 276 | **100.0%** | contract | router — in both |
+| `0x39b38686…` | 88 | 162 | **100.0%** | contract | router — **not in the configured list** |
+
+**The discriminator separates as cleanly here as it did on PONS: 100.0%, 100.0%,
+100.0% against 0.0%, with no candidate anywhere in between.** The 0.0% address is
+also an EOA, so it fails two of the three parts independently — a distributor moving
+CHUMP to 502 recipients that would have been excluded as a router by any
+recipient-count rule alone.
+
+**Two routers the hand-typed list does not contain.** Had the cohort been built from
+`config/infrastructure.yaml` alone — which is what happens when detection runs in the
+scope phase before the sweep — trades routed through `0x5a705de8…` and
+`0x39b38686…` would have been attributed to the routers instead of to the buyers.
+That is the PONS defect exactly, and CHUMP is the **first token where it was caught
+before the cohort was built** rather than after.
+
+**Five configured entries matched nothing, and three of those five are structural
+rather than a finding.** The v4 PoolManager and the zero address are removed from the
+candidate query by construction — `detectRouters` excludes the counterparty set and
+the zero address before grouping — so they can never appear in the behavioural set,
+and the burn address sent no CHUMP. Only `0xb01ca24b…` and `0x8876789976…` are
+genuine "listed but not supported by this token's behaviour". **Report the five, and
+say which kind each is**, or a structural exclusion reads as a stale list entry.
+
+**The cohort work set, derived before spending anything:**
+
+```
+swap transactions in window        10,219
+candidate transactions              6,364
+CANDIDATE WALLETS                     642   <- the figure the cost is quoted from
+payment, 642 x 17.1 CU             ~11,000 CU     worst case 642 x 8 x 30 = 154,080
+eth_getCode, <=642 x 26 CU         ~16,700 CU
+                                  ----------
+realistic                          ~28,000 CU  ~$0.013    ceiling 400,000
+```
+
+**642 candidates against PONS's 16,910 is the scale CHUMP actually is**, and it is why
+its cohort step costs a twenty-fifth of PONS's. Quote the cost from this count, never
+from another token's.
+
 **What surprised me, and both were my errors rather than the chain's:**
 
 1. **I called the v3-only premise contradicted on pool count, and pool count is the
@@ -3431,6 +3528,29 @@ against a 2,000,000 ceiling.
   **nothing**, which is the opposite of the property step 5 requires and which the
   standalone `sweep-transfers` CLI does provide. Progress is also unobservable while it
   runs, so the 3x wall-clock rule has nothing to check.
+- **The conventions check sampled ACROSS venues and skipped regions computed from
+  unset bounds.** FIXED 2026-09-13, found on CHUMP. Two independent faults in one
+  phase, and both of them report a pass:
+
+  1. `order by block_number limit 800` over a region, one result shared by both
+     venues. CHUMP's first 800 in-window swaps are all v3, so its 18 in-window v4
+     swaps were never sampled, and `tested: 0` passed because the raise fired only on
+     `tested > 0`.
+  2. `head` and `firstBlock` are set by the phases that fetch them, and a resumed run
+     skips those phases, so both were **0**. The after-window region became
+     `44,992,964..0`, failed `to <= from`, and was silently dropped — **262,954
+     swaps, 95.6% of the token's total, never verified**.
+
+  It now resolves `head` from the chain and `firstBlock` from the stored identity
+  report, samples per venue per region, reports an empty region as RETURNED NO ROWS
+  rather than skipping it, and raises on an inverted region rather than dropping it.
+
+  **Two things look alike in a `tested: 0` and only one is a bug**, so they are
+  separated rather than both raising: a sample that never REACHED the venue is the
+  defect and raises per region; a sample that reached it where every swap was
+  ambiguous is a real property of the data, is reported with its `sampled` count, and
+  raises only if that venue is established in **no region at all**.
+
 - **FIXED 2026-09-13 — `--redo <phase>`. The runner had NO WAY TO RE-RUN A
   COMPLETED PHASE, and step 7 requires exactly that for `scope`.** Step 7 says router detection must run after the sweep and
   names the remedy — "Re-run scope after the sweep, or move detection to the cohort

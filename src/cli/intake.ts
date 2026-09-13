@@ -660,25 +660,89 @@ async function main(): Promise<void> {
     });
 
     /* ---- 6. sign conventions -------------------------------------------- */
-    await run('conventions', async (_rpc, c) => {
+    await run('conventions', async (rpc, c) => {
       pools = pools.size ? pools : await loadPools(c, cfg.chain, cfg.token);
-      const regions: { label: string; from: number; to: number }[] = [];
+      /*
+       * RESOLVED FROM STORED STATE, NOT FROM VARIABLES A RESUMED RUN NEVER SET.
+       *
+       * `head` and `firstBlock` are set by the phases that fetch them, and a
+       * resumed run skips every one of those because they are already complete.
+       * On CHUMP both were 0, so the after-window region came out as
+       * `44,992,964..0`, failed `to <= from`, and was dropped in silence --
+       * 262,954 swaps, 95.6% of the token's total, never verified. Step 7 has
+       * said since AI that a STOP ends the process and anything a later phase
+       * needs must be PERSISTED; this is its third appearance.
+       */
+      if (!head) head = await rpc.blockNumber();
+      if (!firstBlock) {
+        const idRow = await c.query<{ detail: { deployment_block?: number } }>(
+          `select detail from token_intake_state
+            where chain=$1 and token=$2 and phase='identity'`,
+          [cfg.chain, cfg.token],
+        );
+        const stored = idRow.rows[0]?.detail?.deployment_block;
+        if (typeof stored !== 'number') {
+          throw new Error(
+            'the conventions phase has no deployment block: it is not in memory and '
+              + 'the stored identity report does not carry one. A region computed from '
+              + 'an unset bound is dropped rather than checked, which reads as a pass.',
+          );
+        }
+        firstBlock = stored;
+      }
+
       const w0 = windows[0]!;
-      regions.push({ label: 'in-window', from: w0.startBlock!, to: w0.endBlock! });
-      regions.push({ label: 'before-window', from: firstBlock, to: w0.startBlock! - 1 });
-      regions.push({ label: 'after-window', from: w0.endBlock! + 1, to: head });
+      const regions: { label: string; from: number; to: number }[] = [
+        { label: 'in-window', from: w0.startBlock!, to: w0.endBlock! },
+        { label: 'before-window', from: firstBlock, to: w0.startBlock! - 1 },
+        { label: 'after-window', from: w0.endBlock! + 1, to: head },
+      ];
 
       const results: unknown[] = [];
+      const emptyRegions: Record<string, string> = {};
       for (const region of regions) {
-        if (region.to <= region.from) continue;
+        if (region.to < region.from) {
+          /*
+           * A region whose bounds are inverted is not an empty region, it is an
+           * unresolved bound. Raising is the point: the old code skipped it.
+           */
+          throw new Error(
+            `conventions region "${region.label}" is ${region.from}..${region.to}, `
+              + 'which is inverted. That is an unresolved bound, not a quiet region, '
+              + 'and skipping it reports a pass over data nobody looked at.',
+          );
+        }
+        /*
+         * PER VENUE. One `limit 800` shared by both venues samples whichever
+         * venue trades earliest: CHUMP's first 800 in-window swaps are all v3,
+         * so its 18 v4 swaps were never reached and `tested: 0` passed.
+         */
+        const present = await c.query<{ venue: string; n: string }>(
+          `select venue, count(*)::text n from token_swap_logs
+            where chain=$1 and token=$2 and block_number between $3 and $4
+            group by venue`,
+          [cfg.chain, cfg.token, region.from, region.to],
+        );
+        const counts = new Map(present.rows.map((r) => [r.venue, Number(r.n)]));
+        if (counts.size === 0) {
+          // A ZERO IS A RESULT. Printed, never omitted -- an omitted line is
+          // indistinguishable from a check that never ran.
+          emptyRegions[region.label] =
+            `RETURNED NO ROWS -- ${region.from}..${region.to} holds no swap of this token`;
+          continue;
+        }
         const swapRows = await c.query<{
           venue: string; pool: string; block_number: number; log_index: number;
           tx_hash: string; amount0: string; amount1: string;
         }>(
           `select venue, pool, block_number, log_index, tx_hash, amount0::text, amount1::text
-             from token_swap_logs
-            where chain=$1 and token=$2 and block_number between $3 and $4
-            order by block_number limit 800`,
+             from (
+               select *, row_number() over (partition by venue order by block_number) rn
+                 from token_swap_logs
+                where chain=$1 and token=$2 and block_number between $3 and $4
+             ) s
+            where rn <= 800
+            order by venue, block_number`,
           [cfg.chain, cfg.token, region.from, region.to],
         );
         const txs = swapRows.rows.map((r) => r.tx_hash);
@@ -720,7 +784,37 @@ async function main(): Promise<void> {
           ],
           data: '0x' + toWord(BigInt(r.amount)),
         }));
-        results.push(...verifyConventions(swaps, transfers, cfg, region.label));
+        const regionResults = verifyConventions(swaps, transfers, cfg, region.label);
+        /*
+         * A VENUE PRESENT IN THE REGION WHOSE SAMPLE HOLDS NONE OF IT IS A DEFECT.
+         *
+         * Two different things look alike in a `tested: 0` and only one is a bug:
+         * a sample that never REACHED the venue -- the CHUMP defect, where one
+         * `limit 800` over the region returned 800 v3 rows and no v4 -- and a
+         * sample that reached it where every swap was ambiguous, which is a real
+         * property of the data. The first raises here. The second is reported,
+         * and is caught at the end if the venue is established in no region at all.
+         */
+        const sampledPerVenue = new Map<string, number>();
+        for (const r of swapRows.rows) {
+          sampledPerVenue.set(r.venue, (sampledPerVenue.get(r.venue) ?? 0) + 1);
+        }
+        for (const r of regionResults) {
+          const venueCount = counts.get(r.venue) ?? 0;
+          const sampled = sampledPerVenue.get(r.venue) ?? 0;
+          if (venueCount > 0 && sampled === 0) {
+            throw new Error(
+              `conventions: region "${region.label}" holds ${venueCount.toLocaleString()} `
+                + `${r.venue} swaps and the sample contains NONE of them. That is a sample `
+                + 'that never reached the venue, not a venue that agrees.',
+            );
+          }
+        }
+        results.push(...regionResults.map((r) => ({
+          ...r,
+          in_region: counts.get(r.venue) ?? 0,
+          sampled: sampledPerVenue.get(r.venue) ?? 0,
+        })));
       }
 
       const disagreeing = (results as { venue: string; region: string; convention: string; agreeing: number; tested: number }[])
@@ -733,7 +827,36 @@ async function main(): Promise<void> {
             'with itself means the amounts cannot be trusted either.',
         );
       }
-      return { report: { conventions: results } };
+      /*
+       * EVERY VENUE THE TOKEN TRADES ON MUST HAVE BEEN TESTED SOMEWHERE. A token
+       * with 10,722 v4 swaps whose v4 convention was never established anywhere
+       * would have every v4 buy written as a sell if the assumption were wrong.
+       */
+      const tokenVenues = await c.query<{ venue: string; n: string }>(
+        `select venue, count(*)::text n from token_swap_logs
+          where chain=$1 and token=$2 group by venue`,
+        [cfg.chain, cfg.token],
+      );
+      const tested = new Set(
+        (results as { venue: string; tested: number }[])
+          .filter((r) => r.tested > 0).map((r) => r.venue),
+      );
+      const untested = tokenVenues.rows.filter((v) => !tested.has(v.venue));
+      if (untested.length > 0) {
+        throw new Error(
+          'conventions: '
+            + untested.map((v) => `${v.venue} has ${Number(v.n).toLocaleString()} swaps`).join(', ')
+            + ' and its convention was established in NO region. An untested venue is '
+            + 'not a venue that agrees.',
+        );
+      }
+      return {
+        report: {
+          conventions: results,
+          regions_with_no_swaps: Object.keys(emptyRegions).length ? emptyRegions : 'none',
+          venues_tested: [...tested].sort(),
+        },
+      };
     });
 
     /* ---- 7. cohort ------------------------------------------ STOP ------ */
