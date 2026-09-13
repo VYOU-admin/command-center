@@ -383,6 +383,15 @@ bisection is the only route.
 labels is legitimate, but silently overlapping bounds are almost always a
 configuration mistake, so they raise rather than proceed.
 
+**PUMP POINTS ARE PERSISTED HERE TOO, and until CHUMP nothing in the repository
+did it.** They are an operator input (section 2) that metrics 5 and 6 are defined
+against, they live in `token_events` keyed `(chain, token, kind, event_at)`, and
+`scoreWindow` raises without them. `pump_points` in an intake config was read by
+nothing. `npm run pump-points -- <config.yaml>` now writes them from the config,
+idempotently, rejecting any instant with no offset for the same reason a window
+bound is rejected: "08-07 04:00 Eastern" and "08-07 04:00 UTC" are four hours apart
+in August and both metrics key off a 48-hour window.
+
 ---
 
 ### Step 3 — Pool enumeration — **STOP**
@@ -3192,6 +3201,16 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database
   fails at the first read. Its shape is recorded in step 5.
+- **FIXED 2026-09-13, kept for the pattern: `token_events` was written by no code
+  either.** `SCORES_SCHEMA` creates it and `scoring/run.ts` reads it, and pump
+  points — an operator input listed in section 2 alongside the token address and
+  the window — reached it by no path in the repository. Every earlier token's pumps
+  were inserted by hand, exactly as `token_swap_logs` was, so a fresh database
+  would have scored nothing: `scoreWindow` raises when a token has no pump events,
+  which is correct and would have been unexplainable. `pump_points` in an intake
+  config was inert — `plan.ts` never read the key. Found on CHUMP because it is the
+  first token whose pumps nobody had already inserted. **A table that is created
+  and read but never written is a missing step, not a missing row.**
 - **One bridge cannot serve two tokens with different bucket anchors.**
   `deriveBridgeUsd` runs on the grid of the token being priced, and
   `bridge_usd_prices` is keyed `(chain, bridge, bucket_block)` with no room for a
