@@ -364,6 +364,12 @@ unmaterialised query against an expected "near-free, seconds", and was cancelled
 materialised, it takes **3.1 s**. `prices` finished in **9 ms** reporting zeros, which
 is the same rule from the other side: a phase far UNDER its expectation is as much a
 signal as one far over.
+
+**The earlier per-phase table, PONS / AI / INDEX** — these rows were orphaned from
+their header by an edit on 2026-09-13 and are restored to one here:
+
+| phase | PONS | AI | INDEX | expected |
+|---|---|---|---|---|
 | transfer sweep | not measured¹ | ~9 min (13.9M blocks) | ~40 min (57.4M blocks) | **~1 min per 1.5M blocks** |
 | swap load | not measured¹ | ~4 min | ~35 min | scales with blocks not in `v4_swaps_all` |
 | cohort | not measured¹ | ~2 min | ~6 min (two windows) | **minutes** |
@@ -1166,15 +1172,20 @@ raises if any window still has no blocks; and **`detectRouters` refuses a range
 that contains nothing rather than reporting no routers**. An empty range is a
 defect, not an answer.
 
-**The behaviour-detected routers were never persisted for PONS, so its cohort
-never used them.** `effectiveExclusions` reads `token_intake_state` for
-`router:%` rows; PONS has **zero** of them, so the 13,095-wallet cohort was
-built against the **3 router addresses in `config/infrastructure.yaml`** and
-nothing else. The "30 routers where the list holds 3" recorded above came from
-an analysis that ran once and was never stored, so the pipeline never applied
-it. Over PONS-P1, **62 senders clear the 50-recipient bar**. This is a live
-discrepancy between what this section requires and what the stored cohort used;
-PONS is frozen and it has not been acted on.
+**The behaviour-detected routers were once never persisted for PONS, and THE
+REBUILD FIXED IT — this paragraph said otherwise until 2026-09-14.**
+`effectiveExclusions` reads `token_intake_state` for `router:%` rows. Before the
+2026-09-11/12 rebuild PONS had **zero** of them, so its 13,095-wallet cohort was
+built against the 3 addresses in `config/infrastructure.yaml` and nothing else.
+**PONS now has 39 persisted router rows**, matching its stored scope report of
+`probed 72 / identified 39`, and section 0 has said so since the rebuild.
+
+**Two places in this document went on asserting the pre-rebuild state**, and a
+read-only replay against `token_intake_state` is what caught it. That is the drift
+this document exists to prevent, appearing in the document itself: **a claim about
+stored state has to be re-checked against the store whenever the store changes**,
+and "PONS has zero" was a measurement with a date on it, written as though it were
+a property.
 
 **Materialise the swap-transaction set before joining to it.** Written as one
 statement with the swap transactions in a CTE, router detection ran for **19
@@ -3332,10 +3343,12 @@ differences, none of them acted on:
 
 1. **2,001 EIP-7702 delegated accounts were excluded** that the current rule
    keeps. The cohort would be **15,096 rather than 13,095, a 15.3% increase.**
-2. **The cohort used the 3 configured router addresses.** Behaviour finds **62
-   senders clearing the 50-recipient bar** over PONS-P1, and none was ever
-   persisted, so `effectiveExclusions` returned the config list alone. A router
-   the list misses gets the trade attributed to it instead of to the buyer.
+2. ~~**The cohort used the 3 configured router addresses.**~~ **NO LONGER TRUE —
+   corrected 2026-09-14.** This was the pre-rebuild state. PONS carries **39
+   persisted `router:%` rows** against a stored scope report of `probed 72 /
+   identified 39`, so `effectiveExclusions` returns the config list **plus 39
+   behavioural routers**. The claim survived here for two days after the rebuild
+   made it false.
 3. **No `transfer_in`/`transfer_out` rows.** 185,189 rows, all buys and sells.
    AI and INDEX both have transfers, which is why PONS's `inflated-pnl` count
    cannot clear itself: 2,122 wallets show a negative position because the
@@ -4197,11 +4210,16 @@ against a 2,000,000 ceiling.
   for either. The scorer is correctly Robinhood-scoped after it once scored them
   from a Robinhood monitor, but the document describes scoring as covering every
   window and no window of these two is covered.
-- **NVDA's swaps are untimed.** 1,443,064 in-scope swap blocks carry no
-  `block_times` row. It costs nothing today because NVDA is a pricing source with
-  no rows, but the bridge series is derived from swaps whose blocks the code
-  cannot date, and the rule that `loadSlice` enforces everywhere else does not
-  reach it.
+- **NVDA is PARTIALLY COLLECTED BY DESIGN, and two consequences follow.** Its
+  1,443,064 in-scope swap blocks carry no `block_times` row, and it has **0 stored
+  transfers** against 2,742,472 swaps. Both are correct for a pricing source — it
+  needs swaps for the bridge series and nothing else — and both cost nothing today
+  because it has no cohort, no tags and no rows. **Both become blockers the moment
+  NVDA is tracked**: the bridge series is derived from swaps whose blocks the code
+  cannot date, and router detection reads `token_transfer_logs`, which is why NVDA's
+  stored scope report reads `probed 0 / identified 0`. **That zero is correct for the
+  data collected and is not evidence NVDA has no routers.** Recorded here so a future
+  reader does not mistake a deliberate partial collection for a clean result.
 
 - **The shared series still has no chain-level anchor.** Partly addressed on
   2026-09-13: ETH/USD is now derived from the dedicated WETH/USDG market and the
@@ -4271,6 +4289,194 @@ against a 2,000,000 ceiling.
   first run, against a 10,000-block bucket. 69 of 189 rows could not price. The
   three options and their costs are in step 17; **the choice has not been made.**
   Token amounts are unaffected and always correct.
+
+### REPLAY: were PONS, AI and INDEX exposed to CHUMP's four fixes? — 2026-09-14
+
+**Each of the four "success over nothing" fixes shipped with one token's evidence.
+This replays them against stored data, read-only, for every other token. Three come
+back CLEAN, and a clean result is a result.** The structural fact that makes most of
+them clean is worth stating first:
+
+**PONS, AI, INDEX and NVDA have only FOUR stored phase rows each — `identity`,
+`windows`, `pools` (stopped), `scope` (stopped).** They have no `sweep`,
+`conventions`, `cohort`, `tags`, `timestamps`, `prices`, `dryrun` or `write` row,
+because the runner deadlocked at `scope` (the first entry in this section) and they
+were finished with the standalone CLIs. **Three of the four defects live in runner
+phases those tokens never ran.**
+
+#### 1. `withTransaction` / the silent ROLLBACK — CLEAN for all three
+
+| token | exposed? | why |
+|---|---|---|
+| PONS | **no** | rows written by `write-rows.ts` |
+| AI | **no** | same |
+| INDEX | **no** | same |
+| CHUMP | yes, fixed | the only token that ran the runner's `write` phase |
+
+`write-rows.ts` has **no `total_supply` query, no `.catch` returning a default, and
+no `begin`/`commit` at all** — it runs in autocommit, so each statement is its own
+transaction and there is no enclosing transaction for a failed statement to abort.
+Both halves of the defect are absent, not merely unfired.
+
+**Reports checked against the tables, which is the consequence rather than the code
+path.** Every stored `pools` report's `candidates` figure equals the length of its own
+stored candidate list, exactly, for all five tokens — 1,234 / 5,040 / 317 / 58 /
+12,105. No phase is recorded `complete` over an empty table.
+
+**`scope.in_scope` is LOWER than `pool_meta` for every token that has an hourly
+monitor, and equal for the one that does not**, which is the explanation rather than a
+discrepancy:
+
+| token | scope report `in_scope` | `pool_meta` now | hourly monitor |
+|---|---|---|---|
+| PONS | 617 | 672 | yes |
+| AI | 350 | 367 | yes |
+| INDEX | 196 | 201 | yes |
+| CHUMP | 51 | 52 | yes |
+| **NVDA** | **536** | **536** | **none — and it matches exactly** |
+
+The adapter enumerates pools every run and adds newly created in-scope ones, which is
+step 3's "re-derive the pool set every run" working. **NVDA is the control**: the only
+token without an hourly monitor is the only one where the two agree. `pool_meta` has
+no `created_at`, so this is a natural experiment rather than a per-row proof, and that
+limit is stated rather than glossed.
+
+#### 2. `ensureBounds` / zero-valued bounds recorded as success — CLEAN for all three
+
+Every stored bound is non-zero and plausible:
+
+```
+                deployment_block   identity head   windows:resolved
+PONS                   8,963,150      59,819,241   15,115,267..42,695,454
+AI                     9,721,433      58,215,021   18,275,461..32,206,441
+INDEX                  1,670,725      59,031,666   1,693,406..9,800,208  and  25,165,577..44,130,852
+CHUMP                 23,791,950      61,665,392   23,791,950..44,992,963
+NVDA                      45,898      58,269,658   18,275,461..32,206,441
+```
+
+**No stored report carries an all-zero figure set.** AI's stored `scope` report reads
+`probed 16 / identified 15` — **not** the `probed: 0` this document records for it.
+That zero came from a run over `0..0` that was superseded; the stored state carries
+the corrected measurement. **A defect that has been re-run away leaves no trace in the
+store, so the store cannot be used to find it — only to confirm the current state is
+sound.**
+
+#### 3. Conventions sampled across venues — ONE TOKEN EXPOSED, and it never fired
+
+The old sampler took `order by block_number limit 800` per region and handed one
+result to both venues. Replayed against every token's stored swaps:
+
+| token | region | in region | old sampler's first 800 | verdict |
+|---|---|---|---|---|
+| PONS | in-window | v3 291,207 · v4 480,924 | v3 241 · v4 559 | covered both |
+| PONS | before-window | v3 146,851 · v4 85,454 | v3 798 · v4 2 | covered both |
+| PONS | after-window | v3 1,655,527 · v4 883,386 | v3 388 · v4 412 | covered both |
+| AI | in-window | v3 48,310 · v4 121,621 | v3 248 · v4 552 | covered both |
+| AI | before-window | **RETURNED NO ROWS** | — | see below |
+| AI | after-window | v3 485,076 · v4 1,469,106 | v3 316 · v4 484 | covered both |
+| **INDEX** | **in-window** | **v3 3,469 · v4 32,678** | **v4 800, v3 0** | **WOULD HAVE MISSED v3** |
+| INDEX | before-window | v4 194 only | v4 194 | covered both |
+| INDEX | after-window | v3 247,188 · v4 309,434 | v3 229 · v4 571 | covered both |
+| CHUMP | in-window | v3 12,013 · v4 18 | v3 800, v4 0 | missed v4 — the original finding |
+
+**INDEX has the identical defect shape as CHUMP, in the opposite direction**: its
+in-window region opens on 32,678 v4 swaps before the first of its 3,469 v3 swaps, so a
+first-800 sample is entirely v4. **It never fired.** INDEX's conventions were measured
+by `build-cohort.ts`, which computes them "from everything stored" with **no LIMIT** —
+its recorded figures are 22,838 and 62,550 for v3, far beyond any 800-row sample. The
+exposure was latent and the second implementation is what happened to save it, which
+is a poor reason to be safe.
+
+**AI's `before-window` RETURNED NO ROWS, and that is a COVERAGE ARTEFACT, not an
+absence.** AI's first swap is ~547 blocks after its deployment at 9,721,433, but its
+stored swaps begin at **18,275,462** — inside its window — because its v4 swaps were
+copied from `v4_swaps_all`, which starts at 15,115,267, and its v3 sweep covered the
+window. **Roughly 8.5M blocks of AI's early life were never collected.** This is
+exactly the trap the INDEX findings name: *a zero from a table whose coverage you have
+not checked is not a finding.* AI's before-window convention therefore rests on no
+stored evidence at all, in either the old code or the new.
+
+#### 4. Routers — CLEAN for all four loaded tokens; NVDA's zero is explained
+
+| token | persisted `router:%` rows | stored report probed / identified | verdict |
+|---|---|---|---|
+| PONS | **39** | 72 / 39 | persisted; the cohort used them |
+| AI | **15** | 16 / 15 | persisted |
+| INDEX | **19** | 40 / 19 | persisted |
+| CHUMP | **3** | 4 / 3 | persisted |
+| **NVDA** | **0** | **0 / 0** | **zero probed, recorded as a clean pass** |
+
+76 `router:%` rows in the table, and every loaded token's count matches its report's
+`identified`. **The step 7 claim that PONS has zero persisted routers was stale by two
+days** and is corrected above.
+
+**NVDA's zero is correct for the data collected and must still be reported.**
+`detectRouters` reads `token_transfer_logs`, and NVDA has **0 transfers stored**
+against 2,742,472 swaps — it was loaded as a pricing source, so its swaps were swept
+for the bridge series and its transfers never were. There was nothing to probe.
+Benign today (no cohort, no tags, no rows) and **it becomes a real gap the moment NVDA
+is tracked**, alongside its untimed swaps already recorded below.
+
+### AUDIT: swallowed errors that emit a plausible value — 2026-09-14
+
+Grepped for every `.catch` returning a value, every `??`/`||` default on a query
+result, every SQL `coalesce` to a numeric default, and the RPC error paths. **One is
+live.**
+
+**LIVE — `src/cli/intake.ts:1063`, a bridge's decimals default to 18.**
+
+```ts
+const bdec = (await c.query(`select decimals from tokens where mint=$1`, [bridge]))
+  .rows[0]?.decimals ?? 18;
+```
+
+A bridge with no `tokens` row silently becomes **18 decimals**, and `bdec` scales every
+bridge amount in `deriveBridgeUsd`. This is the exact case step 1 and step 4 name by
+name — *"treating an unreadable decimals as 18 is a factor-of-10^12 error waiting to
+happen"* — and **USDG has 6**. It is dormant rather than safe: `bridgeAssets` is
+non-empty only for AI, and NVDA's `tokens` row exists. The correct behaviour is the one
+`decodeUint8` already implements four lines away — raise, because the value is unknown,
+not 18. **Not fixed in this pass, by instruction.**
+
+**WORTH KNOWING, deliberate and documented — `src/cli/build-cohort.ts:217–223`,
+`coalesce(av.n, 1)`.** A transaction with no `v4_swaps_all` row is treated as holding
+one swap, i.e. unambiguous. Step 7 records this fallback and says the test "falls back
+to the token's own count and says so", so it is by design — but the default is the
+*permissive* direction, and outside `v4_swaps_all`'s 15,115,267–42,695,454 coverage it
+admits legs the table cannot adjudicate. Worth re-reading whenever that coverage
+matters.
+
+**LOW SEVERITY — `src/adapters/postgres-disk.ts:196`, WAL bytes `coalesce(…, 0)`.** An
+unavailable `pg_ls_waldir()` reports **0 bytes of WAL**, which on a disk monitor reads
+as "plenty of headroom" rather than "not measured". No evidence it has ever fired.
+
+**Everything else checked and SAFE, with the reason in each case:**
+
+- Every `main().catch(err => { log.error(…); process.exit(1) })` — logs and exits
+  non-zero. The correct top-level handler.
+- `rowCount ?? 0` throughout — node-pg types `rowCount` as nullable; a failed statement
+  throws, so the `??` satisfies the type checker and is never an error path.
+- `rows[0]?.x ?? 0` over an **aggregate with no GROUP BY** (`write.ts:139–140`,
+  `sweep.ts:270–272`, `server.ts:343–344`) — such a query always returns exactly one
+  row, so the default is unreachable. `sweep.ts` additionally **raises** if the covered
+  count does not equal the expected one.
+- `src/intake/blocktimes.ts:113` — `return null` on a transient transport error is a
+  **retry signal**, which is the three-category rule in section 3 implemented, not a
+  value.
+- `src/intake/monitor-check.ts:39` — an unreadable monitors directory returns null and
+  the caller **raises**. It fails closed.
+- `src/store/db.ts:363` — `rollback().catch(() => {})` sits inside a handler that
+  rethrows the original error.
+- `src/sinks/discord.ts:212` — a failed body read becomes `''` inside a diagnostic
+  string for an already-failing request; no figure is derived from it.
+- `src/web/tokens-page.ts:786` — stores an **error marker** and renders it, rather than
+  substituting a value.
+- `decodeUint8` **throws** on `0x`: *"contract returned no data; the value is unknown,
+  not zero"*, and `RpcClient` raises on `body.error` and on a null/undefined `result`.
+  The `balanceOf` fix is holding.
+- `server.ts:397–400` — `coalesce(sum(usd_amount), 0)` is paired with a `priced` count
+  and `tok_priced`, so "no priced rows" stays distinguishable from a real zero, which
+  is what step 14's unknown-average rule needs.
 
 One further limitation is a property of the chain rather than a gap in the code:
 
