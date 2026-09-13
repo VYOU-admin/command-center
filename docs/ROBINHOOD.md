@@ -1851,6 +1851,48 @@ never wider — with dry-run counts reported first, including the zeros. Neither
 cleanly.** A script that finished without throwing is not evidence the write
 landed. The same applies to deploys: establish success from observable state.
 
+**THE WORST CASE THIS DOCUMENT HAS RECORDED: THE WRITE REPORTED 3,200 ROWS STORED
+AND "intake complete", AND THE DATABASE HELD ZERO.** Found on CHUMP 2026-09-13 by
+that fresh-connection rule and by nothing else — every log line said success.
+
+The mechanism, and it generalises far past this one query. **Postgres aborts a
+transaction the moment any statement in it fails, and `COMMIT` on an aborted
+transaction DOES NOT RAISE — it returns the command tag `ROLLBACK` and discards
+everything.** So one swallowed query error anywhere inside a transaction turns the
+whole thing into a silent no-op. The write phase did this:
+
+```
+insert 3,200 rows                                        -- fine
+select coalesce(max(total_supply),0) from tokens ...     -- ERROR: no such column
+  .catch(() => ({ rows: [{ s: '0' }] }))                 -- error hidden, tx now ABORTED
+checkUsdTotal(..., supply = 0)                           -- "within the ceiling"
+COMMIT                                                   -- returns ROLLBACK, no error
+writePhase(status = 'complete')                          -- a SEPARATE transaction, commits
+```
+
+`tokens` has columns `mint, chain, ticker, name, decimals, charted_pair,
+created_at, role` — **there has never been a `total_supply` column**, so that
+statement failed on every token. It never mattered before because PONS, INDEX and
+AI were loaded with the standalone CLIs; **CHUMP is the first token driven through
+the runner end to end**, and the runner is what wraps a phase in one transaction.
+
+Two fixes, and the first is the one that matters:
+
+- **`withTransaction` now checks the command tag the COMMIT returned** and raises
+  if it is `ROLLBACK`. It costs nothing and converts every
+  swallowed-error-inside-a-transaction into a failure instead of silent data loss.
+  It belongs there rather than at the call site because **every caller is exposed**,
+  not only the one that was caught.
+- The supply figure is read back from the stored identity report — the identity
+  phase reads `totalSupply()` from the contract — and **raises if absent** rather
+  than defaulting to a zero that makes the sanity check meaningless.
+
+**This is the "never map an error to a zero" rule with a new and worse
+consequence.** The `balanceOf` case manufactured plausible wrong data; this one
+threw away correct data and reported success. **A `.catch` that returns a default
+inside a transaction is not a fallback, it is a silent rollback of everything
+around it.**
+
 ---
 
 ### Step 13 — Score
@@ -3766,6 +3808,18 @@ against a 2,000,000 ceiling.
   optional `knownPool`, which the conventions loop already had and never used, and
   raises with a message naming the cause when neither is available. **The fix keeps one
   decode implementation** rather than a second written to avoid the line.
+- **FIXED 2026-09-13: a swallowed query error silently rolled back an entire write
+  phase while it reported success.** `select ... max(total_supply) from tokens`
+  references a column that has never existed, and it was wrapped in
+  `.catch(() => 0)`. The failed statement aborted the transaction, the following
+  `COMMIT` returned the tag `ROLLBACK` without raising, and the phase status was
+  written by a SEPARATE transaction that committed — so the log read
+  `rows_stored: 3200` and `intake complete` over an empty table. Caught only by
+  querying on a fresh connection. `withTransaction` now raises when COMMIT returns
+  ROLLBACK, which covers every caller, and the supply is read from the stored
+  identity report and raises if absent. Never fired before because CHUMP is the
+  first token driven through the runner end to end.
+
 - **FIXED 2026-09-13: `checkPricesAgainstTicks` compared every row against the
   token's WHOLE USD series rather than against its own bucket**, which assumes the
   series spans the token's life. CHUMP's covers 1.3% of it — 49 USDG-derived buckets,

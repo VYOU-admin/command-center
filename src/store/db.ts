@@ -315,6 +315,31 @@ export async function migrate(pool: Pool): Promise<void> {
   log.info('database schema ready');
 }
 
+/**
+ * A COMMIT THAT SILENTLY BECAME A ROLLBACK MUST NOT BE REPORTED AS SUCCESS.
+ *
+ * Postgres aborts a transaction as soon as any statement in it fails. Every
+ * later statement then returns "current transaction is aborted", and `COMMIT`
+ * **does not raise** -- it returns the command tag `ROLLBACK` and discards the
+ * whole transaction. So a single swallowed query error anywhere inside `fn`
+ * turns this function into a silent no-op that returns `fn`'s value as though
+ * everything had been written.
+ *
+ * That is not hypothetical. CHUMP's write phase inserted 3,200 rows, then ran
+ *
+ *     select coalesce(max(total_supply),0) from tokens ...   .catch(() => 0)
+ *
+ * against a `tokens` table that has no `total_supply` column. The `.catch`
+ * hid the error, the transaction was already aborted, `COMMIT` returned
+ * ROLLBACK without complaint, and the runner recorded the phase `complete` --
+ * in a SEPARATE transaction, which committed normally. The log said
+ * `rows_stored: 3200` and `intake complete`; the database held zero rows.
+ *
+ * Checking the command tag costs nothing and converts the whole class of
+ * swallowed-error-inside-a-transaction bugs from silent data loss into a
+ * failure. It is deliberately here rather than at the call site: every caller
+ * is exposed, not just the one that was caught.
+ */
 export async function withTransaction<T>(
   pool: Pool,
   fn: (client: PoolClient) => Promise<T>,
@@ -323,7 +348,16 @@ export async function withTransaction<T>(
   try {
     await client.query('begin');
     const result = await fn(client);
-    await client.query('commit');
+    const done = await client.query('commit');
+    if (done.command === 'ROLLBACK') {
+      throw new Error(
+        'COMMIT returned ROLLBACK: the transaction had already been aborted by a '
+          + 'failed statement whose error was swallowed, so every write in it was '
+          + 'discarded. The work is NOT saved. Find the caught query error inside '
+          + 'this transaction -- an error path that returns a plausible value '
+          + 'instead of raising is what hides this.',
+      );
+    }
     return result;
   } catch (err) {
     await client.query('rollback').catch(() => {});

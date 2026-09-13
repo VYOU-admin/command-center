@@ -1101,9 +1101,36 @@ async function main(): Promise<void> {
             + 'token\'s own series never priced). That is a defect to explain.',
         );
       }
-      const supply = Number((await c.query<{ s: string }>(
-        `select coalesce(max(total_supply),0)::text s from tokens where mint=$1`,
-        [cfg.token]).catch(() => ({ rows: [{ s: '0' }] }))).rows[0]!.s);
+      /*
+       * SUPPLY COMES FROM THE STORED IDENTITY REPORT. `tokens` HAS NO
+       * `total_supply` COLUMN -- its columns are mint, chain, ticker, name,
+       * decimals, charted_pair, created_at, role -- so this query ALWAYS failed,
+       * and it was wrapped in `.catch(() => 0)`.
+       *
+       * The catch did not merely substitute a zero. The failed statement had
+       * already aborted the transaction, so the COMMIT that followed silently
+       * became a ROLLBACK and all 3,200 of CHUMP's rows were discarded while the
+       * run logged `rows_stored: 3200` and `intake complete`. withTransaction now
+       * catches that outcome; this removes the cause.
+       *
+       * The identity phase reads `totalSupply()` from the contract and stores it,
+       * so the figure is read back from there and RAISES if it is absent, rather
+       * than defaulting to a zero that makes the sanity check meaningless.
+       */
+      const idRow = await c.query<{ detail: { totalSupply?: string } | null }>(
+        `select detail from token_intake_state
+          where chain=$1 and token=$2 and phase='identity'`,
+        [cfg.chain, cfg.token],
+      );
+      const supplyText = idRow.rows[0]?.detail?.totalSupply;
+      if (supplyText === undefined) {
+        throw new Error(
+          'the stored identity report carries no totalSupply, so the USD total '
+            + 'cannot be sanity-checked against market cap over supply. Re-run the '
+            + 'identity phase rather than checking against a zero.',
+        );
+      }
+      const supply = Number(supplyText);
       const usdCheck = checkUsdTotal(
         plan.totals.usd, plan.totals.tokenAmount, supply, cfg.impliedPriceCeiling,
       );
