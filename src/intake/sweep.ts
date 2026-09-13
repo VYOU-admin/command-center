@@ -322,7 +322,12 @@ export function verifyConventions(
   };
 
   for (const { log, pool, venue } of swaps) {
-    const swap = decodeSwap(log, venue);
+    /*
+     * The pool is passed in: this loop already has the PoolRow and never reads
+     * the decoded pool, and a v4 log reconstructed from stored columns has no
+     * topics[1] to read it from. See decodeSwap.
+     */
+    const swap = decodeSwap(log, venue, pool.pool);
     const counterparty = venue === 'v3' ? pool.pool : poolManager;
     const moves = byTx.get(swap.txHash) ?? [];
 

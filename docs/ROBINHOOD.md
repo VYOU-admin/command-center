@@ -3282,10 +3282,17 @@ misled on first application, because pool count is what the enumeration phase re
 and swaps are not.** The numbers:
 
 ```
-                        pools in scope        swaps
-v4                                 49           13     across 1 of the 49 pools
-v3                                  2      the market  incl. the charted CHUMP/WETH
+                 pools in scope   swaps in v4_swaps_all   swaps, FULL LIFE (swept)
+v4                           49            13                    10,722    3.9%
+v3                            2       n/a (not covered)         264,263   96.1%
 ```
+
+**The 13 was a coverage artefact and I reported it before the sweep corrected it.**
+`v4_swaps_all` stops at 42,695,454 and CHUMP's v4 activity is almost entirely after
+it, so the free query saw 13 swaps where the full-life sweep found **10,722**. The
+conclusion survives — v3 carries **96.1%** of CHUMP's swaps — but the margin is 20x
+narrower than the free query implied, and v4 at 3.9% is not negligible. **State the
+coverage limit AND treat the figure as a lower bound until the sweep replaces it.**
 
 By pools, CHUMP is **96% v4** and looks like AI. By swaps, its 49 v4 pools carry
 **thirteen swaps between them**, all in blocks 39,893,773–40,843,977, and everything
@@ -3362,6 +3369,25 @@ the window closed. A ceiling or a span sized from the deployment block would hav
 91x too generous; one sized near head, 91x too tight. **The window is real but
 back-loaded into its last ~5M blocks**, which is where the cohort will come from.
 
+#### The sweep, measured
+
+```
+duration            788,104 ms = 13.1 min
+cost                111,190 CU = $0.050   against ~56,880 CU / $0.026 estimated -- 1.95x
+logs                v3 264,263   v4 10,722   transfers 412,997
+coverage            all three streams 61,698,121 / 61,698,121 blocks, 0 gaps, 0 overlaps
+```
+
+**The 1.95x overrun is entirely explained and it is not density: the runner swept from
+block 0, not from the deployment block.** `expectedBlocks` is 61,698,121 — the whole
+chain — where the estimate assumed 37.88M from block 23,791,950. **23.8M blocks before
+the token existed were swept and can only ever return zero logs**, about 238 wasted
+requests, ~14,280 CU, $0.0064. The rest of the overrun is the same arithmetic applied
+to a range 1.63x larger than estimated. Step 5 says "sweep full chain life"; the runner
+reads that as the CHAIN's life rather than the TOKEN's. Sizing any future estimate from
+the deployment block while the runner starts at zero will be wrong by the ratio of the
+two.
+
 **Span sizing is capped, not density-driven, for this token.** At 0.0005–0.0457
 logs/block the 6,000-log target implies spans of 76,394 to 200,000,000 blocks, so
 `max_log_span_blocks` at 100,000 binds almost everywhere: **≈1 request per 100,000
@@ -3397,6 +3423,28 @@ against a 2,000,000 ceiling.
   Taking the first stopped phase rather than the last would also unblock progress,
   but it leaves stale `stopped` rows behind and the state table then no longer
   describes what happened.
+- **The runner wraps each PHASE in one transaction, so step 5's "commit progress per
+  range" does not happen through it.** `run()` calls
+  `withTransaction(app.pool, (c) => fn(rpc, c))`, so every row a 13-minute sweep writes
+  is invisible until the phase commits — verified on CHUMP, where eight consecutive
+  polls read 0 transfers and the ninth read 412,997. A sweep that dies mid-phase leaves
+  **nothing**, which is the opposite of the property step 5 requires and which the
+  standalone `sweep-transfers` CLI does provide. Progress is also unobservable while it
+  runs, so the 3x wall-clock rule has nothing to check.
+- **The runner sweeps from block 0, not from the token's deployment block.** CHUMP's
+  sweep covered 61,698,121 blocks where the token has existed for 37.9M, so 23.8M
+  blocks that cannot contain it were read: ~238 requests, ~14,280 CU, $0.0064 per
+  stream-set. Step 5's "sweep full chain life" means the TOKEN's life. The deployment
+  block is already known — the identity phase stores it and passes it as `firstBlock`
+  to the windows phase — so this is a one-line scope fix, not a new measurement.
+- **`decodeSwap` threw a bare TypeError on a v4 log with no `topics[1]`.** FIXED
+  2026-09-13. A v4 pool id lives in `topics[1]`, so a log reconstructed from stored
+  columns has none, and the conventions phase died three frames down with
+  `Cannot read properties of undefined (reading 'toLowerCase')` — on CHUMP, the first
+  token whose conventions check ran against reconstructed v4 logs. It now takes an
+  optional `knownPool`, which the conventions loop already had and never used, and
+  raises with a message naming the cause when neither is available. **The fix keeps one
+  decode implementation** rather than a second written to avoid the line.
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database
   fails at the first read. Its shape is recorded in step 5.

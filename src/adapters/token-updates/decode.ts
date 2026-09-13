@@ -110,10 +110,36 @@ export interface SwapLog {
   amount1: bigint;
 }
 
-export function decodeSwap(log: LogEntry, venue: 'v3' | 'v4'): SwapLog {
+/**
+ * `knownPool` is for callers that ALREADY know which pool a log belongs to.
+ *
+ * A v4 pool id lives in `topics[1]`, so a v4 log reconstructed from stored
+ * columns rather than fetched has no topics and this threw a bare
+ * `Cannot read properties of undefined (reading 'toLowerCase')`. CHUMP's
+ * conventions phase died on exactly that: it passes a PoolRow it already has and
+ * never reads the decoded pool, so the derivation was pure waste AND the only
+ * thing that could fail. Passing the pool in keeps ONE decode implementation
+ * rather than a second one written to avoid this line.
+ *
+ * Without `knownPool` a v4 log missing `topics[1]` now raises with a message that
+ * says what is wrong, rather than a TypeError from three frames down.
+ */
+export function decodeSwap(
+  log: LogEntry, venue: 'v3' | 'v4', knownPool?: string,
+): SwapLog {
+  let pool: string;
+  if (venue === 'v3') pool = normalizeAddress(log.address);
+  else if (knownPool) pool = normalizeAddress(knownPool);
+  else if (log.topics[1]) pool = log.topics[1].toLowerCase();
+  else {
+    throw new Error(
+      'a v4 Swap log has no topics[1], so its pool id cannot be read. A log '
+      + 'reconstructed from stored columns must be given knownPool.',
+    );
+  }
   return {
     venue,
-    pool: venue === 'v3' ? normalizeAddress(log.address) : log.topics[1]!.toLowerCase(),
+    pool,
     txHash: log.transactionHash.toLowerCase(),
     block: blockOf(log),
     logIndex: logIndexOf(log),
