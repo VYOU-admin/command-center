@@ -352,6 +352,20 @@ which none of the other three has:
 | scoring + watchlist, ALL 5 windows | **11.0 s** | 0 | database only |
 | | **total 142,378 CU** | | **$0.064** |
 
+CASHCAT, the earliest token on the chain and the second through the runner
+end to end. Phases filled in as the run proceeds:
+
+| phase | CASHCAT wall-clock | CU | against estimate |
+|---|---|---|---|
+| identity | **0.7 s** | 816 | ~800 — exact, and identical to every other token |
+| windows | **0.9 s** | 1,100 | ~1,040 for one window — 55 `eth_getBlockByNumber`, 5.8% over |
+| pools | **2.5 s** | 480 | ~500 — exact. 8 `eth_getLogs` for 1,001 candidates |
+
+**The identity phase costs 816 CU on every token measured** — PONS, INDEX, AI, CHUMP
+and now CASHCAT — because the bisect depth barely moves: 27 `eth_getCode` finds a
+deployment block at 88,836 exactly as it finds one at 23,791,950. **A constant that
+holds across a 268x range of deployment blocks is worth trusting.**
+
 **The cohort estimate was the one that mattered and it landed exactly.** 642 candidate
 wallets × 17.1 CU payment + ≤642 × 26 CU code check predicted ~28,000 CU; the run spent
 **28,690**, and it decomposes precisely: 670 transactions × 15 + 168 receipts × 15 =
@@ -4070,6 +4084,101 @@ blocks.** Sweep estimate from those blocks: transfers over 37.88M blocks ≈379 
 v3 `Swap` on 2 pools ≈379, the v4 gap 42.70M→head ≈190 — **≈56,880 CU ≈ $0.026**
 against a 2,000,000 ceiling.
 
+
+### CASHCAT — `0x020bfC650A365f8BB26819deAAbF3E21291018b4`
+
+**IN PROGRESS 2026-09-14. Steps 1–7 only; the run stops at the cohort review.**
+"Cash Cat", 18 decimals, supply 1,000,000,000, deployed at block **88,836**.
+
+**CASHCAT IS BY FAR THE EARLIEST TOKEN THIS PIPELINE HAS LOADED**, and almost
+everything below follows from that. Its deployment block is **88,836** against
+INDEX's 1,670,725, PONS's 8,963,150, AI's 9,721,433 and CHUMP's 23,791,950 — it
+predates the next-earliest token by a factor of nineteen, and sits only 38,120 blocks
+after the earliest WETH/USDG pool on the chain (50,716).
+
+```
+window CASHCAT-P1   846,162 .. 3,789,108      2,942,946 blocks
+                    2026-07-01T16:00:00-04:00 -> 2026-07-07T16:00:00-04:00
+pumps               2026-07-07T16:00:00-04:00  <- IS the window end
+                    2026-08-03T20:00:00-04:00, 2026-08-19T16:00:00-04:00
+charted pool        0xa70fc67c9f69da90b63a0e4c05d229954574e313  CASHCAT/WETH, v3
+head at identity    62,148,338
+```
+
+#### THE CHARTED POOL IS v3 AND THE TOKEN IS NOT — the CHUMP lesson in reverse
+
+**CHUMP looked 96% v4 by pool count and was 96.1% v3 by swaps. CASHCAT is the mirror
+image: it was handed over as a v3 token because its CHARTED pool is v3, and its v4
+side is enormous.** Measured from `v4_swaps_all` against its 920 enumerated v4 pool
+ids, before any sweep:
+
+```
+candidates                     1,001   920 v4 from Initialize, 81 v3 from the factory
+v4 swaps in v4_swaps_all     879,297   across 296 of those 920 pools
+   ...spanning                          15,115,267 .. 42,695,199
+   ...inside CASHCAT-P1              0  <- A COVERAGE ARTEFACT, NOT A MEASUREMENT
+```
+
+**Both numbers have to be read with their limits or they mislead in opposite
+directions.** 879,297 is a **lower bound** — `v4_swaps_all` stops at 42,695,454 and
+says nothing about the 19.5M blocks since. And the **0 inside the window is not a
+finding at all**: the window closes at 3,789,108 and the table begins at 15,115,267,
+so the window sits **11.3 million blocks below anything that table can see**.
+
+**THE PRE-SWEEP VENUE MEASUREMENT THE V3-ONLY SUBSECTION RECOMMENDS IS IMPOSSIBLE FOR
+THIS TOKEN, and saying so is the result.** That subsection tells the next token to
+weigh the split by swaps using one free SQL query against `v4_swaps_all`. For CHUMP
+that worked because its window overlapped the table by 89%. For CASHCAT the overlap is
+**zero**, so the free query can only describe a period the cohort does not come from.
+**The window's split cannot be known until the sweep, and no estimate should be sized
+against the covered range instead.**
+
+**What is already certain is that v4 is not negligible here**, which is the opposite
+of CHUMP, so none of the "v4-specific rules that did not apply" in the V3-ONLY
+subsection can be assumed away.
+
+#### THE ETH/USD SERIES DOES NOT REACH THIS TOKEN, and it was checked before the run
+
+**The chain's residue-3150 ETH/USD series starts at bucket 1,663,150. CASHCAT's window
+opens at bucket 843,150 and its life at bucket 83,150.** The first **816,988 blocks of
+the window — 27.8% of it — have no ETH/USD bucket at any residue**, and neither does
+the 757,326 blocks of life before the window.
+
+```
+bucketOf(block, 10000, 8963150) = 8963150 + floor((block - 8963150)/10000)*10000
+  deployment  88,836     -> bucket    83,150     158 buckets below the series
+  window start 846,162   -> bucket   843,150      82 buckets below the series
+  series starts          -> bucket 1,663,150
+```
+
+**The arithmetic below the origin is correct and that was verified rather than
+assumed** — `Math.floor` is true floor division, so a block below the anchor still
+lands on residue 3150 at or below itself. The gap is in the DATA, not the lookup,
+which is precisely the distinction the INDEX findings draw.
+
+**It is recoverable, and cheaply, for the same reason INDEX's 6,052 were.** The
+earliest WETH/USDG pool on this chain was created at block **50,716** — 38,120 blocks
+*before* CASHCAT exists — so a USD-denominated ETH market runs alongside this token
+for its entire life. The series simply was never extended that far back because no
+loaded token needed it. `eth-usd-series` already does this job and cost $0.0193 to
+cover 7.8M blocks; extending it below 1,663,150 is the same job over a smaller range.
+
+**This is a step 10 action and is NOT done in this session**, which stops at the
+cohort. It is recorded here now, before the rows exist, because `intake/index.yaml`'s
+false coverage claim is the cautionary case: **a config that asserts a series covers a
+token must be checked against the series, and CASHCAT's config says the opposite —
+that the reach is one bucket from the window and must be verified.**
+
+#### The flow probe: NOT RUN, and it could not even be PRICED yet
+
+Step 3 says to price the probe before deciding, from the count of addresses that both
+sent and received the token. **That count comes from stored transfers and CASHCAT has
+none**, so the probe cannot be priced before the sweep, let alone justified. It is
+off, reported as **"NOT RUN"** rather than as a zero, and the decision can be revisited
+against real transfer data afterwards. **The pricing step being unavailable is itself
+worth recording: the document's decision procedure assumes transfers already exist.**
+
+---
 
 ## 9. Rules here the code does not implement
 
