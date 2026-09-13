@@ -2485,37 +2485,62 @@ a filter matching nothing.
 
 #### The alert, as it renders
 
-Aggregated by token, nothing per-wallet, **buy and sell sides kept separate** so a
-token being accumulated is distinguishable from one being distributed. Ordered by
-total USD descending.
+Aggregated by token, nothing per-wallet, **three lines per token** with buy and sell
+kept separate so a token being accumulated is distinguishable from one being
+distributed. Ordered by total USD descending.
 
 ```
-Watchlist: 189 trades, 67 tokens, 54 wallets
-Blocks 61554943-61574942  ·  $24,918 priced  ·  114 of 189 rows unpriced
+Watchlist: 74 trades, 35 tokens, 29 wallets
+Blocks 61595493-61603149  ·  $18,204 priced  ·  18 of 74 rows unpriced
 
 [**PONS** — Pons](https://dexscreener.com/robinhood/0x39dbed…4571)  `0x39db…4571`
-　bought  —  —  —
-　sold  　1 wallet  $4,616+  38,416
+　bought   2 wallets  $4,616+
+　sold     —
+　price    $0.1202
 
 [**WIF** — dogwifhat](https://dexscreener.com/robinhood/0x15d36b…5c4d)  `0x15d3…5c4d`
-　bought  —  —  —
-　sold  　2 wallets  $4,394  566,530
+　bought   —
+　sold     3 wallets  unpriced
+　price    unpriced
 
-…and 47 more tokens, ordered by USD. All 67 are in `watchlist_activity`.
+…and 15 more tokens, ordered by USD. All 35 are in `watchlist_activity`.
 ```
 
-Each line carries: **symbol and name**, a **DexScreener link** on the label, the
-short address, then per side — **wallets, USD, token amount**, all three separate.
+**The token amount is NOT on the bought and sold lines — USD only.** That is a
+DISPLAY decision and nothing else: token amounts are still stored on every
+`watchlist_activity` row and still shown per trade on the `/watchlist` tab, both
+unchanged. The alert was carrying three numbers a side, which buried the one a reader
+acts on.
+
+**THE PRICE LINE IS SLICE-IMPLIED, NOT THE STORED SERIES.** It is total USD divided
+by total token amount **across that token's PRICED rows in this slice, both sides
+combined** — derived from the rows the alert already aggregates, with no price series
+read and no additional request. Two consequences that must not be forgotten:
+
+- **The denominator is the priced rows only.** Including an unpriced row's tokens
+  would divide real dollars by tokens that contributed none, understating the price by
+  whatever share went unpriced.
+- **It is a signal figure, not the accounting record.** Same distinction this step
+  already draws for the nearest-preceding bucket lookup: the watcher prices arbitrary
+  tokens off a fresh in-memory derivation for a screener, while
+  `wallet_transactions` keeps the exact-bucket discipline. A slice-implied price is a
+  volume-weighted average over ~10,000 blocks of one wallet set's trades — **not the
+  token's price**, and never to be compared with a `<token>_usd_prices` bucket as
+  though it were.
+
+**Where no row in that token priced, the line reads `unpriced` rather than being
+omitted.** A missing line would read as "no price exists"; the line saying `unpriced`
+says we looked and could not derive one.
+
+**Zero is never printed as `$0`.** A side with no trades reads `—`; a side whose every
+row was unpriced reads `unpriced`; a side partly unpriced reads `$n+`, so a total is
+never presented as complete when it is not. `$0` would be a measurement, and the wrong
+one.
 
 **A symbol is a label, not an identity, so the address is always shown.** Two
 tokens on this chain both answer `symbol()` with "NVDA" (step 16). Name and symbol
 are read once per token and cached with its decimals; a token that answers neither
 is rendered as its address rather than given an invented label.
-
-**Zero is never printed as `$0`.** A side with no trades reads `—`; a side whose
-every row was unpriced reads `unpriced`; a side partly unpriced reads `$n+`, so a
-total is never presented as complete when it is not. `$0` would be a measurement,
-and the wrong one.
 
 **The list is capped at 20 tokens and the remainder is COUNTED IN THE MESSAGE.**
 Discord rejects an embed description over 4,096 characters outright rather than

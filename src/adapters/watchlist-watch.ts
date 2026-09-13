@@ -219,46 +219,55 @@ const adapter: SourceAdapter<{ token: string }> = {
         interface Agg {
           name: string | null; symbol: string | null;
           buyers: Set<string>; sellers: Set<string>;
-          boughtTokens: number; soldTokens: number;
           boughtUsd: number; soldUsd: number;
           boughtTrades: number; soldTrades: number;
           boughtUnpriced: number; soldUnpriced: number;
+          /*
+           * The price line's two terms. BOTH are accumulated over PRICED ROWS ONLY.
+           * Including an unpriced row's tokens in the denominator would divide real
+           * dollars by tokens that contributed none, understating the price by
+           * whatever share of the slice went unpriced.
+           */
+          pricedUsd: number; pricedTokens: number;
         }
         const byToken = new Map<string, Agg>();
         for (const r of report.rows) {
           const e = byToken.get(r.token) ?? {
             name: r.tokenName, symbol: r.tokenSymbol,
             buyers: new Set<string>(), sellers: new Set<string>(),
-            boughtTokens: 0, soldTokens: 0, boughtUsd: 0, soldUsd: 0,
-            boughtTrades: 0, soldTrades: 0, boughtUnpriced: 0, soldUnpriced: 0,
+            boughtUsd: 0, soldUsd: 0, boughtTrades: 0, soldTrades: 0,
+            boughtUnpriced: 0, soldUnpriced: 0, pricedUsd: 0, pricedTokens: 0,
           };
           const amt = Math.abs(Number(r.tokenAmount));
           if (r.side === 'buy') {
-            e.buyers.add(r.wallet); e.boughtTokens += amt; e.boughtTrades += 1;
+            e.buyers.add(r.wallet); e.boughtTrades += 1;
             if (r.usdAmount === null) e.boughtUnpriced += 1; else e.boughtUsd += r.usdAmount;
           } else {
-            e.sellers.add(r.wallet); e.soldTokens += amt; e.soldTrades += 1;
+            e.sellers.add(r.wallet); e.soldTrades += 1;
             if (r.usdAmount === null) e.soldUnpriced += 1; else e.soldUsd += r.usdAmount;
           }
+          if (r.usdAmount !== null) { e.pricedUsd += r.usdAmount; e.pricedTokens += amt; }
           byToken.set(r.token, e);
         }
 
         const short = (a: string): string => `${a.slice(0, 6)}…${a.slice(-4)}`;
         const n0 = (x: number): string =>
           x.toLocaleString('en-US', { maximumFractionDigits: 0 });
-        const tok = (x: number): string =>
-          x >= 1000 ? x.toLocaleString('en-US', { maximumFractionDigits: 0 })
-            : x.toLocaleString('en-US', { maximumFractionDigits: 4 });
         /*
-         * A ZERO USD FIGURE IS NEVER PRINTED AS $0. Either some rows on that side
-         * were unpriced -- shown as `unpriced` or `$n+` -- or there was no activity
-         * on that side, shown as a dash. `$0` would be a measurement, and it would
-         * be the wrong one.
+         * A ZERO USD FIGURE IS NEVER PRINTED AS $0. Either the side had no trades --
+         * shown as a dash -- or every row on it was unpriced, or it is partly
+         * unpriced and reads `$n+`. `$0` would be a measurement, and the wrong one.
          */
         const usd = (v: number, unpriced: number, trades: number): string => {
           if (trades === 0) return '—';
           if (unpriced === trades) return 'unpriced';
           return unpriced > 0 ? `$${n0(v)}+` : `$${n0(v)}`;
+        };
+        /* Token prices here span many orders of magnitude, so the scale picks itself. */
+        const px = (v: number): string => {
+          if (v >= 1) return `$${v.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+          if (v >= 0.0001) return `$${v.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')}`;
+          return `$${v.toPrecision(3)}`;
         };
 
         const lines = [...byToken.entries()]
@@ -266,9 +275,9 @@ const adapter: SourceAdapter<{ token: string }> = {
           .map(([token, e]) => {
             /*
              * A SYMBOL IS A LABEL, NOT AN IDENTITY -- two tokens on this chain both
-             * answer symbol() with "NVDA". The address is always shown alongside,
-             * and a token that answers neither name() nor symbol() shows the
-             * address rather than an invented label.
+             * answer symbol() with "NVDA" -- so the address is always shown, and a
+             * token answering neither name() nor symbol() shows the address rather
+             * than a label somebody invented for it.
              */
             const label = e.symbol && e.name ? `**${e.symbol}** — ${e.name}`
               : e.symbol ? `**${e.symbol}**`
@@ -276,22 +285,34 @@ const adapter: SourceAdapter<{ token: string }> = {
                   : `\`${short(token)}\``;
             const chart = `https://dexscreener.com/robinhood/${token}`;
             const nb = e.buyers.size; const ns = e.sellers.size;
-            const side = (
-              wallets: number, trades: number, usdV: number, unpriced: number, amount: number,
-            ): string => (trades === 0 ? '—  —  —'
-              : `${wallets} wallet${wallets === 1 ? '' : 's'}  `
-                + `${usd(usdV, unpriced, trades)}  ${tok(amount)}`);
+            const sideLine = (
+              wallets: number, trades: number, v: number, unpriced: number,
+            ): string => (trades === 0 ? '—'
+              : `${wallets} wallet${wallets === 1 ? '' : 's'}  ${usd(v, unpriced, trades)}`);
+            /*
+             * SLICE-IMPLIED PRICE, NOT THE STORED SERIES. Total USD over total token
+             * amount across this token's PRICED rows in this slice, both sides
+             * combined, from the rows already aggregated above -- no series read and
+             * no extra request. It is a volume-weighted average over one wallet set's
+             * trades in ~10,000 blocks: a signal figure, not the accounting record,
+             * and never to be compared with a <token>_usd_prices bucket as though it
+             * were. Where nothing priced it reads `unpriced` rather than being
+             * omitted -- a missing line would read as "no price exists".
+             */
+            const priceLine = e.pricedTokens > 0 && e.pricedUsd > 0
+              ? px(e.pricedUsd / e.pricedTokens)
+              : 'unpriced';
             return `[${label}](${chart})  \`${short(token)}\`\n`
-              + `　bought  ${side(nb, e.boughtTrades, e.boughtUsd, e.boughtUnpriced, e.boughtTokens)}\n`
-              + `　sold  　${side(ns, e.soldTrades, e.soldUsd, e.soldUnpriced, e.soldTokens)}`;
+              + `　bought   ${sideLine(nb, e.boughtTrades, e.boughtUsd, e.boughtUnpriced)}\n`
+              + `　sold     ${sideLine(ns, e.soldTrades, e.soldUsd, e.soldUnpriced)}\n`
+              + `　price    ${priceLine}`;
           });
 
         /*
-         * DISCORD CAPS AN EMBED DESCRIPTION AT 4,096 CHARACTERS. 67 tokens at three
-         * lines each overruns it, and a truncated embed is REJECTED rather than
-         * trimmed -- the alert would vanish. So the list is capped and the tokens
-         * left out are COUNTED IN THE MESSAGE: a silent trim would read as "that is
-         * all that happened".
+         * DISCORD CAPS AN EMBED DESCRIPTION AT 4,096 CHARACTERS, and a description
+         * over it is REJECTED rather than trimmed -- the alert would vanish. So the
+         * list is capped and the tokens left out are COUNTED IN THE MESSAGE: a silent
+         * trim would read as "that is all that happened".
          */
         const LIMIT = 20;
         const shown = lines.slice(0, LIMIT);
@@ -307,11 +328,6 @@ const adapter: SourceAdapter<{ token: string }> = {
             + (omitted > 0
               ? `\n\n_…and ${omitted} more token${omitted === 1 ? '' : 's'}, ordered by USD._`
               : '')
-            /*
-             * THE LINK IS OMITTED WHEN THERE IS NO DOMAIN, never printed broken.
-             * Step 14: a dead link that looks live is the same shape of failure as
-             * a filter that matches nothing.
-             */
             + (ctx.publicUrl
               ? `\n\n**[Every trade on the watchlist tab →](${ctx.publicUrl}/watchlist)**`
                 + `  ·  filterable by token and by wallet`
