@@ -97,6 +97,14 @@ class Stop extends Error {
   }
 }
 
+/** `--stop-after` reached. The phase completed and was recorded; only the run ends. */
+class StopAfter extends Error {
+  constructor(readonly phase: Phase) {
+    super(`stopping after phase "${phase}" as requested`);
+    this.name = 'StopAfter';
+  }
+}
+
 function client(cfg: IntakeConfig, phase: Phase, key: string): RpcClient {
   return new RpcClient(
     cfg.rpcUrlTemplate.replace('{key}', key),
@@ -152,7 +160,33 @@ async function main(): Promise<void> {
     throw new Error(`--redo "${redoArg}" is not a phase. One of: ${PHASES.join(', ')}`);
   }
   const redo = redoArg as Phase | undefined;
-  if (!configPath) throw new Error('usage: intake <config.yaml> [--continue] [--redo <phase>]');
+  /*
+   * `--stop-after <phase>` EXISTS SO STEP 7'S ORDERING COSTS ONE COHORT, NOT TWO.
+   *
+   * Router detection lives in `scope`, `scope` STOPs, and a `--continue` from
+   * there runs sweep, conventions AND cohort in one invocation -- so the cohort
+   * is built before detection has ever seen a transfer. The remedy without this
+   * flag is to let it run, `--redo scope`, then `--redo cohort`, which pays the
+   * cohort's whole RPC bill twice: 28,690 CU on CHUMP, more on a larger token.
+   *
+   * It is a RUN CONTROL and touches no definition. Phases, their order, their
+   * ceilings and their reports are unchanged; the run simply exits cleanly after
+   * the named phase instead of continuing.
+   */
+  const stopIdx = args.indexOf('--stop-after');
+  const stopArg = stopIdx >= 0 ? args[stopIdx + 1] : undefined;
+  if (stopIdx >= 0 && (!stopArg || stopArg.startsWith('--'))) {
+    throw new Error(`--stop-after needs a phase name. One of: ${PHASES.join(', ')}`);
+  }
+  if (stopArg && !(PHASES as readonly string[]).includes(stopArg)) {
+    throw new Error(`--stop-after "${stopArg}" is not a phase. One of: ${PHASES.join(', ')}`);
+  }
+  const stopAfter = stopArg as Phase | undefined;
+  if (!configPath) {
+    throw new Error(
+      'usage: intake <config.yaml> [--continue] [--redo <phase>] [--stop-after <phase>]',
+    );
+  }
 
   const cfg = await loadIntakeConfig(configPath);
   const app = await bootstrap();
@@ -408,6 +442,12 @@ async function main(): Promise<void> {
       ...out.report,
     });
     if (shouldStop) throw new Stop(phase, out.report);
+    /*
+     * Thrown AFTER the phase is recorded complete, so the work is kept and only
+     * the run ends. A phase's own STOP takes precedence -- it is the document's
+     * review point and this is an operator convenience.
+     */
+    if (stopAfter === phase) throw new StopAfter(phase);
     return out.value;
   };
 
@@ -1246,6 +1286,14 @@ async function main(): Promise<void> {
 
     log.info('intake complete', { token: cfg.token, ticker: cfg.ticker });
   } catch (err) {
+    if (err instanceof StopAfter) {
+      log.info('STOPPED AFTER THE REQUESTED PHASE', {
+        phase: err.phase,
+        note: 'the phase completed and is recorded complete; only the run ended',
+      });
+      await app.pool.end();
+      process.exit(0);
+    }
     if (err instanceof Stop) {
       log.warn('STOPPED FOR REVIEW', {
         phase: err.phase,

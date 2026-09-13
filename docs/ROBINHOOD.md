@@ -1188,6 +1188,30 @@ had been swept by hand first. Re-run scope after the sweep, or move detection to
 the cohort step; until that is done, check the probed count is non-zero before
 trusting an empty router set.
 
+**RE-RUNNING SCOPE AFTER THE SWEEP COSTS A DUPLICATE COHORT UNLESS THE RUN CAN BE
+STOPPED BETWEEN THEM — `--stop-after <phase>`.** The ordering this step requires is
+`scope → sweep → scope again → cohort`, and the runner's phase order is fixed:
+`scope` STOPs, and a `--continue` from there runs **sweep, conventions and cohort in
+one invocation**. So the cohort is built before detection has ever seen a transfer,
+and the only remedy without a new control is to let it run, `--redo scope`, and then
+`--redo cohort` — **paying the cohort's whole RPC bill twice.** On CHUMP that would
+have been 28,690 CU spent for nothing; on a larger token it is the single most
+expensive phase paid twice.
+
+`npm run intake -- <cfg> --stop-after sweep` runs up to and including the named
+phase and exits cleanly. It is a run control and touches no definition: the phases,
+their order, their ceilings and their reports are unchanged. The sequence becomes
+
+```
+run                          -> identity, windows, pools      STOP
+--continue                   -> scope (routers probed 0)      STOP
+--continue --stop-after sweep-> sweep                         stops after it
+--redo scope                 -> scope WITH transfers stored   STOP
+--continue                   -> conventions, cohort           STOP
+```
+
+and **the cohort is paid for once, after the routers it must exclude are persisted.**
+
 **Identify them by behaviour, not from a list.** For PONS, behaviour finds
 > **30 routers where the configured list holds 3**, of which only 2 are routers
 > at all. A router the list misses gets the trade attributed to it instead of to
@@ -4049,9 +4073,16 @@ against a 2,000,000 ceiling.
 
 ## 9. Rules here the code does not implement
 
-- **`--continue` cannot cross two adjacent STOP phases, so the runner deadlocks
-  between `pools` and `scope`.** Found on CHUMP, the first token driven through the
-  runner end to end rather than phase-by-phase with the standalone CLIs.
+- **FIXED 2026-09-13, and this entry read as OPEN until 2026-09-14 — `--continue`
+  could not cross two adjacent STOP phases, so the runner deadlocked between `pools`
+  and `scope`.** Found on CHUMP, the first token driven through the runner end to end
+  rather than phase-by-phase with the standalone CLIs. **The fix shipped the same day
+  and this paragraph went on describing it in the present tense**, which is the second
+  instance in two days of a section-9 entry outliving the defect it records — the
+  first was PONS's routers. **Re-read the code before believing an entry here.**
+
+  **One part of it IS still live and is separated out below**: clearing works when one
+  stop is outstanding, and mis-selects when two are.
 
   `stoppedOn` is assigned inside a loop over `PHASES` with no break, so **the LAST
   stopped phase wins**; and clearing a stop only does `done.add(stoppedOn)` in
@@ -4069,11 +4100,20 @@ against a 2,000,000 ceiling.
   the defect. The runner's own promise — "IT STOPS WHERE THE DOCUMENT STOPS", five
   phases ending in review — is only true for the first two stops.
 
-  **The fix is to persist the cleared stop as `complete` when it is cleared**, so a
+  **The fix, shipped: persist the cleared stop as `complete` when it is cleared**, so a
   phase that has already produced its report and had its stop cleared never re-runs.
   Taking the first stopped phase rather than the last would also unblock progress,
   but it leaves stale `stopped` rows behind and the state table then no longer
   describes what happened.
+
+- **STILL OPEN: with TWO stops outstanding, `--continue` clears the LATER one and
+  re-runs the earlier.** `stoppedOn` is still assigned by a loop with no break, so the
+  last stopped phase in `PHASES` order wins. Sequentially that never bites — each stop
+  is cleared before the next is created — but it bites the moment two are outstanding
+  at once, which is what `--redo <earlier phase>` produces while a later phase sits
+  stopped. The cleared phase is then marked `complete` **without having re-run**, which
+  is worse than the deadlock it replaced: the deadlock made no progress and this makes
+  false progress. Avoid creating two outstanding stops; `--stop-after` below is how.
 - **The runner wraps each PHASE in one transaction, so step 5's "commit progress per
   range" does not happen through it.** `run()` calls
   `withTransaction(app.pool, (c) => fn(rpc, c))`, so every row a 13-minute sweep writes

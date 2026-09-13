@@ -1,0 +1,125 @@
+# CASHCAT — THE EARLIEST TOKEN THIS PIPELINE HAS LOADED.
+#
+# Its window resolves into blocks ~1.66M-3.79M, which is BEFORE INDEX's
+# deployment block (1,670,725) and eleven million blocks below where
+# `v4_swaps_all` begins. Two consequences drive every choice in this file and
+# both are recorded in section 8 before the run, not after it:
+#
+#   1. THE v4_swaps_all SHORTCUT IS UNAVAILABLE. It covers 15,115,267-42,695,454.
+#      A v4 swap count taken from it over this window returns ZERO as a pure
+#      coverage artefact -- the trap the INDEX findings name. The venue split
+#      must come from the sweep and from nothing else.
+#   2. THE CHAIN'S ETH/USD SERIES BARELY REACHES THIS ERA. The residue-3150 grid
+#      starts at bucket 1,663,150, which is the bucket holding block 1,663,218.
+#      One bucket of margin. If the first swap lands below it, early rows are
+#      unpriceable for the same chronological reason INDEX's 6,052 were.
+#
+# The V3-ONLY subsection of section 8 was written from CHUMP for this token.
+
+chain: robinhood
+ticker: CASHCAT
+# Checksummed exactly as supplied and as the chain returns it. Lowercasing here
+# would match no cohort, since wallet_tags.mint stores this string.
+token: "0x020bfC650A365f8BB26819deAAbF3E21291018b4"
+# Recorded, NEVER used as a filter. Collecting only the charted pair silently
+# drops every wallet an aggregator routed elsewhere.
+charted_pair: "0xa70fc67c9f69da90b63a0e4c05d229954574e313"
+
+# 16:00 Eastern is 20:00Z in July. Both bounds carry their offset: a bare local
+# time is a different moment depending on who reads it, and the runner rejects
+# one without an offset rather than guessing.
+windows:
+  - label: CASHCAT-P1
+    start: "2026-07-01T16:00:00-04:00"
+    end:   "2026-07-07T16:00:00-04:00"
+
+# PUMP 1 IS THE WINDOW END, exactly as CHUMP's was, and all three sit at or
+# after it. Section 8 records what that does to metric 5: a cohort member can
+# only precede the first pump, so the metric's maximum is 1/n_pumps = 1/3 BY
+# CONSTRUCTION. That is a prediction to be measured at step 13, not assumed.
+pump_points:
+  - "2026-07-07T16:00:00-04:00"
+  - "2026-08-03T20:00:00-04:00"
+  - "2026-08-19T16:00:00-04:00"
+
+rpc:
+  url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+  key_var: ALCHEMY_API_KEY
+  request_timeout_ms: 120000
+  max_log_span_blocks: 100000
+  sparse_log_span_blocks: 40000000
+  min_log_span_blocks: 25
+  target_logs_per_request: 6000
+
+routers:
+  min_recipients: 50
+  min_swap_share: 0.5
+
+venues:
+  v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+  v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+pricing:
+  assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+    - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+    - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+  usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+  native_assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+    - "0x0000000000000000000000000000000000000000"
+
+  # READS the chain's ETH/USD series, never writes it. token-updates (PONS) owns
+  # it. Step 10's one-owner rule; the intake honours the key since 2026-09-13.
+  derives_native_usd: false
+
+  bucket_blocks: 10000
+  # THE EXISTING RESIDUE-3150 GRID that PONS, INDEX and CHUMP read. Step 10
+  # prefers an existing grid over a new one wherever the token shares a series,
+  # and CASHCAT is WETH-quoted so it leans on that series for every row.
+  #
+  # The origin sits ABOVE this token's whole life, which is fine and is what
+  # INDEX already does: the bucket is block - ((block - origin) mod 10000), so
+  # blocks below the origin still land on residue 3150. What must be CHECKED,
+  # not assumed, is whether the series has VALUES that far back -- it starts at
+  # 1,663,150 and CASHCAT's window opens in that very bucket.
+  bucket_origin: 8963150
+  tick_fence_multiple: 100
+  native_fence_multiple: 10
+
+floors:
+  token_raw_units: 1
+  paid_raw_units: 1
+  token_amount: 0.001
+  usd: 0.01
+
+tables:
+  token_usd: cashcat_usd_prices
+  native_usd: native_usd_prices
+
+# CEILINGS, each sized before the phase runs rather than copied.
+#
+# sweep: CASHCAT's life is roughly 1.6M -> ~62M = ~60.4M blocks. At the
+# 100,000-block cap that is ~604 requests per stream across three streams
+# (transfer, swap-v3, swap-v4) = ~1,812 requests x 60 CU = ~109,000 CU. 800,000
+# is ~7x that: loose enough to absorb ordinary density variation, tight enough
+# to catch a span collapse -- the defect that once drove a span to its 25-block
+# floor would blow through this in minutes. Deliberately NOT the 2,000,000 CHUMP
+# used, because CHUMP spent 111,190 against it and never tested the guard.
+#
+# cohort: CHUMP spent 28,690 CU on 642 candidate wallets. 400,000 allows roughly
+# 9,300 candidates at the measured 43 CU each. The work set is derived and
+# reported BEFORE the phase runs, so this is a backstop and not the estimate.
+ceilings:
+  identity: 2000
+  windows: 5000
+  pools: 100000
+  scope: 50000
+  sweep: 800000
+  conventions: 50000
+  cohort: 400000
+  tags: 0
+  timestamps: 500000
+  prices: 0
+  dryrun: 0
+  write: 0
