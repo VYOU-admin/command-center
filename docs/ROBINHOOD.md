@@ -226,6 +226,33 @@ same batched request perfectly, 100 blocks per request in 448 ms, for free, and
 the explorer was unusable at any price. Neither fact was known when the paid job
 was planned, and only one of them would have been guessed correctly.
 
+**AN INSTANT DOES NOT NAME A BLOCK ON THIS CHAIN: THE RELATIONSHIP IS 1-TO-10.**
+Block timestamps have one-second resolution and blocks arrive every ~0.1 s, so ten
+consecutive blocks carry the same timestamp. Measured around block 23,791,950 on
+2026-09-13, reading 29 consecutive blocks:
+
+```
+23,791,940 .. 23,791,949   1785462270   2026-07-31T01:44:30Z   10 blocks
+23,791,950 .. 23,791,959   1785462271   2026-07-31T01:44:31Z   10 blocks
+23,791,960 .. 23,791,964   1785462272   2026-07-31T01:44:32Z   (5 of 10 read)
+```
+
+**This is a property of the chain, not slop in any load.** `blockForInstant`
+resolves the FIRST block whose timestamp is at or after the target — `if (ts <
+target) lo = mid + 1; else hi = mid` — so it is deterministic and reproducible:
+the same instant returns the same block from any starting hints, verified on
+CHUMP's start bound from both wide (1..head) and narrow (20M..30M) hints. A
+one-second ambiguity on a bound specified to the hour changes no cohort, so
+**PONS, AI and INDEX are unaffected and their bounds are not in question.**
+
+What it does mean is that **a bound given as an instant lands on the first block of
+its second, which may be up to nine blocks earlier than a specific block somebody
+had in mind.** Where the intended bound IS a specific block, say so and check which
+block the instant resolves to rather than assuming they coincide. CHUMP is the
+worked example: `2026-07-31T01:44:30+00:00` resolves to 23,791,940, ten blocks
+before its deployment at 23,791,950, which is harmless because no CHUMP exists
+before deployment.
+
 **Blockscout is not usable programmatically.** Every API path tested returns
 HTTP 403 behind a Cloudflare interstitial. It is a link target for humans.
 
@@ -3219,6 +3246,22 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   pools on a chain-level anchor, which fixes the gap and the single-tick buckets
   together, and also removes the two-residue fragmentation — 5,473 buckets at
   3150 and 4,172 at 1433 that no single reader can both see.
+- **PROPOSAL, not a defect: allow a window bound to be a BLOCK as well as an
+  instant.** Section 2 requires an offset-qualified instant and `plan.ts` rejects
+  anything else, which is correct as it stands — a bare local time is a different
+  moment depending on who reads it. But an instant is **1-to-10 against blocks on
+  this chain** (section 3), so where the intended bound is a specific block — a
+  deployment block, a window that starts where the token starts — an instant cannot
+  express it exactly. Evidence: ten blocks share timestamp 1785462270, and
+  CHUMP-P1's start instant resolves to 23,791,940 where its deployment is
+  23,791,950.
+
+  It is recorded as a proposal because **a window bound is the most load-bearing
+  definition in this document** — it decides cohort membership, metric 3's
+  denominator, and the `token_windows` row the dashboard and scorer read — and it is
+  not a change to make inside an intake. CHUMP was loaded with an instant bound ten
+  blocks before its deployment instead, which contains no CHUMP and therefore
+  changes no cohort. Deciding it needs an operator, not a run.
 - **A config comment asserted coverage the data contradicts.** `intake/index.yaml`
   justifies its bucket anchor by claiming the shared series spans "its whole
   life"; 7.47M blocks of INDEX's life sit outside that span. Claims like this
