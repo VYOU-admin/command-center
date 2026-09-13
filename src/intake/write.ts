@@ -126,12 +126,15 @@ export async function planTimestamps(
   cfg: IntakeConfig,
 ): Promise<TimestampPlan> {
   await materialiseNeededBlocks(client, cfg);
+  // ONE parameter: the temp table already encodes the token. Section 7 -- check
+  // parameter arity before deploying; a mismatch is a runtime error on a path
+  // that may not run for hours.
   const res = await client.query<{ needed: number; stored: number }>(
     `select count(*)::int as needed,
             count(b.block_number)::int as stored
        from _needed_blocks n
        left join block_times b on b.chain = $1 and b.block_number = n.block_number`,
-    [cfg.chain, cfg.token],
+    [cfg.chain],
   );
   const needed = res.rows[0]?.needed ?? 0;
   const alreadyStored = res.rows[0]?.stored ?? 0;
@@ -165,7 +168,7 @@ export async function fetchTimestamps(
        left join block_times b on b.chain = $1 and b.block_number = n.block_number
       where b.block_number is null
       order by n.block_number`,
-    [cfg.chain, cfg.token],
+    [cfg.chain],
   );
   const blocks = missing.rows.map((r) => Number(r.block_number));
 

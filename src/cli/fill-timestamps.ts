@@ -222,7 +222,7 @@ async function main(): Promise<void> {
         `select n.block_number::text as blk from _needed_blocks n
            left join block_times b on b.chain = $1 and b.block_number = n.block_number
           where b.block_number is null order by n.block_number`,
-        [cfg.chain, cfg.token],
+        [cfg.chain],
       );
       const blocks = missing.rows.map((r) => Number(r.blk));
       if (blocks.length !== plan.toFetch) {
