@@ -58,14 +58,13 @@ transfer rows. Cross-token comparison is sound for the first time.
 
 **What is known incomplete, per token:**
 
-- **INDEX** — **6,052 trade rows carry a null USD** against AI's 169 and PONS's
-  80, because `native_usd_prices` starts at block 5,363,150 and 100% of INDEX's
-  trade rows below that are null. **Probed 2026-09-12: they are RECOVERABLE.** A
-  WETH/USDG pool has existed since block **50,716** and traded **264,078 times**
-  inside the gap, first swap at 1,671,009 — 45 blocks after INDEX's first. The
-  block is not missing data but a missing derivation: ETH/USD is assembled from
-  tracked tokens' incidental both-sided buckets rather than from the ETH/USD
-  market itself. Fix is in section 9. See the INDEX findings.
+- **INDEX — FIXED 2026-09-13. Its 6,052 null-USD trade rows are now 0.** ETH/USD
+  is derived from the dedicated WETH/USDG market (1,867,945 swaps, 489 buckets
+  added, $0.0193) and the 13,575 rows in the affected range were reinserted. Trade
+  nulls chain-wide are now **AI 169, PONS 80, INDEX 0**. Its `index_usd_prices`
+  still starts at 5,363,150 — the token's OWN series comes from token/USDG ticks,
+  which INDEX did not have that early — so the early dashboard price for INDEX is
+  still blank even though its rows are priced. See step 10 and the INDEX findings.
 - **NVDA** — **1,443,064 in-scope swap blocks have no stored timestamp.** Benign
   today: NVDA has no cohort and no rows, so nothing calls `loadSlice` on it. It
   becomes a blocker the moment NVDA is tracked rather than used as a bridge, and
@@ -1275,9 +1274,74 @@ life:** 378 missing buckets span 1,663,150–9,453,150, so the sweep covers
 calls, so **~22,000 CU ≈ $0.010, ceiling 200,000 CU**. Timestamps ride with the
 logs. Deriving, writing buckets, reinserting the rows and re-scoring cost nothing.
 
+**RUN 2026-09-13, measured against that estimate:**
+
+```
+pools enumerated                807   (803 v4, 4 v3; earliest created block 50,716)
+pools that actually TRADED       52   (48 v4, 4 v3) -- matching the probe exactly
+market swaps swept        1,867,945   (v4 352,990, v3 1,514,955)
+block_times carried          812,410   free, with the logs
+buckets derived                 780   every bucket in the range had a market
+ticks kept                1,867,130   median 2,201.5 per bucket
+discarded by the 10x fence        8   the signal the derivation is sound
+ETH/USD                 $1,701.18 - $1,972.97, median $1,778.87
+buckets INSERTED                489
+buckets already present, SKIPPED 291   never rewritten
+                          ---------
+cost                       42,960 CU   $0.0193   ceiling 200,000, never approached
+```
+
+**2.0x over the estimate, and the reason is density, again.** 716 `eth_getLogs`
+against ~354 estimated, because v3 in this range runs **0.19 logs/block against
+the probe's 0.049** — the probe sampled 1,670,964–5,371,436 and the sweep ran to
+9,463,149. That is the third time here that a density taken from a different range
+has been wrong, after 16x on AI and 27% on INDEX. **Sample the blocks you are
+about to read.**
+
+**Re-running it is idempotent, and that was verified rather than assumed:** a
+second pass stored 0 new pools, 0 new timestamps, and the identical swap counts.
+
+**The market series is tight where the old one is not.** 489 market buckets span
+$1,701–$1,973 — a 16% total range on a median 2,201 ticks each. The 9,670
+token-incidental buckets span **$1,239–$2,653**, a 114% range, on a median 216
+ticks.
+
+**THE OLD SERIES IS MEASURABLY WRONG WHERE ITS TICK COUNT IS LOW, and that is now
+evidenced rather than suspected.** Because the market fills only gaps, no bucket
+carries both provenances, so there is **no same-bucket cross-check** — that
+comparison returns zero rows and is reported as zero, not omitted. Comparing each
+market bucket against a token-derived bucket within ±20,000 blocks instead, across
+**245 pairs**:
+
+```
+mean difference    5.70%
+median             3.63%
+maximum           42.91%
+over 10%              30 pairs
+```
+
+**Every one of the five worst disagreements is a token-derived bucket resting on
+2 or 3 USD ticks**, and in each the market says ~$1,771–$1,798 while the token
+bucket says $1,239–$1,298:
+
+| market bucket | market | token bucket | token | token ticks | difference |
+|---|---|---|---|---|---|
+| 9,073,150 | $1,771.48 | 9,083,150 | $1,239.55 | **2** | 42.91% |
+| 6,633,150 | $1,797.93 | 6,623,150 | $1,297.74 | **3** | 38.54% |
+| 6,603,150 | $1,797.09 | 6,623,150 | $1,297.74 | **3** | 38.48% |
+
+**The market is the one telling the truth.** Three transactions decoded
+independently — blocks 1,680,559, 3,005,932 and 5,354,209 — give 1,708.53,
+1,771.72 and 1,743.24, which agree with the market series and not with $1,239.
+
 **Never rewrite a bucket that is already stored.** A stored bucket was computed
 by a run that saw the whole bucket; recomputing gains nothing and silently
 replaces reviewed history. Three were rewritten before this was caught.
+
+That rule is why the ~30 divergent buckets above were **left exactly as they
+are**, and it is now in tension with evidence that some of them are wrong by up to
+43%. The tension is real and unresolved; it is an operator decision recorded in
+section 9, not something to settle by quietly overwriting history.
 
 **Only whole buckets are written.** A bucket straddling the edge of a range is
 computed from a fraction of its ticks.
@@ -1936,6 +2000,29 @@ cross-token — and 0 null scores admitted.** Slots equal admitted in every wind
 Invariants checked and all zero: memberships with no matching score row **0**,
 with no matching tag **0**, with a rank above their slot count **0**, and exactly
 **1** distinct `top_percent` value stored.
+
+**THE INDEX-P1 ARTEFACT IS GONE, 2026-09-13.** Fixing the ETH/USD derivation
+removed the cause rather than masking it, and the effect on the cut is large:
+
+| `INDEX-P1` top 5% | before | after |
+|---|---|---|
+| flagged `low-weight` | **166 of 166** | **0 of 166** |
+| score at cutoff | 0.668896 | **0.324779** |
+| maximum score | 0.832810 | **0.530007** |
+| `low-weight` threshold | derived 0.625 | 0.8, **cannot be derived** — no partial weights left |
+
+Its cutoff now sits in the same band as every other window — AI 0.2642, INDEX-P1
+0.3248, INDEX-P2 0.3429, PONS 0.4472 — where before it was above two windows'
+maxima. **The formal warning still stands: min-max is within a cohort and the cut
+is still per window.** What changed is that the pathological case is gone, so the
+merged list no longer carries 166 wallets selected by missing data.
+
+**The merged list changed accordingly:** 1,248 memberships still (slots are fixed
+by cohort size) but **100 added and 100 removed — 8% churn**; distinct wallets
+**1,176 → 1,151**; and wallets qualifying in two or more windows **66 → 85**, of
+which 69 span two or more tokens. More multi-window qualifiers is the list getting
+better: that overlap is the one signal in it that does not depend on scores being
+comparable.
 
 **The figures move every cycle, and that is correct.** Between an ad-hoc query and
 the monitor's own run twenty minutes later the cutoffs shifted in the fourth
@@ -2605,11 +2692,16 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
   further. The fix is a chain anchor for `native_usd_prices` plus a resolver that
   uses it for the native series while keeping the token's anchor for the token's
   own and for bridges.
-- **The single-tick early buckets are still single-tick.** 5,363,150, 5,403,150
-  and 5,473,150 rest on 1, 1 and 2 USDG ticks and swing 1,877 → 1,434 → 1,653.
-  The dedicated market could replace them with dozens of ticks each, but "never
-  rewrite a stored bucket" forbids it and that rule is the older one. Deciding
-  between them is an operator call that has not been made.
+- **Roughly 30 stored ETH/USD buckets are wrong by more than 10%, up to 42.91%,
+  and the rule against rewriting them is protecting the error.** Measured
+  2026-09-13 against the market series on 245 adjacent pairs: mean 5.70%, median
+  3.63%, max **42.91%**, and every one of the worst rests on **2–3 USD ticks**.
+  Three independently decoded transactions side with the market. The dedicated
+  market could replace each with a median 2,201 ticks. "Never rewrite a stored
+  bucket" is the older rule and it won, so they stand — **but they are now known
+  to be wrong, not merely thin**, and every AI, PONS and INDEX row priced in them
+  carries that error. Resolving the tension is an operator decision and has not
+  been made.
 - **The chain's ETH/USD series was an accident of which tokens were loaded, and
   a dedicated market existed that nothing read.** FIXED 2026-09-13; kept for the
   lesson. `native_usd_prices` is
