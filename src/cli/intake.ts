@@ -150,7 +150,30 @@ async function main(): Promise<void> {
     await app.pool.end();
     process.exit(0);
   }
-  if (stoppedOn) done.add(stoppedOn);
+  /*
+   * CLEARING A STOP MUST PERSIST IT, or the runner cannot cross two adjacent STOP
+   * phases. `pools` and `scope` are adjacent, and this used to add the cleared
+   * phase to `done` in memory only: the stored row stayed `stopped`, so the NEXT
+   * invocation saw two stopped phases, took the later one (the loop above has no
+   * break, so the last assignment wins), added only that to `done`, found the
+   * earlier one neither complete nor cleared, re-ran it and stopped there again.
+   * CHUMP deadlocked between pools and scope on every --continue.
+   *
+   * A phase that has produced its report and had its stop cleared is COMPLETE, and
+   * the state table should say so -- it is the only record of what happened.
+   */
+  if (stoppedOn) {
+    const cleared: Phase = stoppedOn;
+    done.add(cleared);
+    await withTransaction(app.pool, async (c) => {
+      await c.query(
+        `update token_intake_state set status = 'complete'
+          where chain = $1 and token = $2 and phase = $3 and status = 'stopped'`,
+        [cfg.chain, cfg.token, cleared],
+      );
+    });
+    log.info('stop cleared and recorded complete', { phase: cleared });
+  }
 
   /* Carried between phases within one invocation. */
   let identity: Awaited<ReturnType<typeof readIdentity>> | null = null;

@@ -38,6 +38,7 @@ this is state.
 | **PONS** `0x39dBED…4571` | tracked | `PONS-P1` 13,823 · `PONS-P1-T` 396 | 504,137 | 14,138 | 61,173,149 | `token-updates` ✅ | 13,823 |
 | **INDEX** `0x56910D…9870` | tracked | `INDEX-P1` 3,316 · `INDEX-P2` 4,267 | 156,981 | 7,230 | 61,193,149 | `index-updates` ✅ | 7,583 |
 | **AI** `0x2E8c31…1e18` | tracked | `AI-P1` 3,508 | 59,863 | 3,507 | 61,181,432 | `ai-updates` ✅ | 3,508 |
+| **CHUMP** `0x0E0d2C…C21B` | tracked — **IN PROGRESS** | `CHUMP-P1` not yet tagged | 0 | 0 | not swept | **none yet** | never |
 | **NVDA** `0xd0601c…9eec` | **pricing-source** | none | 0 | 0 | 59,111,432 | none — correct | never |
 | **MOS** `4ChT49…91ZT` | tracked (**Solana**) | `MOS-P1..P4` 519 | 1,534 | 486 | none | none | **never** |
 | **USELESS** `Dz9mQ9…bonk` | tracked (**Solana**) | `USELESS-P1..P3` 1,615 | 10,458 | 1,462 | none | none | **never** |
@@ -56,6 +57,12 @@ watcher        watchlist_activity: 303 rows, 103 tokens (mostly UNTRACKED), curs
                61,595,492.  67.6% of trades priced since it derives ETH/USD per slice.
                /watchlist tab: DOM-verified 303 rendered = 303 claimed, 0.38 MB
 ```
+
+**CHUMP IS PART-LOADED AND A FRESH SESSION MUST READ ITS FINDINGS SECTION BEFORE
+TOUCHING IT.** Steps 1–4 are complete and stored; steps 5–17 are not started. Its
+config is `intake/chump.yaml`, its state is in `token_intake_state`, and what is known
+about it — including two things that were measured the wrong way first — is in section
+8 under CHUMP, with the v3-path lessons in the V3-ONLY subsection that follows it.
 
 **PONS was rebuilt on 2026-09-11/12 and is no longer the odd one out.** It now
 carries the same rules as AI and INDEX: EIP-7702 accounts kept, 39 routers found
@@ -317,6 +324,17 @@ was an opinion rather than a number. Measured on the three loads:
 | windows | not measured¹ | 1.0 s | 0.9 s (two windows) | **~1 s per bound** |
 | pools | not measured¹ | 3.7 s | 3.7 s | **seconds** |
 | scope | not measured¹ | 3.6–16.4 s² | 4.8 s | **under a minute** |
+
+CHUMP, the first token driven through the RUNNER rather than the standalone CLIs,
+measured faster than all three on every early phase — 58 pools against AI's 5,040 is
+most of it:
+
+| phase | CHUMP | CU | against estimate |
+|---|---|---|---|
+| identity | **0.8 s** | 816 | ~800 — exact |
+| windows | **0.6 s** | 600 | ~1,040 for one bound — 42% under, because the start instant short-circuited |
+| pools | **1.3 s** | 490 | ~500 — exact |
+| scope | **0.6 s** | 478 | 2 `eth_call` × 10 distinct counters + head |
 | transfer sweep | not measured¹ | ~9 min (13.9M blocks) | ~40 min (57.4M blocks) | **~1 min per 1.5M blocks** |
 | swap load | not measured¹ | ~4 min | ~35 min | scales with blocks not in `v4_swaps_all` |
 | cohort | not measured¹ | ~2 min | ~6 min (two windows) | **minutes** |
@@ -3204,8 +3222,181 @@ Deployed at block 9,721,433, decimals 18. Charted pool `0xcbdfea90…`, AI/NVDA,
 
 ---
 
+### CHUMP — `0x0E0d2C89a5a019FE1cF762e5e33187631DACC21B`
+
+**PART-LOADED 2026-09-13. Steps 1–4 complete and stored; 5–17 not started.** "Chump
+Coin", 18 decimals, supply 1,000,000,000, deployed at block **23,791,950**
+(2026-07-31T01:44:31Z), 5,225 bytes of code. Cohort `CHUMP-P1` not yet tagged.
+
+```
+window CHUMP-P1   23,791,950 .. 44,992,963    21,201,013 blocks
+                  2026-07-31T01:44:30+00:00 -> 2026-08-24T12:00:00-04:00
+pumps             2026-08-24T12:00:00-04:00, 2026-08-28T12:00:00-04:00
+                  BOTH at or after the window end -- intended
+charted pool      0x714442e9a611f8561a7df108d6d925132937cfb8  CHUMP/WETH, v3
+pools             58 candidates -> 51 in scope, 7 rejected
+                  in scope: v4 27 ETH + 18 USDG + 4 WETH = 49;  v3 1 WETH + 1 USDG = 2
+rejected          BPRNT, SPY, jkfdjskljf, MEMEINDEX, DFG, TEST, TEST -- all
+                  no-usd-reference, one pool each
+no bridge needed  every in-scope counter is a recognised pricing asset
+bucket anchor     8,963,150 -- the EXISTING residue-3150 grid PONS and INDEX read.
+                  CHUMP's deployment sits in bucket 23,783,150, inside PONS's span,
+                  so no third residue was created
+cost, steps 1-4   2,384 CU total = $0.0011
+```
+
+**The window start resolved to the deployment block exactly, and that was luck worth
+understanding.** The bound was given as `2026-07-31T01:44:30+00:00`, one second before
+the deployment block's own timestamp. `resolveWindows` passes the deployment block as
+the search's low bound and `blockForInstant` opens `if (target <= loTs) return lo`, so
+it returned 23,791,950 immediately. The same instant searched from block 1 returns
+**23,791,940** — the first of the ten blocks sharing that second (section 3). **Two
+answers from one instant, and only the clamped one is reachable through the runner.**
+
+**Router detection reported `probed: 0, identified: 0` in the scope phase and it must
+not be believed.** Scope runs before the sweep, so there were no transfers to probe —
+exactly what the document already records for INDEX. Six configured infrastructure
+addresses matched nothing and were reported as such. Detection has to be re-run after
+the sweep.
+
+**What surprised me, and both were my errors rather than the chain's:**
+
+1. **I called the v3-only premise contradicted on pool count, and pool count is the
+   wrong measure.** See the V3-ONLY subsection — this is the most transferable lesson
+   from CHUMP.
+2. **I reported the bisection as returning 23,791,940 from a standalone check that
+   passed the wrong low bound.** The runner returns the deployment block. A
+   reimplementation of a rule that already exists in the code will disagree with it;
+   that is the "two implementations of one rule" trap in step 7, in miniature.
+
+---
+
+### V3-ONLY: what differs from the v4 path — written for CASHCAT
+
+CHUMP is the first token whose market is v3. Read this before loading another.
+
+#### WEIGH THE VENUE SPLIT BY SWAPS, NEVER BY POOL COUNT
+
+**This is step 3's own rule — "Weigh it by swaps, not by pool count" — and it still
+misled on first application, because pool count is what the enumeration phase reports
+and swaps are not.** The numbers:
+
+```
+                        pools in scope        swaps
+v4                                 49           13     across 1 of the 49 pools
+v3                                  2      the market  incl. the charted CHUMP/WETH
+```
+
+By pools, CHUMP is **96% v4** and looks like AI. By swaps, its 49 v4 pools carry
+**thirteen swaps between them**, all in blocks 39,893,773–40,843,977, and everything
+that matters happens on two v3 pools. **I reported the premise contradicted on the
+pool count before measuring the swaps, and had to withdraw it.** The v4 pools are
+vanity or spam pools created against the token; a token can accumulate dozens of them
+without a single trade.
+
+**The measurement is nearly free and there is no excuse for skipping it.**
+`v4_swaps_all` already holds every v4 swap on the chain for 15,115,267–42,695,454, so
+counting a candidate token's v4 swaps is one SQL query against stored data, no RPC:
+
+```sql
+select count(*), count(distinct pool_id) from v4_swaps_all
+ where pool_id in (select pool from pool_meta
+                    where chain='robinhood' and token=$1 and venue='v4');
+```
+
+**State the coverage limit with the result.** That query says nothing about blocks
+after 42,695,454 — for CHUMP, 2.3M of its window and everything since. A zero there
+would be a coverage artefact, which is the trap recorded against `v4_swaps_all` in the
+INDEX findings.
+
+#### The v4_swaps_all shortcut applies and is worthless here
+
+CHUMP's window overlaps `v4_swaps_all` for 23,791,950–42,695,454 — **89% of it** — so
+the copy shortcut is available, contradicting the assumption that a v3 token cannot use
+it. It delivers **13 swaps**. Copy anyway, because it is free and it is what router
+detection's swap-share discriminator divides by, but do not size any estimate around it.
+
+#### Rules that applied UNCHANGED
+
+- **Decimals read, never assumed.** CHUMP returned raw `0x…12` = 18.
+- **The charted pool is recorded and never filtered on.** It is 1 of 51 in scope.
+- **Scope applies once, to both venues.** 51 of 58 in scope, 7 rejected with reasons
+  recorded before any swap was read.
+- **A counter whose `decimals()` cannot be read raises.** All 10 distinct counters
+  resolved; none was a stablecoin other than USDG.
+- **The bucket anchor prefers an existing grid.** CHUMP reuses 8,963,150.
+- **Router detection must run after the sweep.** It reported 0 probed inside scope.
+
+#### Rules that are v4-SPECIFIC and did not apply
+
+- **The 500-id topic-array chunking rule DID NOT APPLY to the v3 sweep at all.** v3
+  filters by pool **address** in `eth_getLogs`'s `address` field, not by a topic array,
+  so the 540-accepted / 5,024-hangs measurement is irrelevant to it. It still applies
+  to CHUMP's 49 v4 pools, which fit in one chunk regardless.
+- **`Initialize` completeness** is a v4 property. v3 pools come from the factory's
+  `PoolCreated` plus, optionally, the flow probe.
+- **"A v4 pool is never a transfer counterparty — the PoolManager is."** On the v3 path
+  the pool contract **is** the counterparty, which makes the cohort query direct and
+  removes the failure that cost the first PONS cohort 3,067 wallets.
+
+#### Density: measured from the deployment block, and it varies by 91x
+
+**Probe the blocks you will actually read.** Measured with `sweep-probe`, three 300,000
+block samples plus six 100,000-block window samples:
+
+```
+23,791,950 (deployment)   145 logs / 300k    0.0005 /block
+27,000,000                  0 logs / 100k    0
+30,000,000                  0 logs / 100k    0
+34,000,000                  0 logs / 300k    0
+39,800,000                121 logs / 100k
+40,800,000                246 logs / 100k
+44,000,000                242 logs / 100k
+44,892,964 (window end)   631 logs / 100k
+61,300,000 (near head) 13,718 logs / 300k    0.0457 /block   <- 91x the deployment rate
+```
+
+**THREE MID-WINDOW SAMPLES RETURNED ZERO.** CHUMP was dormant from roughly 24M to
+39.8M — inside its own cohort window — then woke and ramped, and is densest well after
+the window closed. A ceiling or a span sized from the deployment block would have been
+91x too generous; one sized near head, 91x too tight. **The window is real but
+back-loaded into its last ~5M blocks**, which is where the cohort will come from.
+
+**Span sizing is capped, not density-driven, for this token.** At 0.0005–0.0457
+logs/block the 6,000-log target implies spans of 76,394 to 200,000,000 blocks, so
+`max_log_span_blocks` at 100,000 binds almost everywhere: **≈1 request per 100,000
+blocks.** Sweep estimate from those blocks: transfers over 37.88M blocks ≈379 requests,
+v3 `Swap` on 2 pools ≈379, the v4 gap 42.70M→head ≈190 — **≈56,880 CU ≈ $0.026**
+against a 2,000,000 ceiling.
+
+
 ## 9. Rules here the code does not implement
 
+- **`--continue` cannot cross two adjacent STOP phases, so the runner deadlocks
+  between `pools` and `scope`.** Found on CHUMP, the first token driven through the
+  runner end to end rather than phase-by-phase with the standalone CLIs.
+
+  `stoppedOn` is assigned inside a loop over `PHASES` with no break, so **the LAST
+  stopped phase wins**; and clearing a stop only does `done.add(stoppedOn)` in
+  memory — **the phase's stored status is never changed from `stopped` to
+  `complete`.** So: run 1 stops at `pools`. Run 2 with `--continue` clears `pools`
+  in memory, runs `scope`, stops, and leaves BOTH rows reading `stopped`. Run 3
+  computes `stoppedOn = scope` because it is later in the order, adds only `scope`
+  to `done`, finds `pools` neither complete nor cleared, re-runs it, and stops
+  there again. It never reaches the sweep, and every further `--continue` repeats
+  the same two phases.
+
+  **This is why the standalone CLIs exist.** INDEX and the PONS rebuild were driven
+  with `sweep-transfers`, `load-swaps`, `build-cohort`, `write-rows`,
+  `derive-prices` and `score` called individually, which is a working path and hides
+  the defect. The runner's own promise — "IT STOPS WHERE THE DOCUMENT STOPS", five
+  phases ending in review — is only true for the first two stops.
+
+  **The fix is to persist the cleared stop as `complete` when it is cleared**, so a
+  phase that has already produced its report and had its stop cleared never re-runs.
+  Taking the first stopped phase rather than the last would also unblock progress,
+  but it leaves stale `stopped` rows behind and the state table then no longer
+  describes what happened.
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database
   fails at the first read. Its shape is recorded in step 5.
