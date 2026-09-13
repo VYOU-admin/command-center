@@ -2160,6 +2160,23 @@ These are not about Robinhood Chain, but the code that loads it obeys them.
   repeatedly.
 - **Write a cycle's stats row at cycle start, not on completion**, or a run that
   dies leaves no trace.
+- **Insert in batches. One row per statement under autocommit fsyncs the WAL once
+  per row, and it is slow enough to look like a hang.** Measured 2026-09-13 on the
+  ETH/USD market sweep: throughput pinned at **~185 rows/second** regardless of
+  what the endpoint delivered, with `pg_stat_activity` showing the backend in
+  `IO / WalSync`. The v4 half took **50 minutes** and the v3 half projected to
+  **83 more** — for a job whose entire RPC bill is about one penny. **The
+  bottleneck was never the chain, and no amount of waiting was going to reveal
+  that.** Multi-row `VALUES` statements at 500 rows make it one fsync per batch.
+
+  Progressive commits survive this: a batch is still a commit, so a run that dies
+  leaves a truthful partial record. Row granularity was never what that property
+  needed. Watch for the trap in a multi-row insert — two rows with the same key in
+  one statement raise, so de-duplicate within the batch (many logs share a block).
+
+  This is the wall-clock rule from section 4 doing its job. The phase was not
+  slow, it was wrongly built, and the tell was a database wait event rather than
+  anything visible in the job's own log.
 - **A documented guarantee the code does not implement is a defect in the code.**
 - **A query that filters one side of a relationship but not the other** counts
   infrastructure as participants. Apply every address list to every side.

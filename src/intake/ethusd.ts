@@ -29,6 +29,13 @@ import { log } from '../logger.js';
 
 export const NATIVE_ETH = '0x0000000000000000000000000000000000000000';
 
+/**
+ * Rows per insert statement. 500 keeps the parameter count (6 per row plus 2)
+ * well inside Postgres's 65,535 limit while turning ~185 rows/second of
+ * fsync-bound writing into a single fsync per batch.
+ */
+const BATCH_ROWS = 500;
+
 export const ETHUSD_SCHEMA = `
 create table if not exists eth_usd_pools (
   chain        text     not null,
@@ -190,33 +197,71 @@ export async function sweepEthUsdSwaps(
   const v3 = pools.filter((p) => p.venue === 'v3').map((p) => p.pool);
   let v4Rows = 0; let v3Rows = 0; let stamps = 0;
 
+  /*
+   * ONE STATEMENT PER BATCH, NOT PER LOG, AND THAT IS NOT A MICRO-OPTIMISATION.
+   *
+   * The first version inserted one row per statement under autocommit, so
+   * Postgres fsynced the WAL once per row: `pg_stat_activity` showed the backend
+   * in `IO / WalSync` and throughput sat at ~185 rows/second regardless of what
+   * the endpoint could deliver. The v4 half took 50 minutes and the v3 half
+   * projected to 83 more, for a job whose whole RPC bill is about a penny. The
+   * bottleneck was never the chain.
+   *
+   * Batched into multi-row VALUES statements the same work is one fsync per
+   * BATCH_ROWS rows. Progressive commits are still per batch, so a run that dies
+   * leaves a truthful partial record -- which is the property the per-row version
+   * was reaching for and did not need row granularity to get.
+   */
   const store = async (venue: 'v3' | 'v4', logs: LogEntry[]): Promise<number> => {
     let n = 0;
-    for (const l of logs) {
-      const pool = venue === 'v4' ? l.topics[1]!.toLowerCase() : l.address.toLowerCase();
-      const body = l.data.replace(/^0x/, '');
-      const a0 = signed(body.slice(0, 64));
-      const a1 = signed(body.slice(64, 128));
-      const block = Number(BigInt(l.blockNumber));
-      await client.query(
-        `insert into eth_usd_market_swaps
-           (chain, venue, pool, block_number, log_index, tx_hash, amount0, amount1)
-         values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing`,
-        [chain, venue, pool, block, Number(BigInt(l.logIndex)), l.transactionHash,
-          a0.toString(), a1.toString()],
-      );
-      n += 1;
-      /*
-       * The timestamp rides with the log on Alchemy and is free. A ZERO IS NOT A
-       * TIMESTAMP -- the public RPC returns 0x0 for every log's blockTimestamp,
-       * so a zero here means the wrong endpoint, not midnight 1970.
-       */
-      if (l.blockTimestamp && l.blockTimestamp !== '0x0') {
-        const ts = Number(BigInt(l.blockTimestamp));
+    for (let i = 0; i < logs.length; i += BATCH_ROWS) {
+      const batch = logs.slice(i, i + BATCH_ROWS);
+      const swapVals: string[] = [];
+      const swapParams: unknown[] = [chain, venue];
+      const timeVals: string[] = [];
+      const timeParams: unknown[] = [chain];
+      const seenBlocks = new Set<number>();
+
+      for (const l of batch) {
+        const pool = venue === 'v4' ? l.topics[1]!.toLowerCase() : l.address.toLowerCase();
+        const body = l.data.replace(/^0x/, '');
+        const a0 = signed(body.slice(0, 64));
+        const a1 = signed(body.slice(64, 128));
+        const block = Number(BigInt(l.blockNumber));
+        const b = swapParams.length;
+        swapVals.push(`($1,$2,$${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6})`);
+        swapParams.push(pool, block, Number(BigInt(l.logIndex)), l.transactionHash,
+          a0.toString(), a1.toString());
+        /*
+         * The timestamp rides with the log on Alchemy and is free. A ZERO IS NOT A
+         * TIMESTAMP -- the public RPC returns 0x0 for every log's blockTimestamp,
+         * so a zero here means the wrong endpoint, not midnight 1970.
+         *
+         * De-duplicated within the batch: many logs share a block, and a
+         * multi-row insert cannot have two rows with the same key.
+         */
+        if (l.blockTimestamp && l.blockTimestamp !== '0x0' && !seenBlocks.has(block)) {
+          seenBlocks.add(block);
+          const t = timeParams.length;
+          timeVals.push(`($1,$${t + 1},to_timestamp($${t + 2}))`);
+          timeParams.push(block, Number(BigInt(l.blockTimestamp)));
+        }
+      }
+
+      if (swapVals.length) {
+        await client.query(
+          `insert into eth_usd_market_swaps
+             (chain, venue, pool, block_number, log_index, tx_hash, amount0, amount1)
+           values ${swapVals.join(',')} on conflict do nothing`,
+          swapParams,
+        );
+        n += swapVals.length;
+      }
+      if (timeVals.length) {
         const r = await client.query(
           `insert into block_times (chain, block_number, block_time)
-           values ($1,$2,to_timestamp($3)) on conflict do nothing`,
-          [chain, block, ts],
+           values ${timeVals.join(',')} on conflict do nothing`,
+          timeParams,
         );
         stamps += r.rowCount ?? 0;
       }
