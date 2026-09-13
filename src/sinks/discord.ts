@@ -214,9 +214,23 @@ export class DiscordSink {
         return false;
       }
 
+      /*
+       * THE DELIVERED BODY IS LOGGED, not just the title.
+       *
+       * It used to be POSTed and forgotten: nothing logged it and nothing persisted
+       * it, so the exact text that reached Discord was unrecoverable the moment the
+       * request returned. That is the same trap that made the watcher's per-bucket
+       * ETH/USD detail unrecoverable -- an ephemeral value is gone unless something
+       * writes it down -- and it makes an alert impossible to audit against the rows
+       * it claims to summarise.
+       *
+       * Logged whole rather than truncated. The sink already slices the description
+       * to 4,000 characters before sending, so the logged text is the SENT text.
+       */
       log.info('discord alert delivered', {
         alert_title: alert.title,
         alert_level: alert.level,
+        alert_description: body.embeds[0]!.description,
         channel: key,
         via: resolution.via,
         ...(files.length
