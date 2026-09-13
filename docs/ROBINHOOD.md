@@ -360,6 +360,31 @@ end to end. Phases filled in as the run proceeds:
 | identity | **0.7 s** | 816 | ~800 — exact, and identical to every other token |
 | windows | **0.9 s** | 1,100 | ~1,040 for one window — 55 `eth_getBlockByNumber`, 5.8% over |
 | pools | **2.5 s** | 480 | ~500 — exact. 8 `eth_getLogs` for 1,001 candidates |
+| scope | **2.3 s** | 2,714 | 104 `eth_call` for 52 distinct counters, + head |
+| density probe | ~1 min | ~900 | 15 `eth_getLogs`, 7 samples from the deployment block |
+| **sweep** | **199.8 min** | **218,230** | ~191,000 estimated — **14.2% over on CU, 9x under on TIME** |
+| scope, RE-RUN after the sweep | **5.8 s** | 2,896 | + 7 `eth_getCode`; routers 7 probed / 6 identified |
+| conventions | 37 s | 0 | **RAISED** — v4/in-window 779 of 790. See section 8 |
+
+**THE SWEEP'S CU ESTIMATE WAS GOOD AND ITS WALL-CLOCK ESTIMATE WAS 9x LOW, and the
+reason generalises.** I sized the time by scaling CHUMP's 13.1 minutes by the expected
+REQUEST count — 3,183 against CHUMP's 1,853 — and got ~22 minutes. The requests came in
+at 3,637, only 14% over. **The time came in at 199.8 minutes because the sweep's
+wall-clock is set by ROWS INSERTED, not by requests made**:
+
+```
+                requests   rows written        rows/request   wall-clock
+CHUMP              1,853        687,982              371       13.1 min
+CASHCAT            3,637     14,957,528            4,113      199.8 min
+                     2.0x          21.7x             11x         15.3x
+```
+
+**1,248 rows per second, and `pg_stat_activity` named the cause while it ran**:
+`wait_event: ClientRead` between sub-second inserts — the row-at-a-time loop section 7
+already records for the ETH/USD market sweep, where the remedy was multi-row `VALUES`
+at 500 rows. **The intake sweep still inserts one row per statement**, and CASHCAT is
+the first token large enough for that to dominate its runtime. Estimate a sweep's
+duration from the LOGS it will write; estimate its cost from the REQUESTS.
 
 **The identity phase costs 816 CU on every token measured** — PONS, INDEX, AI, CHUMP
 and now CASHCAT — because the bisect depth barely moves: 27 `eth_getCode` finds a
@@ -4169,6 +4194,239 @@ false coverage claim is the cautionary case: **a config that asserts a series co
 token must be checked against the series, and CASHCAT's config says the opposite —
 that the reach is one bucket from the window and must be verified.**
 
+#### Scope: 590 of 1,001 in scope, and NO BRIDGE IS NEEDED
+
+```
+duration  2,297 ms    cost 2,714 CU    104 eth_call (52 distinct counters x 2) + 1 head
+
+IN SCOPE  590                      REJECTED 411
+  v4 ETH    274                      symbol NOT READ, outside the cap   236
+  v4 USDG   272                      symbol read, not a pricing asset   175
+  v4 WETH    37                    top rejected counters:
+  v3 WETH     4                      TENDIES 30, FRONG 19, Index 15, GME 14,
+  v3 USDG     3                      PONS 10, AI 10, STONKBROKER 6
+```
+
+**`no_usd_route: false` and `no_native_route: false`, so CASHCAT needs no bridge** and
+the second hop does not apply. 590 pools quote it against WETH, USDG or native ETH
+directly. That was the one thing worth stopping for and it did not arise.
+
+**ONLY 7 OF 590 IN-SCOPE POOLS ARE v3**, which is the pool-count view again and is not
+the venue split. The charted pool `0xa70fc67c…` is one of the four v3/WETH pools, is in
+scope, carries `pons_side 0`, and is recorded rather than filtered on.
+
+**CASHCAT trades against INDEX (15 pools), PONS (10) and AI (10), and all three are
+correctly REJECTED.** The document already noted that "BONER and CASHCAT trade against
+AI"; scope shows the relationship is real and excludes it anyway, because AI is not a
+recognised pricing asset and no bridge is configured for this token. That is step 4's
+recursive rule holding — pricing CASHCAT through AI would price a memecoin against a
+memecoin.
+
+**The 236 pools whose counter symbol was NOT READ cannot hide a pricing asset, and
+that is structural rather than lucky.** In-scope membership is decided by the counter's
+ADDRESS against the configured pricing assets, so a WETH, USDG or native-ETH pool
+matches before any symbol is read; the read cap only limits whether a *rejected*
+counter can be NAMED. The phase says "NOT READ" rather than implying the symbol was
+checked and rejected, which is the distinction step 4 requires.
+
+**One counter outside the pricing set has 9 decimals** — `REWARDS`, one pool, rejected.
+Recorded because it is the third non-18 decimals counter this chain has produced after
+USDG's 6 and PONTIFUL's 6, and it is why decimals are read rather than assumed.
+
+#### Density: probed from the deployment block, and the cap does NOT bind everywhere
+
+**CHUMP's sweep was cap-bound almost everywhere; CASHCAT's is not.** Seven samples
+across the range actually to be swept, 15 requests, ~900 CU:
+
+| range | blocks | logs | logs/block |
+|---|---|---|---|
+| 88,836–388,836 (deployment) | 300,000 | 2,076 | 0.0069 |
+| 846,162–946,162 (window opens) | 100,000 | 3,129 | 0.0313 |
+| 2,000,000–2,100,000 (mid-window) | 100,000 | 524 | **0.0052** — the floor |
+| 3,689,108–3,789,108 (window closes) | 100,000 | 1,290 | 0.0129 |
+| **10,000,000–10,100,000** | 100,000 | **30,063** | **0.3006** — the peak |
+| 30,000,000–30,100,000 | 100,000 | 15,116 | 0.1512 |
+| 61,900,000–62,000,000 (near head) | 100,000 | 5,019 | 0.0502 |
+
+**The spread is 58x and the peak is nowhere near either end** — it is at ~10M, six
+million blocks after the window closed and fifty million before head. At 0.3006
+logs/block the 6,000-log target implies a **~20,000-block span**, so the sweep narrows
+there rather than running at the 100,000 cap. **A density taken from the window would
+have been 58x too generous and one taken near head 6x too generous**; this document
+has recorded the same error at 16x on AI and 27% on INDEX, and CASHCAT is the widest
+spread yet.
+
+**Sweep estimate, stated before the first request**, and note the v4 chunking term
+that CHUMP's 49 pools never exercised:
+
+```
+transfers, density-varying spans                    ~1,320 requests
+swap-v3, 7 pool addresses, cap-bound                  ~621
+swap-v4, 583 pools = 2 CHUNKS of 500, cap-bound     ~1,242   <- 2x for the chunking
+                                                    -------
+                                                    ~3,183 requests x 60 CU
+                                                   ~191,000 CU  ~$0.086
+                                          ceiling    800,000 CU  (4.2x headroom)
+```
+
+#### The deployment-block sweep saved 240 CU here, and that CONFIRMS the rule
+
+CHUMP's block-0 sweep wasted **42,660 CU**. CASHCAT's saving is
+`ceil(88,836 / 100,000) = 1` request per stream-pass across four passes — transfer,
+v3, and v4 twice for its two chunks — so **4 requests, 240 CU, $0.0001**.
+
+**That is the rule in step 5 confirmed from the other end of the range.** The waste
+scales with how LATE a token launched, and CASHCAT launched at block 88,836. The fix
+that saved CHUMP 30% of its entire intake saves CASHCAT almost nothing — and both
+figures come from the same formula, which is what makes it a rule rather than an
+anecdote.
+
+#### The sweep, measured — and the VENUE SPLIT that overturns the premise
+
+```
+duration   11,986,177 ms = 199.8 min      cost 218,230 CU = $0.098
+calls      3,637 eth_getLogs + 1 eth_blockNumber   (3,637 x 60 + 10 = 218,230, exact)
+logs       v3 2,388,973   v4 1,991,868   transfers 10,576,687   TOTAL 14,957,528
+coverage   all three streams 62,064,096 / 62,064,096 blocks, 0 gaps, 0 overlaps
+ranges     swap-v3 672, swap-v4 650, transfer 1,644
+           BELOW THE DEPLOYMENT BLOCK: 0, 0, 0   <- CHUMP had 711
+```
+
+**THE VENUE SPLIT, AND IT IS DIFFERENT IN THE WINDOW FROM OVER THE TOKEN'S LIFE.**
+Both figures matter and reporting only one would mislead:
+
+| | v3 | v4 | |
+|---|---|---|---|
+| **full life** | 2,388,973 — **54.5%** | 1,991,868 — **45.5%** | near-balanced |
+| **inside CASHCAT-P1** | 17,314 — **86.3%** | 2,741 — **13.7%** | v3-dominant |
+| pools that actually traded | **6** of 7 in scope | **398** of 583 in scope | |
+
+**The cohort comes from the window, where v3 carries 86.3%. The cost basis and
+realised PnL come from the whole life, where v4 carries 45.5%.** A token can be
+v3-dominant for its cohort and half-v4 for its accounting, and CASHCAT is the first
+here to show it. **Quote the split for the period you are about to use it for.**
+
+**THE PRE-SWEEP LOWER BOUND WAS 2.3x LOW, EXACTLY AS THE RULE SAYS IT WOULD BE.**
+`v4_swaps_all` gave 879,297 v4 swaps before the sweep; the sweep found **1,991,868**.
+The V3-ONLY subsection's instruction — *treat the figure as a lower bound until the
+sweep replaces it* — was written from CHUMP, where the gap was 13 against 10,722.
+Here it is 879,297 against 1,991,868. **The rule held on a token where the shortcut
+could not see the window at all.**
+
+**One v3 pool of the 7 in scope never traded, and 185 of the 583 v4 pools never
+traded.** Reported rather than omitted: a pool in scope with no swaps is a real
+result, and it is what makes "pools in scope" the wrong denominator for a venue split.
+
+#### The deployment-block fix, confirmed from stored data
+
+**`token_sweep_progress` holds 2,966 ranges and NONE of them lies below block 88,836.**
+CHUMP's sweep had **711** such ranges returning 0 logs between them. The saving here is
+`ceil(88,836 / 100,000) = 1` request across four stream-passes — transfer, v3, and v4
+twice for its two chunks — so **4 requests, 240 CU, $0.0001**.
+
+**That is the rule confirmed from the opposite end of the range.** CHUMP wasted 42,660
+CU because it launched at block 23.8M; CASHCAT wastes 240 because it launched at
+88,836. Same formula, 178x apart, and the fix that saved CHUMP 30% of its whole intake
+saves CASHCAT a hundredth of a cent. **The waste scales with how LATE a token
+launched** — measured now at both ends rather than argued at one.
+
+#### Router detection after the sweep: 7 probed, 6 identified, 5 of them NEW
+
+```
+duration 5,774 ms   cost 2,896 CU   104 eth_call + 7 eth_getCode + 1 head
+```
+
+| address | recipients | sends | in a swap tx | code | verdict |
+|---|---|---|---|---|---|
+| `0xb92fe925…` | 338 | 982 | 99.1% | contract | router — **in both** |
+| `0x0579fa41…` | 79 | 444 | 75.5% | contract | router — **new** |
+| `0xb477751b…` | 75 | 469 | 99.1% | contract | router — **new** |
+| `0x5a705de8…` | 70 | 138 | 100.0% | contract | router — **new** |
+| `0xe72688f7…` | 62 | 753 | 100.0% | contract | router — **new** |
+| `0x350eb177…` | 56 | 1,155 | 78.3% | contract | router — **new** |
+| `0x73991a25…` | 51 | 187 | **0.0%** | contract | **NOT a router** — a distributor |
+
+**The discriminator separated cleanly for the fourth token running: 75.5–100% against
+0.0%, nothing in between.** And the rejected address is corroboration rather than a
+new measurement — `0x73991a25…` appears in step 7's own router table at **0.0% on
+PONS**, where it moved 6,467 sends to 1,097 recipients. **The same address behaves the
+same way on two tokens four months and eight million blocks apart**, which is the
+strongest evidence yet that the 50% bar is cutting at a real boundary rather than a
+convenient one.
+
+**Five of the six routers are absent from `config/infrastructure.yaml`**, against two
+of three on CHUMP. **All six are persisted** — verified on a fresh connection — so the
+cohort will exclude them. Five configured entries matched nothing, three of them
+structurally (PoolManager, zero, burn) for the reasons CHUMP's section records.
+
+#### The cohort work set, derived before spending — AND THE RUN STOPPED BEFORE IT
+
+```
+swap transactions in window     17,829
+candidate transactions          10,988
+CANDIDATE WALLETS                2,360   <- the figure the cost is quoted from
+  payment   2,360 x 17.1 CU  =  40,356 CU
+  getCode  <= 2,360 x 26 CU  =  61,360 CU
+  realistic                  ~101,716 CU = $0.046    ceiling 400,000 (3.9x headroom)
+  worst case, 8 tx per wallet ~566,400 CU  <- EXCEEDS the ceiling
+```
+
+**The worst case exceeds the ceiling and that is stated rather than hidden.** It
+assumes every wallet fails all eight of its candidate transactions; CHUMP measured 16
+of 636 — **2.5%** — so the realistic figure governs. If it ever trips, the ceiling
+stopping the phase and naming where is the guard working, not a failure.
+
+**2,360 candidates against CHUMP's 636 and PONS's 16,910** puts CASHCAT in the middle
+of the range, and the cost is quoted from its own count rather than from either.
+
+#### STEP 6 FAILED ITS OWN CRITERION, AND THE RUN STOPPED THERE
+
+```
+sign conventions are not unanimous: v4/in-window 779/790
+```
+
+**11 disagreements in 790 tested — 1.39%**, which lands in the same 1.4–2.0% band this
+document records for AI. There it was decoded and proved NOT to be a convention
+difference. **Here it was decoded too, and it is not a convention difference either —
+but the CAUSE is a different one, and it is a defect in the check rather than in the
+data.**
+
+**Decoded, with hashes, before any conclusion.** Both transactions have the identical
+shape:
+
+| | `0x414077b6ec56a58e91c751d8319280986069cdf70350ec4639e35e6e5d6316cf` (block 903,126) |
+|---|---|
+| `tx_to` | `0x7a31dd32…`, a **router contract**; `tx_from` an EOA |
+| swaps | **TWO v4 Swaps, on TWO DIFFERENT CASHCAT/ETH pools** — `0x604867…` and `0x74739c…` |
+| amounts | one pool ~**+42.58** CASHCAT, the other ~**−41.19** |
+| transfers | PoolManager → router **1.387354610014814208**, then router → EOA, the same amount |
+
+`0x3ce6aa42f979ec20f7eea83c01e0254a02989f168e14230db7121464cb2010d5` (block 1,352,363)
+is the same: two CASHCAT pools, and **1.084888446085611403** out to the user.
+**Confirmed against `pool_meta`: all three pool ids are CASHCAT pools.**
+
+**So a router buys on one CASHCAT pool and sells on another inside one transaction, and
+only the NET leaves the PoolManager.** `verifyConventions` pairs **each** swap against
+that single net transfer, so on a two-swap transaction one of the two must appear to
+disagree. The 11 are arithmetic, not evidence about a convention.
+
+**THE GUARD THAT WOULD CATCH IT EXISTS — IN THE OTHER IMPLEMENTATION.**
+`build-cohort.ts` requires `spt.n = 1`, one swap of this token in the transaction,
+before counting a pair as evidence. `verifyConventions` has no such test: it checks
+only that the pool moved in one direction and that the transaction had at least one
+transfer. **That is the "two implementations of one rule" trap for the fourth time,
+and this time the RUNNER'S is the weaker one.**
+
+**It does not need `v4_swaps_all`.** Both hops here are CASHCAT pools, so the token's
+own `token_swap_logs` can see them — a `count(*) per tx_hash > 1` test suffices.
+That matters because **`v4_swaps_all` holds 0 rows anywhere inside CASHCAT-P1**, so the
+adjudicator step 7 reaches for is unavailable for this token, and a fix that depended
+on it would fix nothing here.
+
+**The run stopped at step 6 and nothing downstream was written**: no cohort, no tags,
+no rows. The conventions phase is recorded `failed`, which is honest, and the cohort's
+2,360-wallet work set was derived but never spent.
+
 #### The flow probe: NOT RUN, and it could not even be PRICED yet
 
 Step 3 says to price the probe before deciding, from the count of addresses that both
@@ -4404,6 +4662,36 @@ worth recording: the document's decision procedure assumes transfers already exi
   declare `pons_usd` and `ticks` `NOT NULL` while `pons_usd_prices` — the one the
   schema creates — has them nullable, so the definition and the deployed shape had
   already diverged with nothing reporting it.
+
+- **STILL OPEN, found on CASHCAT 2026-09-14: `verifyConventions` has NO
+  ONE-SWAP-PER-TRANSACTION GUARD, so a multi-pool route reads as a convention
+  disagreement.** It raised `v4/in-window 779/790` on CASHCAT — 11 of 790, 1.39% —
+  and decoding two of them settled it: a router buys on one CASHCAT/ETH v4 pool and
+  sells on another **inside one transaction**, and only the NET leaves the
+  PoolManager. `verifyConventions` pairs EACH swap against that single net transfer,
+  so on a two-swap transaction one of the two must appear to disagree.
+
+  Hashes, for anyone re-checking:
+  `0x414077b6ec56a58e91c751d8319280986069cdf70350ec4639e35e6e5d6316cf` (block 903,126,
+  +42.58 on `0x604867…` against −41.19 on `0x74739c…`, 1.387 out) and
+  `0x3ce6aa42f979ec20f7eea83c01e0254a02989f168e14230db7121464cb2010d5` (block
+  1,352,363, 1.085 out). All three pool ids are CASHCAT pools per `pool_meta`.
+
+  **`build-cohort.ts` already has the guard — `spt.n = 1` — and `verifyConventions`
+  does not.** Two implementations of one rule for the fourth time on this project,
+  and this time the RUNNER's is the weaker one, which inverts the usual direction:
+  the standalone CLI is the careful path here.
+
+  **The fix does not need `v4_swaps_all`**, and that matters: both hops are the
+  token's own pools, so `token_swap_logs` can see them and a `count(*) per tx_hash`
+  test suffices. **`v4_swaps_all` holds 0 rows anywhere inside CASHCAT-P1** — its
+  coverage starts 11.3M blocks after the window ends — so a fix routed through that
+  table would fix nothing for this token.
+
+  **NOT FIXED, deliberately.** The conventions check decides whether every amount this
+  system stores can be trusted, so changing what it counts as evidence is a change to
+  what "verified" means for every token. That is an operator's call, and CASHCAT's
+  intake is stopped at step 6 until it is made.
 
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database
