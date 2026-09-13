@@ -1,0 +1,129 @@
+# Hourly incremental update of CHUMP cohort wallet rows.
+#
+# THE FIRST MONITOR FOR A TOKEN WHOSE MARKET IS v3. Every value in the `pricing`
+# block below is taken from intake/chump.yaml, not from another token's monitor.
+# docs/ROBINHOOD.md step 15 is explicit that copying one is silently wrong: a
+# bucket_origin from the wrong token matches no stored bucket and prices every
+# row null, and a missing bridge_assets drops every pool quoted in that bridge.
+#
+id: chump-updates
+name: CHUMP Cohort Updates
+source: token-updates
+
+enabled: true
+
+schedule: 1h
+
+alerts:
+  channel: system
+  # Red after three consecutive failures. Every failure alert goes to the system
+  # channel regardless of this block.
+  discord_on_consecutive_failures: 3
+
+options:
+  chain: robinhood
+  # Checksummed exactly as the chain returns it and as `tokens.mint` and
+  # `wallet_tags.mint` store it. Lowercasing it here would match no cohort.
+  token: "0x0E0d2C89a5a019FE1cF762e5e33187631DACC21B"
+
+  # One window. 523 wallets, payment-proven once each at cohort time.
+  cohort_tags:
+    - CHUMP-P1
+
+  # WHERE THE INTAKE STOPPED, never the head. Seeding at the head skips the
+  # backlog permanently and silently. This is max(to_block) over
+  # token_sweep_progress for this token -- the last block the sweep actually
+  # READ -- which is also the bound the write phase used, so the cursor starts
+  # exactly where the rows end with no gap and no overlap.
+  seed_cursor_block: 61698120
+
+  rpc:
+    url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+    # Read from the process environment, never interpolated into this file --
+    # monitor options are persisted into monitors.config, so a key in YAML is a
+    # key in the database.
+    key_var: ALCHEMY_API_KEY
+    request_timeout_ms: 60000
+
+    # Blocks left unread behind the head so a tip reorg cannot strand rows.
+    # ~20 seconds at 0.1s blocks. This chain's reorg depth has not been
+    # measured; the figure is a margin, not a finding.
+    lag_blocks: 200
+
+    # One hour is 35,622 blocks, measured. 40,000 leaves headroom so a late run
+    # catches up rather than falling permanently behind.
+    max_blocks_per_run: 40000
+
+    # HARD CEILING PER RUN, ~7x the 430-714 CU a run of this adapter measures.
+    # The run stops and fails when it is reached, and says where it stopped.
+    cu_ceiling: 5000
+
+    # STARTING SPAN, SIZED FROM CHUMP'S OWN MEASURED DENSITY, NOT COPIED.
+    # CHUMP is densest near the head, where sweep-probe measured 13,718 transfer
+    # logs over 300,000 blocks = 0.0457 logs/block (section 8). A 40,000-block
+    # slice is therefore ~1,830 logs, far below the result cap, so the whole
+    # slice fits in one request and there is nothing to split. INDEX starts at
+    # 18,000 because PONS-era transfer density is 10x this; carrying that figure
+    # across would cost two requests a run for no reason.
+    log_span_blocks: 40000
+    # Below this, a size refusal is a livelock rather than something to retry.
+    min_log_span_blocks: 25
+
+  venues:
+    v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+    v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+  pricing:
+    # Identical to intake/chump.yaml. All 51 in-scope pools quote against one of
+    # these three, so CHUMP needs NO bridge asset and none is configured --
+    # `bridge_assets` is absent rather than empty-with-a-comment, because the
+    # intake config has no such key either and the write phase's gate compares
+    # the two.
+    assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+      - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+      - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+    usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    native_assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+      - "0x0000000000000000000000000000000000000000"
+
+    # READS the chain's ETH/USD series, never writes it. token-updates (PONS)
+    # owns it. This monitor derives it in memory to value its own rows for the
+    # slice and persists nothing, so no two writers race for a bucket.
+    #
+    # IT MATTERS MORE FOR CHUMP THAN FOR ANY EARLIER TOKEN. 99.1% of CHUMP's
+    # swaps are quoted in WETH or native ETH -- 264,263 of 274,985 on a single
+    # v3 WETH pool -- so essentially every row it writes is priced through this
+    # series rather than through chump_usd_prices.
+    derives_native_usd: false
+
+    bucket_blocks: 10000
+    # THE EXISTING RESIDUE-3150 GRID that PONS and INDEX read, matching
+    # intake/chump.yaml exactly. Verified rather than asserted: all 3,791
+    # buckets of CHUMP's life, 23,791,950-61,698,120, exist in
+    # native_usd_prices at `block_number % 10000 = 3150` -- 3,791 of 3,791.
+    # A different origin would look up 23790000 where the stored bucket is
+    # 23793150, match nothing, and price every row null.
+    bucket_origin: 8963150
+    # A tick outside this multiple of its bucket's median is discarded. The
+    # intake's derivation discarded 0 of 2,331 USD ticks and 0 of 271,935
+    # native ticks at these settings.
+    tick_fence_multiple: 100
+    native_fence_multiple: 10
+
+  floors:
+    token_raw_units: 1
+    paid_raw_units: 1
+    # Whole tokens. THE ONE THAT IS EASY TO OMIT: a USD-only floor once let
+    # through a row of 1.7e-6 tokens carrying $980,393.99 of allocated USD.
+    token_amount: 0.001
+    # Applies ONLY to rows that have a USD value. A null-USD row is unpriced,
+    # not small, and is never dropped by this.
+    usd: 0.01
+
+  tables:
+    # `token_usd` is configured; the COLUMN inside it is `pons_usd` on every
+    # token's table and is not configurable. Step 12.
+    token_usd: chump_usd_prices
+    native_usd: native_usd_prices
