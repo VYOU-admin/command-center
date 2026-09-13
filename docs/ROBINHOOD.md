@@ -1714,6 +1714,23 @@ figure was 10. A genuine catastrophe would have committed identically.
 **Costs:** no network.
 **Stops:** no.
 
+**THE PER-TOKEN PRICE TABLE WAS CREATED BY NO CODE, and CHUMP is where that
+surfaced.** `SCHEMA` in `adapters/token-updates/schema.ts` creates exactly one:
+`pons_usd_prices`, hardcoded. `index_usd_prices` and `ai_usd_prices` were made by
+hand, exactly as `token_swap_logs` and `token_events` were, so the prices phase died
+on `relation "chump_usd_prices" does not exist` **after deriving the whole series** —
+the work was done and had nowhere to go. The table named by `tables.token_usd` is now
+created if it is missing, with the name validated against `^[a-z][a-z0-9_]*$` before
+it reaches the statement. **A table that is read and written by code but created by
+none is a missing step, not a missing row** — this is the third instance of that
+sentence in this document.
+
+**The hand-made tables and the schema had already drifted, which is the reason to
+care.** `index_usd_prices` and `ai_usd_prices` declare `pons_usd` and `ticks` as
+`NOT NULL`, matching `SCHEMA`; `pons_usd_prices` itself, the one the schema actually
+creates, has them **nullable**. Two shapes for one table definition, and nothing
+would have reported it.
+
 **Two columns are named for the first token loaded, and neither is
 configurable:** `pool_meta.pons_side` and `<token>_usd_prices.pons_usd`. The
 table NAMES are configured; the column names are not, so every token's price
@@ -3693,6 +3710,16 @@ against a 2,000,000 ceiling.
   optional `knownPool`, which the conventions loop already had and never used, and
   raises with a message naming the cause when neither is available. **The fix keeps one
   decode implementation** rather than a second written to avoid the line.
+- **FIXED 2026-09-13: the per-token `<ticker>_usd_prices` table was created by no
+  code.** `SCHEMA` creates `pons_usd_prices` and nothing else, so `index_usd_prices`
+  and `ai_usd_prices` were made by hand and CHUMP's prices phase failed with
+  `relation "chump_usd_prices" does not exist` **after deriving the entire series**.
+  The configured `tables.token_usd` is now created when missing, its name validated
+  against `^[a-z][a-z0-9_]*$` first. Found alongside it: the two hand-made tables
+  declare `pons_usd` and `ticks` `NOT NULL` while `pons_usd_prices` — the one the
+  schema creates — has them nullable, so the definition and the deployed shape had
+  already diverged with nothing reporting it.
+
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database
   fails at the first read. Its shape is recorded in step 5.

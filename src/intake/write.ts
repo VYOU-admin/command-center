@@ -467,11 +467,54 @@ export function checkUsdTotal(
   };
 }
 
+/**
+ * CREATE THE TOKEN'S PRICE TABLE IF IT IS MISSING.
+ *
+ * `SCHEMA` creates exactly one of these -- `pons_usd_prices`, hardcoded -- so
+ * `index_usd_prices` and `ai_usd_prices` were made by hand, and CHUMP's prices
+ * phase died on `relation "chump_usd_prices" does not exist` AFTER deriving the
+ * whole series: the work was done and had nowhere to go. A table that is read and
+ * written by code but created by none is a missing step, not a missing row, and
+ * this is the third one found here after `token_swap_logs` and `token_events`.
+ *
+ * The column is `pons_usd` on every token's table. That is not a mistake to fix
+ * here: docs/ROBINHOOD.md step 12 records that the table NAME is configured while
+ * the column name is not, and renaming it is a migration rather than a config
+ * change. A table created with `token_usd` instead would be unreadable by every
+ * reader in the system.
+ *
+ * The name is interpolated, so it is validated first. It comes from a config file
+ * rather than from a request, but a table name is the one thing here that cannot
+ * be a bound parameter.
+ */
+export async function ensureTokenUsdTable(
+  client: PoolClient,
+  cfg: IntakeConfig,
+): Promise<void> {
+  const table = cfg.tokenUsdTable;
+  if (!/^[a-z][a-z0-9_]*$/.test(table)) {
+    throw new Error(
+      `tables.token_usd is "${table}", which is not a plain lower-case identifier. `
+        + 'A table name cannot be a bound parameter, so it is validated instead.',
+    );
+  }
+  await client.query(
+    `create table if not exists ${table} (
+       chain        text    not null,
+       bucket_block bigint  not null,
+       pons_usd     numeric not null,
+       ticks        integer not null,
+       primary key (chain, bucket_block)
+     )`,
+  );
+}
+
 export async function persistAllPrices(
   client: PoolClient,
   cfg: IntakeConfig,
   series: PriceSeries[],
 ): Promise<{ tokenUsdInserted: number; nativeUsdInserted: number; alreadyPresent: number }> {
+  await ensureTokenUsdTable(client, cfg);
   let tokenUsdInserted = 0;
   let nativeUsdInserted = 0;
   let alreadyPresent = 0;
