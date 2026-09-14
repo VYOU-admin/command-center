@@ -4797,6 +4797,85 @@ check's population rather than being excused from it. **The expected result is n
 writes nothing and exists to show what the buy rule discarded, so a USD it never stores
 cannot mislead.
 
+#### STEPS 11 AND 12: 97,834 ROWS, AND THE FENCE TOOK EXACTLY THE SIX
+
+**Step 11, the dry run: 107.9 s, 0 CU.** It reconciles in both directions, which is
+the whole point of running it:
+
+```
+rows                     97,834
+  buy            22,977  }
+  sell           18,925  }  = tradeRows        41,902
+  transfer_in    38,762  }
+  transfer_out   17,170  }  = transfersWritten 55,932   41,902 + 55,932 = 97,834
+cohort                    2,245
+wallets appearing in rows 2,241     <- 4 cohort wallets have no row at all
+usdNulledByFence              6     <- the SIX step 12 rejected, and only those
+rowsNotFenceable          7,676     <- bucket has no own-series price; not a pass
+floors  swapsBelowTokenRaw 8,932  swapsBelowPaidRaw 185
+        rowsBelowTokenAmount  26  rowsBelowUsd      217
+```
+
+**`usdNulledByFence: 6` is the fix landing exactly on its target and nothing else.**
+The check had reported 6 prices outside 10x; the fence nulled 6 rows. Had it nulled
+substantially more, the remedy would have been over-broad and this document would be
+recording that instead.
+
+**Step 12, the write: 148.3 s, 0 CU, `rows_stored: 97,834`.**
+
+```
+stored prices against their own bucket
+  compared      33,104
+  notComparable  8,553    <- bucket the token's own series never priced
+  outside            0    <- WAS 6, worst 1,047.6x
+  worstRatio      6.541
+usd_total_check  implied price $0.016029, absurd: false
+```
+
+**`outside: 0` with `worstRatio` 6.54 against a 10x fence.** The backstop reports zero
+and the margin is real rather than marginal. CHUMP's equivalent was 0 outside, worst
+6.58x — two tokens, independently, sitting just inside the same fence.
+
+**VERIFIED ON A FRESH CONNECTION, not from the runner's exit.** `wallet_transactions`
+holds **97,928** rows for CASHCAT, and the 94-row difference is fully accounted for:
+
+| | rows | |
+|---|---|---|
+| `block_number <= 62,152,931` | 97,834 | the intake's, matching `rows_stored` exactly |
+| `block_number > 62,152,931` | 94 | the hourly monitor's, written before this run |
+| total | 97,928 | |
+
+Every side reconciles the same way (buy 22,984 = 22,977 + 7, sell 18,932 = 18,925 + 7,
+transfer_in 38,802 = 38,762 + 40, transfer_out 17,210 = 17,170 + 40), and the stored
+sums match the run's to the last digit: **$66,733,515.0085** and
+**4,163,215,575.2476 tokens**.
+
+**THE SEAM WITH THE HOURLY MONITOR IS EXACT, AND IT WAS CHECKED FROM DATA RATHER THAN
+FROM THE YAML COMMENT.** `max(to_block)` over `token_sweep_progress` is **62,152,931**
+across all three streams (swap-v3, swap-v4 and transfer all swept 88,836..62,152,931);
+`cashcat-updates` seeds its cursor at **62,152,931**; and the monitor's 94 rows all
+sit above it. No gap, no double-write.
+
+#### THE 56,191 NULLS ARE NOT A PRICING FAILURE, AND THE RAW SHARE MISLEADS
+
+57.4% of CASHCAT's rows carry a null USD, which sounds alarming and is not. Split by
+reason it is almost entirely structural:
+
+| reason | rows | |
+|---|---|---|
+| **transfer rows** | **55,932** | `usdAmount: null` **by construction** — a transfer has no counter side, so there is no price to derive. This is every transfer row, 38,762 in + 17,170 out |
+| trade rows genuinely unpriced | 259 | buy 167, sell 92 |
+| | 56,191 | |
+
+**So the figure that means anything is 41,643 of 41,902 trade rows priced — 99.38%,
+with 0.62% unpriced.** Of all 56,191 nulls, only **221** fall in a bucket where
+`native_usd_prices` has no entry; the ETH/USD series covers 83,150–63,153,150 in 10,462
+buckets and is not the constraint.
+
+**Quote the trade share, not the row share.** A token whose wallets move it around a lot
+has more transfer rows and would look worse on the raw share while being priced better.
+The denominator has to be the rows that can carry a price.
+
 #### STEP 7: COHORT 2,245, AND IT RECONCILES EXACTLY
 
 **78.9 s, 101,424 CU.** The work set was re-derived before spending rather than taken
