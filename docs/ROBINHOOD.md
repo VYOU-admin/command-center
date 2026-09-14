@@ -2203,7 +2203,7 @@ around it.**
 2  number of buys    5%    min-max
 3  earliness        12.5%  linear within the window, already 0..1
 4  hold time        12.5%  min-max
-5  pre-pump share    5%    share, already 0..1
+5  pre-pump share    5%    MAX over pumps of a share, already 0..1
 6  buy-size trend    5%    share x weight, already 0..1
 7  total USD in     10%    min-max
 ```
@@ -2304,11 +2304,68 @@ The flags array is **replaced** on every run, never appended, and the position
 sums include transfer sides — so once transfers are collected, `inflated-pnl`
 clears itself.
 
-**Watch pre-pump share on every token.** On PONS it is zero for more than 75% of
-the cohort with a maximum of exactly 1/3, meaning no wallet bought inside the 48
-hours before more than one of the three pumps. **A maximum landing exactly on
-1/n_pumps is the signature.** If it repeats, that 5% is being spent on a metric
-that separates almost nobody.
+#### METRIC 5 IS THE MAXIMUM OVER PUMPS — changed 2026-09-14, and it replaces a mean
+
+> **Metric 5 is the LARGEST share any single pump's 48-hour pre-window took of the
+> wallet's total dollars in.** Not the mean of those shares over the pumps.
+
+**What it replaces, and why the mean was wrong.** The metric averaged every pump's
+pre-48h share: `shares.reduce(+) / shares.length`. **Whenever two pumps are more than
+48 hours apart their pre-windows are disjoint, so a buy dollar falls in at most one of
+them** — the shares then sum to at most 1 and their mean to at most **1/n_pumps**. The
+ceiling had nothing to do with the cohort's behaviour; it was arithmetic.
+
+**Three tokens recorded a maximum sitting exactly on 1/n before this was diagnosed:**
+
+| token | pumps | recorded maximum | |
+|---|---|---|---|
+| PONS | 3 | **exactly 1/3** | read as "no wallet bought before more than one pump" |
+| CHUMP | 2 | **exactly 1/2** | read as a window-end effect — real, but not the whole cause |
+| CASHCAT | 3 | **exactly 1/3**, 168 wallets on it, **0 above** | the one that settled it |
+
+**This document's own instruction — "a maximum landing exactly on 1/n_pumps is the
+signature" — was describing the defect and calling it a property of the cohorts.** It
+was written after PONS, repeated after CHUMP, and read as a finding about wallets all
+three times. **A value that keeps landing on a round function of a CONFIGURED COUNT is
+a property of the code, not of the chain.** That is the transferable lesson here.
+
+**What the mean cost, precisely.** `normalised.prePumpShare` is the raw value passed
+through unchanged — the metric is already 0..1 by construction and is deliberately not
+min-maxed (see below) — so a stated weight of **0.05 delivered at most 0.0167 on a
+three-pump token and the full 0.05 on a one-pump token.** Identical behaviour scored
+differently for no reason but how many pumps an operator configured, which silently
+reweighted the composite between tokens.
+
+**Why the maximum and not one of the alternatives.** Dividing by the 1/n ceiling
+rescales but keeps the mean's meaning, so buying before all pumps stays
+indistinguishable from buying before one. Unioning the windows reaches 1.0 but discards
+the per-pump structure metric 6 is built on. **The maximum answers the question the
+metric is named for — did this wallet load up before a pump — reaches 1.0 on every
+token, and does not penalise a wallet for having bought before a second one.**
+
+**It is still "already 0..1" and still not min-maxed.** Each share is a fraction of the
+wallet's own `usdIn`, so the maximum of them is at most 1 and reaches 1 exactly when a
+wallet bought its entire priced position inside one pre-pump window. The normalisation
+category is unchanged by this.
+
+**SCORES COMPUTED BEFORE 2026-09-14 ARE NOT COMPARABLE WITH SCORES COMPUTED AFTER.**
+Every stored score up to that date used the mean. Nothing is restated retroactively —
+the figures recorded against each token in section 8 are what those runs produced, and
+they are labelled with which definition produced them. **Do not compare a score quoted
+from an older section against one computed now.**
+
+**What still bounds this metric, stated so it is not mistaken for unbounded.** A cohort
+member can only precede a pump it could physically buy before. Where every pump sits at
+or after the window end — CHUMP, where pump 1 *is* the window end — a wallet can only
+have bought before the first, and pumps after it contribute zero to the maximum as they
+did to the mean. **That is a property of the window and the pumps, not of the
+aggregation**, and the maximum reports it honestly: such a wallet now reads 1.0 for
+"everything before a pump" rather than 0.5 for "half of an average".
+
+**Still watch the distribution on every token, and report it rather than inferring it
+from the maximum.** The question is whether the 5% separates anyone: CHUMP's split of
+67% at zero against 23% at the ceiling is real separation, and PONS's >75% at zero is
+close to none.
 
 ---
 
@@ -4044,11 +4101,27 @@ inside the window; the window closes at pump 1; so **no wallet can possibly have
 in the 48 hours before pump 2, which is four days later. The metric's ceiling is 1/2 by
 construction, and no cohort member can ever exceed it.**
 
-**The general rule: metric 5's maximum is bounded by the number of pump points a
-cohort member can physically precede, over the total number of pumps.** Where every
-pump sits at or after the window end, that is 1/n for the first pump and 0 for the
-rest. This is worth knowing before reading a pre-pump share as weak signal — on CHUMP
-it is not weak, it is capped.
+**The general rule as it was written here: metric 5's maximum is bounded by the number
+of pump points a cohort member can physically precede, over the total number of pumps.**
+
+**HALF OF THAT WAS THE MEAN, AND IT WAS CORRECTED ON 2026-09-14.** Two separate things
+were producing CHUMP's 0.5 and this section conflated them:
+
+- **Real, and still true:** both pumps sit at or after the window end and pump 1 **is**
+  the window end, so no cohort member can have bought in the 48 hours before pump 2.
+  Pump 2's share is structurally zero for every wallet here.
+- **An artefact of the aggregation, now gone:** dividing by `shares.length` — the total
+  number of pumps, including the one no wallet could precede — turned "everything I
+  bought was inside pump 1's window" into **0.5** rather than 1.0.
+
+**Under the maximum, CHUMP's 119 ceiling wallets read 1.0.** Their behaviour has not
+changed and neither has the window-end fact; what changed is that the metric no longer
+divides a wallet's answer by a count of pumps that answer could never reach. **The
+separation this section reports — 67% at zero against 23% at the ceiling — is
+unaffected, because a monotone rescaling of the top group cannot reorder it.**
+
+The surviving caution is worth keeping: read a pre-pump share against where the pumps
+sit relative to the window before calling it weak signal. On CHUMP it is not weak.
 
 **And unlike PONS, it does separate.** 119 wallets at the ceiling against 350 at zero
 is a real 23%/67% split of the cohort, with 53 in between. The 5% weight is not wasted
@@ -4944,18 +5017,19 @@ three-pump token's is 0.333. Identical behaviour on two tokens produces differen
 contributions for no reason but how many pumps were configured, which silently reweights
 the composite between tokens.
 
-**THE REMEDY IS A DEFINITION CHANGE AND HAS NOT BEEN MADE.** The candidates:
+**THE REMEDY IS A DEFINITION CHANGE AND IT WAS MADE ON 2026-09-14.** The candidates as
+they were put to the operator:
 
 | option | effect |
 |---|---|
-| **take the MAX over pumps instead of the mean** | "did they load up before any pump" — reaches 1.0, comparable across tokens, and a wallet buying before two pumps is not penalised for it |
+| **take the MAX over pumps instead of the mean** | **TAKEN.** "did they load up before any pump" — reaches 1.0, comparable across tokens, and a wallet buying before two pumps is not penalised for it |
 | divide by the share's own ceiling (1/n) | rescales to 0..1 but keeps the mean's meaning: buying before ALL pumps still cannot be distinguished from buying before one |
 | union the windows, then one share | cleanest arithmetic, reaches 1.0, loses per-pump structure metric 6 relies on |
 | leave it | metric 5 keeps a third of its weight on this token and a different fraction on the next |
 
-**The max is the likeliest right answer**, but it changes what every stored score means
-for every token and so waits for the operator. **The scores recorded above were computed
-with the mean, and that is what they mean.**
+**The figures in this CASHCAT section were computed with the MEAN and are left as they
+were.** They are what that run produced. The definition and the measured effect of the
+change across every window are in step 13 and in the subsection below.
 
 #### STEPS 14-17: PAGE EXECUTED, MONITOR HEALTHY, WATCHLIST WAS STALE BY 4
 
@@ -5192,17 +5266,26 @@ worth recording: the document's decision procedure assumes transfers already exi
 
 ## 9. Rules here the code does not implement
 
-- **OPEN — metric 5 (`prePumpShare`) cannot exceed 1/n_pumps, so it carries a
-  fraction of its stated weight and is not comparable between tokens.** Measured on
-  CASHCAT 2026-09-14: max exactly **0.3333333333333333** with 168 wallets on it and
-  **zero above it**. The metric averages each pump's pre-48h buy share over the pumps;
-  the windows are disjoint, so the shares sum to at most 1 and the mean to at most 1/n.
-  The normalised value is the raw one unchanged, so a weight of 0.05 delivers at most
-  0.0167 on a three-pump token and the full 0.05 on a one-pump token. Proven on
-  `0x0300e281a7affee0c7b70a2f4cfa5dda16be4112`, whose single priced buy of $3,555.03
-  sits in one window and scores exactly 1/3. **The remedy is a definition change** —
-  taking the max over pumps is the likeliest — and is recorded with its alternatives in
-  section 8 under CASHCAT. Every score stored to date was computed with the mean.
+- **FIXED 2026-09-14 — metric 5 (`prePumpShare`) could not exceed 1/n_pumps, so it
+  carried a fraction of its stated weight and was not comparable between tokens.** It
+  averaged each pump's pre-48h buy share over the pumps; pre-windows more than 48 hours
+  apart are disjoint, so the shares sum to at most 1 and the mean to at most 1/n. The
+  normalised value is the raw one unchanged, so a weight of 0.05 delivered at most
+  0.0167 on a three-pump token and the full 0.05 on a one-pump token. Measured on
+  CASHCAT: max exactly **0.3333333333333333**, 168 wallets on it, **zero above**.
+  Proven on `0x0300e281a7affee0c7b70a2f4cfa5dda16be4112`, whose single priced buy of
+  $3,555.03 sits in one window and scored exactly 1/3.
+
+  **The metric is now the MAXIMUM over pumps**, changed in the one implementation,
+  `src/scoring/metrics.ts`. The definition, the alternatives that were rejected, and
+  the measured effect on every window are in step 13 and in section 8 under CASHCAT.
+
+  **Kept here rather than deleted, because the diagnosis is the reusable part.** Three
+  tokens recorded a maximum on exactly 1/n — PONS 1/3, CHUMP 1/2, CASHCAT 1/3 — and
+  this document read each as a finding about wallets, having itself written down that
+  "a maximum landing exactly on 1/n_pumps is the signature". **A value that repeatedly
+  lands on a round function of a CONFIGURED COUNT is a property of the code.** It took
+  three tokens and two years of pump counts to ask that question.
 
 - **FIXED 2026-09-13, and this entry read as OPEN until 2026-09-14 — `--continue`
   could not cross two adjacent STOP phases, so the runner deadlocked between `pools`
