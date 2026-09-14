@@ -4254,11 +4254,65 @@ for its entire life. The series simply was never extended that far back because 
 loaded token needed it. `eth-usd-series` already does this job and cost $0.0193 to
 cover 7.8M blocks; extending it below 1,663,150 is the same job over a smaller range.
 
-**This is a step 10 action and is NOT done in this session**, which stops at the
-cohort. It is recorded here now, before the rows exist, because `intake/index.yaml`'s
-false coverage claim is the cautionary case: **a config that asserts a series covers a
-token must be checked against the series, and CASHCAT's config says the opposite —
-that the reach is one bucket from the window and must be verified.**
+**DONE 2026-09-14, and the window is now completely covered.** Approved and run as
+`eth-usd-series --from 83150 --to 1663149 --ceiling 50000 --commit`:
+
+```
+                       BEFORE            AFTER
+series head, residue 3150   1,663,150         83,150      +140 buckets (6,083 -> 6,223)
+CASHCAT-P1 buckets     213 of 295 covered   295 of 295    0 missing
+CASHCAT-P1 blocks below the head   816,988 (27.8%)    0
+buckets missing over CASHCAT's LIFE      158            18
+```
+
+```
+buckets derived            140      ticks kept 23,889   discarded by the 10x fence 0
+inserted                   140      already present 0 -- nothing was rewritten
+ETH/USD            $1,198.69 - $2,591.09    median $1,627.24
+ticks per bucket   median 161, mean 171, MINIMUM 1
+cost                     3,600 CU = $0.0016    60 eth_getLogs   ceiling 50,000
+```
+
+**The 10x fence discarded ZERO of 23,889 ticks**, which is the soundness signal step 10
+names, and the range $1,199–$2,591 sits inside the $1,239–$2,653 the chain's older
+buckets already span.
+
+**DENSITY WAS PROBED OVER THE BLOCKS ACTUALLY READ, and it varies by 165x inside the
+target range alone:**
+
+| probe | blocks | market swaps | per block |
+|---|---|---|---|
+| 83,150–283,149 | 200,000 | **24** | **0.00012** |
+| 700,000–900,000 | 200,001 | 3,981 | 0.019905 |
+| 1,400,000–1,663,149 | 263,150 | 4,363 | 0.016580 |
+
+**Only THREE market pools existed in the earliest sample** against 819 today, which is
+why it is so sparse. Even the densest sample implies a 301,500-block natural span, so
+**the 100,000-block cap binds everywhere** and the request count is set by blocks
+rather than by density — 16 per filter. Estimated ~3,360 CU, spent 3,600: **7% over**,
+the tightest sweep estimate recorded here, precisely because a cap-bound sweep does not
+depend on the density that has been wrong three times.
+
+**EIGHTEEN BUCKETS REMAIN MISSING AND THEY ARE REPORTED RATHER THAN CHASED.** They sit
+in **93,150–743,150**, the sparse early region where the market barely traded, and
+they are **all below the window's first bucket at 843,150** — so no cohort-window row
+can go unpriced for want of a rate. Gaps stay gaps: a bucket with no market trade is
+not interpolated and not carried forward.
+
+**The thinnest new bucket rests on ONE tick.** That is the provenance this document
+elsewhere calls measurably wrong — but the comparison that condemned those was
+token-incidental buckets against the market, and these ARE the market. Where the
+market traded once in 10,000 blocks, one tick is the best measurement that exists, and
+the alternative is no price at all. **Recorded so a thin early CASHCAT price is
+expected rather than surprising.**
+
+**Doing this BEFORE the rows exist is the point.** INDEX's 6,052 nulls were written
+first and repaired afterwards; CASHCAT's window is covered before a single row is
+written, so there is nothing to reinsert and no window of history that was briefly
+wrong. `intake/index.yaml`'s false coverage claim is the cautionary case — **a config
+asserting a series covers a token must be checked against the series** — and CASHCAT's
+config said the reach was one bucket from the window and must be verified, which it
+now has been.
 
 #### Scope: 590 of 1,001 in scope, and NO BRIDGE IS NEEDED
 
@@ -4808,6 +4862,28 @@ worth recording: the document's decision procedure assumes transfers already exi
   system stores can be trusted, so changing what it counts as evidence is a change to
   what "verified" means for every token. That is an operator's call, and CASHCAT's
   intake is stopped at step 6 until it is made.
+
+- **`eth-usd-series` REPORTS A WORK SET IT DOES NOT USE, and on CASHCAT it printed
+  `buckets_missing_in_range: 0` and then wrote 140.** Found 2026-09-14. Its
+  "BEFORE THE FIRST REQUEST" figure is derived from
+  `wallet_transactions … usd_amount is null` — buckets needed by rows that are ALREADY
+  unpriced — which is a repair tool's work set and was right for INDEX, whose 6,052
+  nulls existed before the fix. **CASHCAT has no rows yet**, deliberately: its intake
+  stops at step 7. So the stated work set was empty while the sweep went on to derive
+  and insert 140 genuinely missing buckets.
+
+  **The outcome was right and the reporting was not**, which is the combination this
+  document treats as dangerous. Step 9's rule is explicit — *there is ONE derivation,
+  used by both the estimate and the fetch; if the two disagree the job stops rather
+  than spending against a figure nobody saw* — and here they disagreed by 140 buckets
+  and 3,600 CU. It spent against a figure nobody saw, and it happened to be spending
+  worth doing.
+
+  **The fix is to make the work set the union of both questions**: buckets needed by
+  existing unpriced rows, AND buckets in the requested range with no stored price.
+  Pre-filling before rows exist is strictly better than repairing afterwards — nothing
+  is written wrong and nothing needs reinserting — so the tool should be able to say
+  so before it starts.
 
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database
