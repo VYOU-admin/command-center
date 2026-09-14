@@ -45,6 +45,12 @@ export interface RowConfig {
   v4PoolManager: string;
   bucketBlocks: number;
   bucketOrigin: number;
+  /**
+   * The multiple a row's implied price may differ from its own bucket's derived
+   * price before the USD is nulled. The SAME constant step 10 fences derived
+   * native prices with -- one number, not a second one invented here.
+   */
+  nativeFenceMultiple: number;
   floors: Floors;
 }
 
@@ -99,6 +105,14 @@ export interface RowStats {
   rowsOutsideCohort: number;
   rowsWithNullUsd: number;
   nullUsdBecauseNoBucketPrice: number;
+  /**
+   * Rows whose implied price fell outside the fence against their OWN bucket's
+   * derived price, so their USD was nulled and their token amount kept. See the
+   * fence in `buildRows`.
+   */
+  nullUsdBecauseOutsideFence: number;
+  /** Rows the fence could not test, because their bucket has no own-series price. */
+  rowsNotFenceable: number;
   /** Receipts rejected because the wallet gave up nothing in that transaction. */
 }
 
@@ -170,6 +184,8 @@ export function tradeLegs(
     rowsOutsideCohort: 0,
     rowsWithNullUsd: 0,
     nullUsdBecauseNoBucketPrice: 0,
+    nullUsdBecauseOutsideFence: 0,
+    rowsNotFenceable: 0,
   };
 
   /* ---- 1. group swaps by transaction and counterparty --------------------- */
@@ -294,6 +310,13 @@ export function buildRows(
   /** Null accepts every wallet -- used by the cohort builder, which is deciding
    *  membership rather than filtering by it. */
   cohort: Set<string> | null,
+  /**
+   * THE TOKEN'S OWN USD SERIES, bucket -> price, for the row-price fence below.
+   * Omit it and the fence is skipped and every row counted as unfenceable, which
+   * is the honest reading for a caller that has no series to compare against --
+   * the cohort builder, which decides membership and never stores a price.
+   */
+  ownUsdByBucket?: Map<number, number>,
 ): { rows: WalletRow[]; stats: RowStats } {
   const { legs, stats } = tradeLegs(
     swaps, transfers, cfg, counterUsd, exclusions, knownPools,
@@ -322,6 +345,46 @@ export function buildRows(
       stats.nullUsdBecauseNoBucketPrice += 1;
     }
     const amountNumber = Number(tokenAmount);
+
+    /*
+     * THE FOUR FLOORS BOUND EACH SIDE INDEPENDENTLY; NOTHING BOUNDED THE RATIO.
+     *
+     * `tokenAmount` comes from the TRANSFER and `usd` from `groupUsd * share`,
+     * derived from the SWAPS -- two different sources -- so a row can be
+     * reasonable on both axes separately and absurd as a quotient. Measured on
+     * CASHCAT: 80 swaps priced outside 10x their own bucket, and 29 of them pass
+     * ALL FOUR floors. `0x81f55a09d6969f89f80affa30b06afbde8173286e64a9d761aeada
+     * 0537f6dc26` moves 18,225 real tokens against a 0.0000149 ETH counter side
+     * and implies $0.00000156 against a bucket median of $0.0531 -- 34,066x low.
+     *
+     * Step 10 fences TICKS at 100x and reports what the fence caught; the row
+     * writer had no equivalent, and that asymmetry is the defect. This is it.
+     *
+     * NULL, NEVER DROPPED. The movement is real and its token amount verifiable;
+     * section 5 says a null is never a zero and step 11 says an unpriced row is
+     * unpriced rather than small. Position sums and inflated-pnl run on token
+     * amounts and stay correct. The floors already exist for dust by size.
+     *
+     * A row whose bucket has no own-series price CANNOT be fenced -- 8,553 of
+     * 33,096 on CASHCAT -- and is counted rather than silently trusted.
+     */
+    let fenced = usd;
+    if (usd !== null && amountNumber > 0) {
+      const bucket = bucketOf(leg.block, cfg.bucketBlocks, cfg.bucketOrigin);
+      const own = ownUsdByBucket?.get(bucket);
+      if (own === undefined || !(own > 0)) {
+        stats.rowsNotFenceable += 1;
+      } else {
+        const implied = usd / amountNumber;
+        const f = cfg.nativeFenceMultiple;
+        if (implied > own * f || implied < own / f) {
+          fenced = null;
+          stats.nullUsdBecauseOutsideFence += 1;
+          stats.rowsWithNullUsd += 1;
+        }
+      }
+    }
+
     rows.push({
       wallet: leg.wallet, side: leg.side, txHash: leg.txHash, pool: leg.pool,
       counterparty: null,
@@ -329,8 +392,8 @@ export function buildRows(
       // A trade row aggregates every swap log for this wallet, side and pool in
       // the transaction, so there is no single log index to carry.
       logIndex: null,
-      tokenAmount, usdAmount: usd,
-      priceUsd: usd !== null && amountNumber > 0 ? usd / amountNumber : null,
+      tokenAmount, usdAmount: fenced,
+      priceUsd: fenced !== null && amountNumber > 0 ? fenced / amountNumber : null,
     });
   }
   return { rows, stats };

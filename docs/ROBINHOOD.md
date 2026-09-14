@@ -368,7 +368,25 @@ end to end. Phases filled in as the run proceeds:
 | conventions, WITH the guard | **7.4 s** | 0 | **unanimous, 2,505 of 2,505** across all six cells |
 | ETH/USD series extension | ~1 min | 3,600 | ~3,360 estimated — **7% over**, the tightest here |
 | **cohort** | **78.9 s** | **101,424** | ~101,716 from 2,360 candidates — **0.3% under** |
+| tags | **1.1 s** | 0 | no network |
+| timestamps | **50.8 s** | **0** | toFetch 0 — the sweep carried all 55,076 |
+| prices | **75.6 s** | 0 | no network |
+| dry run | ~60 s | 0 | no network |
+| write | — | 0 | **RAISED** on its own price gate — see below |
 | | **total 327,660 CU** | | **$0.147** |
+
+**`timestamps` took 50.8 s to fetch NOTHING, and that is the materialised work-set
+query rather than a defect.** It resolves the blocks the rows will need across 4.38M
+swaps and 10.6M transfers; the answer was **55,076 needed, 55,076 already stored,
+0 to fetch**. Confirmed rather than assumed, as step 9 requires — a v3-swept token
+carries its own `blockTimestamp` and pays nothing here, now measured on a second
+token after CHUMP.
+
+**The row writer still inserts one row per statement.** The sweep was batched on
+2026-09-14; `planOrWrite` was not. At CASHCAT's 97,834 rows that is roughly 80
+seconds and nobody notices; at a token an order of magnitude larger it becomes the
+sweep's 200-minute problem again. Recorded rather than fixed, because the write is
+not the phase that hurt.
 
 **THE COHORT ESTIMATE LANDED TO 0.3%, and it decomposes to the CU exactly:**
 
@@ -4228,8 +4246,9 @@ against a 2,000,000 ceiling.
 
 ### CASHCAT — `0x020bfC650A365f8BB26819deAAbF3E21291018b4`
 
-**IN PROGRESS 2026-09-14. Steps 1–7 COMPLETE; stopped at the cohort review, 2,245
-wallets held for approval.** Total so far **327,660 CU = $0.147**.
+**IN PROGRESS 2026-09-14. Steps 1–11 COMPLETE; step 12 RAISED on its own price gate
+and nothing is written.** Cohort `CASHCAT-P1` is tagged at **2,245 wallets** with its
+`token_windows` row; `wallet_transactions` is **0**. Total **327,660 CU = $0.147**.
 "Cash Cat", 18 decimals, supply 1,000,000,000, deployed at block **88,836**.
 
 **CASHCAT IS BY FAR THE EARLIEST TOKEN THIS PIPELINE HAS LOADED**, and almost
@@ -4549,6 +4568,234 @@ stopping the phase and naming where is the guard working, not a failure.
 
 **2,360 candidates against CHUMP's 636 and PONS's 16,910** puts CASHCAT in the middle
 of the range, and the cost is quoted from its own count rather than from either.
+
+#### STEPS 8–11: TAGS, TIMESTAMPS, PRICES, DRY RUN — all clean
+
+**Step 8, tags.** 2,245 stored, **0 refreshed, 0 manual left alone, 0 removed**, and
+the `token_windows` row written. Every zero is stated: this is a first load, so there
+was nothing to refresh and nothing to remove, and a cohort that later shrinks is the
+case those counts exist for. **Casing checked before the upsert and after it: all
+2,245 tags are lowercase and all carry `source = auto`**, so the exact-string match
+the upsert depends on cannot silently insert a second row per wallet.
+
+**Step 9, timestamps: 55,076 needed, 55,076 already stored, 0 to fetch, 0 CU.**
+Confirmed rather than assumed. The sweep carried `blockTimestamp` on every log, which
+is what the Alchemy route buys, and CASHCAT is the second token after CHUMP to pay
+nothing here. It took **50.8 s** to establish that, all of it the materialised
+work-set query over 4.38M swaps and 10.6M transfers.
+
+**Step 10, prices.** 75.6 s, 0 CU.
+
+```
+token/USD ticks    1,223,666   discarded by the 100x fence   26
+token/ETH ticks    3,114,970   discarded by the 100x fence   14
+derived native buckets 5,947   discarded by the 10x fence     0   <- the soundness signal
+buckets with no USDG side        254
+cashcat_usd_prices   5,947 buckets written
+native_usd_prices    5,947 derived and NOT written -- CASHCAT does not own the series
+```
+
+**CASHCAT'S OWN SERIES STARTS BEFORE ITS WINDOW OPENS, WHICH IS THE OPPOSITE OF
+CHUMP.** Reported separately from the chain's, because they answer different
+questions and CHUMP is the cautionary case:
+
+| | CHUMP | CASHCAT |
+|---|---|---|
+| own series | 49 buckets, 45,293,150–61,693,150 | **5,947 buckets, 833,150–62,143,150** |
+| first own bucket vs window | **entirely AFTER the window closed** | **833,150, one bucket BEFORE it opens** |
+| window buckets with an own price | **0 of 295 equivalent** | **111 of 295** |
+| own USD range | $0.0108–$0.2434 | $0.00236–$0.31042, median $0.12190 |
+
+**111 of 295 is not full coverage and does not need to be.** A trade row is priced
+from the COUNTER side through `native_usd_prices`, which after the extension covers
+**295 of 295** window buckets. The own series drives the dashboard's price line, so
+CASHCAT's early chart is populated where CHUMP's was blank — and the 184 window
+buckets without one are buckets where CASHCAT had no USDG trade, which is a gap and
+stays a gap.
+
+**The chain's series was not touched by this token**: `nativeUsdNotWritten: 5947`,
+`nativeUsdOwner: false`. Its three provenances over CASHCAT's life stand at 9,715
+token-incidental, 629 market-derived and 18 market-repaired — the 629 being the 489
+that existed plus the 140 this session added.
+
+**Step 11, dry run — the counts reconcile exactly:**
+
+```
+rows 97,834 = buy 22,977 + sell 18,925 + transfer_in 38,762 + transfer_out 17,170
+tradeRows 41,902 + transfersWritten 55,932 = 97,834
+usdNull 56,185 - 55,932 transfers (null by definition) = 253 unpriced TRADE rows, 0.60%
+wallets 2,241 of the 2,245 cohort
+floors: token-raw 8,932 swaps, paid-raw 185 swaps, token-amount 26 rows, USD 217 rows
+```
+
+#### STEP 12 RAISED ON ITS OWN PRICE GATE, AND THE CAUSE IS DEGENERATE SWAPS
+
+```
+6 stored prices fall outside 10x their OWN bucket's derived price
+(worst ratio 1,047.6, 33,096 compared, 8,553 in buckets the token's own series never priced)
+```
+
+**The write rolled back and nothing was stored — verified on a fresh connection:
+`wallet_transactions` for CASHCAT is 0 and the phase is recorded `failed`.** This is
+the per-bucket check added on 2026-09-13 doing exactly what it was rebuilt to do: on
+CHUMP it found **0 of 10,215** outside 10x with a worst ratio of 6.58, and here it
+finds real outliers on a token that has them.
+
+**Decoded before concluding, per the standing rule.** Both sampled transactions are
+multi-swap dust routes:
+
+| | |
+|---|---|
+| `0x26b93d2fe1cdc63c23372708b77e58e52f0c2c1fd77d60eb94b285725a20c629` | block 24,075,201. A v4 swap **and** a v3 swap on the charted pool `0xa70fc67c…`, moving **0.000000026030829251 tokens** — 2.6 × 10⁻⁸ — against 0.00094 ETH. Implied price **$68,113,790**. |
+| `0x3a75d06669ed92cb5638126df20dc0014e6e585f6065db02bf327ede0ff36dfa` | block 13,987,215. **Three** v4 swaps across three pools, near-zero token sides, 9.236481 USDG on one. Implied price **4.6 × 10¹⁸**. |
+
+**This is step 10's degenerate swap, appearing at ROW level where nothing fences it.**
+The series is protected — the 100x tick fence discarded 26 USD and 14 native ticks
+during derivation — but a row's `price_usd` is `usd_amount / token_amount` computed
+from the swap's own amounts, with **no fence at all**. The four floors in step 11
+catch dust by SIZE and these pass them: `0x81f55a09…` carries **18,225 tokens**
+against 0.0000149 ETH, which clears every floor and implies **$0.00000156** — 34,066x
+below its bucket.
+
+**Measured across every comparable swap, not just the six rows:**
+
+```
+swaps compared                        4,354,225
+outside 10x                                  80    0.0018%
+outside 100x                                 38
+USD carried by the outliers             $31,548    of $2,077,563,596 = 0.0015%
+outlier swaps below the 0.001 token floor 12,566   <- caught by the floors, never rows
+```
+
+**Negligible in value and absurd in price**, which is precisely the combination the
+document says to explain rather than accept. The 80 carry fifteen-thousandths of a
+percent of the volume; what they would carry into the table is a `price_usd` wrong by
+up to three orders of magnitude, on rows that otherwise look ordinary.
+
+#### WHY THE FLOORS DID NOT CATCH THEM — settled from the code, not inferred
+
+**The question had to be settled before touching the check**, because if the floors
+should have caught these rows then the defect is the floors and the check merely
+reported it. Three possibilities, and only the third survives:
+
+| | |
+|---|---|
+| the price check runs BEFORE the floors | **FALSE.** `intake.ts` calls `planOrWrite(…, commit=true, …)` — which applies every floor inside `buildRows` — and only then `checkPricesAgainstTicks`, which reads `wallet_transactions` after the insert. |
+| the floors are not applied on this path | **FALSE.** `planOrWrite` → `buildRows` → `tradeLegs`; floors 1 and 2 in `tradeLegs` at rows.ts:181/185, floors 3 and 4 in `buildRows` at rows.ts:309/316. |
+| **the floors are applied and these survived for a nameable reason** | **TRUE, and the reason is below.** |
+
+**Measured per floor across all 80 outlier swaps:**
+
+| floor | where it applies | passes | caught |
+|---|---|---|---|
+| 1 · `token_raw_units: 1` | the **SWAP's** token side, in RAW units | **80 of 80** | **0** |
+| 2 · `paid_raw_units: 1` | the **SWAP's** counter side, in RAW units | **80 of 80** | **0** |
+| 3 · `token_amount: 0.001` | the **ROW's** transfer amount | 30 | **50** |
+| 4 · `usd: 0.01` | the **ROW's** allocated USD | 33 | 47 |
+| **all four** | | **29** | 51 |
+
+**FLOORS 1 AND 2 CATCH NOTHING HERE AND CANNOT.** They are **one raw unit** — 10⁻¹⁸
+of a token. A "microscopic" side of 2.6 × 10⁻⁸ tokens is **26,030,829,251 raw
+units**, ten orders of magnitude above the floor. Those two floors exist to reject an
+exactly-zero side, and they do only that.
+
+**FLOOR 3 IS A ROW-LEVEL FLOOR ON THE TRANSFER, NOT ON THE SWAP.** This is the whole
+explanation and it was got wrong once before being measured: the 2.6 × 10⁻⁸ figure is
+the SWAP's token side, while `cfg.floors.tokenAmount` is compared against
+`formatUnits(leg.raw)` — the amount that actually MOVED to the wallet. Where the two
+coincide the floor does its job, catching 50 of the 80 and 26 rows in the dry run.
+
+**The 29 survivors are the opposite shape.** A large, legitimate transfer — 18,225
+tokens in `0x81f55a09d6969f89f80affa30b06afbde8173286e64a9d761aeada0537f6dc26` —
+against a swap counter side of **0.0000149 ETH**. The token side passes floor 3
+comfortably, the USD of $0.0358 passes floor 4, and the implied price is
+**$0.00000156** against a bucket median of $0.0531: **34,066x low**.
+
+**THE FOUR FLOORS BOUND EACH SIDE INDEPENDENTLY. NOTHING BOUNDS THE RATIO BETWEEN
+THEM.** A row's `token_amount` comes from the transfer and its `usd_amount` from
+`groupUsd × share`, derived from the swaps — two different sources — so a row can be
+entirely reasonable on both axes separately and absurd as a quotient. **The price
+check is the only thing in the pipeline that looks at the quotient**, which is exactly
+why it fired and exactly why tuning it would be the wrong move: its 10x is not a
+threshold question when the error is 1,047x.
+
+#### THE PROPOSED FIX — fence the row price, store NULL beyond it
+
+**Step 10 already fences ticks at 100x and reports what the fence caught. The row
+writer has no equivalent, and that asymmetry is the defect.** The fix is to give
+`buildRows` the test the pipeline is missing:
+
+> **A row whose implied price falls outside `native_fence_multiple` of its OWN
+> bucket's derived price keeps its token amount and stores a NULL USD.**
+
+**NULL rather than dropped**, for reasons this document already holds elsewhere: the
+movement is real and its token amount is verifiable; section 5 says a null is never a
+zero and step 11 says a null-USD row is unpriced rather than small; position sums and
+`inflated-pnl` run on token amounts and stay correct. Dropping would lose a genuine
+movement, and the floors already exist for dust by size.
+
+**Two consequences that must be stated rather than discovered:**
+
+- **The check becomes a backstop that should report zero**, and zero then means
+  something — the same relationship the 10x native fence already has with "0 discarded
+  is the signal the derivation is sound". It is not circular: the writer enforces, the
+  check verifies, and a non-zero count after this is a real defect.
+- **Rows in buckets the token's own series never priced CANNOT be fenced** — 8,553 of
+  33,096 compared on CASHCAT. They keep a counter-derived price with no independent
+  reference, which is honest and is the residual this fix does not close.
+
+**THE DECISION WAS THE OPERATOR'S AND HAS NOW BEEN TAKEN** — "do not re-run the write
+until that question is answered and the fix is documented and deployed". Every
+available remedy changes what gets a USD, which is a definition, so they are recorded
+with it:
+
+| option | effect |
+|---|---|
+| **fence the row price against its bucket, store NULL beyond it** | consistent with the tick fence and with "unpriced is honest"; loses 6 rows' USD, keeps their token amounts |
+| drop the rows entirely | loses real movements; the floors already exist for dust and these are not dust by size |
+| widen the check's multiple | hides a 1,047x error to admit six rows — the document forbids adjusting a number to fit |
+| leave the gate as it is | the intake cannot complete; correct today, not a resting place |
+
+**The first is the only one consistent with what this document already does elsewhere**
+— step 10 fences ticks and reports what the fence caught — and it is the one taken.
+
+#### AS IMPLEMENTED — one fence, both paths, and the check verifies it
+
+`buildRows` in `src/adapters/token-updates/rows.ts` takes the token's own USD series as
+`ownUsdByBucket` and applies the rule above immediately before pushing each row. It uses
+**`native_fence_multiple` — the SAME constant step 10 fences ticks with**, not a second
+number invented for rows. `RowStats` gained two counts that are always reported:
+
+| count | meaning |
+|---|---|
+| `nullUsdBecauseOutsideFence` | the fence fired; token amount kept, USD and price NULL |
+| `rowsNotFenceable` | the row's bucket has no own-series price, so no test was possible |
+
+**`rowsNotFenceable` is reported precisely because it is the residual.** A row that
+cannot be tested is not a row that passed, and collapsing the two would turn this fix
+into the "clean pass" illusion section 9 lists as a standing failure mode.
+
+**BOTH WRITERS, NOT JUST THE INTAKE.** `planOrWrite` (`src/intake/write.ts`) loads the
+series once per run — not per slice, which would let two slices fence against two
+different reads — and the hourly `token-updates` adapter loads it per cycle through the
+new `loadTokenUsdForRange`. Step 15's rule that the two paths share one buy rule is not
+optional here: fencing only the intake would leave the hourly job writing the very rows
+the intake nulls, into the same table. That is the two-paths-one-table defect this
+document has already recorded four times.
+
+In the adapter, **a stored bucket price beats one derived this cycle**, because
+persistence never rewrites an existing bucket — fencing against a value the run computes
+but will not store would test rows against a price that exists nowhere.
+
+**The check and the writer read the same column, which is why this closes.**
+`checkPricesAgainstTicks` compares `wallet_transactions.price_usd` against the bucket's
+`pons_usd`; the fence nulls exactly that column on exactly those rows, so they leave the
+check's population rather than being excused from it. **The expected result is now
+`outside: 0`, and a non-zero count is a real defect rather than a threshold to widen.**
+
+`src/cli/dropped-buys.ts` also calls `buildRows` and is deliberately left unfenced: it
+writes nothing and exists to show what the buy rule discarded, so a USD it never stores
+cannot mislead.
 
 #### STEP 7: COHORT 2,245, AND IT RECONCILES EXACTLY
 

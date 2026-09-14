@@ -52,6 +52,7 @@ import {
   deriveBridgeUsd,
   derivePrices,
   loadNativeForRange,
+  loadTokenUsdForRange,
   loadNativeReference,
   persistPrices,
   type PriceSeries,
@@ -451,6 +452,37 @@ const adapter: SourceAdapter<WalletRow> = {
     const resolver = counterUsdResolver(cfg, pricingMap, bridgeUsd);
 
     /*
+     * THE TOKEN'S OWN SERIES, for the row-price fence in `buildRows`.
+     *
+     * The hourly job and the intake share ONE buy rule and must build a row the
+     * same way (step 15). A fence applied only on the intake path would let this
+     * job keep writing the degenerate rows the intake now nulls, into the same
+     * table -- the exact two-paths-one-table defect recorded four times already.
+     *
+     * STORED WINS OVER DERIVED, because that is what persistence does: an
+     * already-present bucket is never rewritten, so fencing against a value this
+     * run derived but will not store would test rows against a price that does
+     * not exist anywhere.
+     */
+    const ownUsd = new Map<number, number>();
+    {
+      const client3 = await ctx.db.connect();
+      try {
+        const stored = await loadTokenUsdForRange(
+          client3, cfg.tokenUsdTable, cfg.chain,
+          bucketOf(from, cfg.bucketBlocks, cfg.bucketOrigin),
+          bucketOf(to, cfg.bucketBlocks, cfg.bucketOrigin),
+        );
+        for (const [bucket, price] of stored) ownUsd.set(bucket, price);
+      } finally {
+        client3.release();
+      }
+      for (const [bucket, v] of prices?.tokenUsd ?? []) {
+        if (!ownUsd.has(bucket) && v.price > 0) ownUsd.set(bucket, v.price);
+      }
+    }
+
+    /*
      * TRANSFERS TOO, NOT JUST TRADES.
      *
      * The intake writes `transfer_in`/`transfer_out` rows for movements that are
@@ -478,6 +510,7 @@ const adapter: SourceAdapter<WalletRow> = {
       exclusions,
       knownPools,
       cohort,
+      ownUsd,
     );
     /* Trades and transfers are one record set; the writer must see both. */
     const allRows = rows.concat(transferRows.rows);
@@ -628,6 +661,7 @@ function emptyStats(): RowStats {
     candidateWallets: 0, walletsExcludedInfrastructure: 0, walletsExcludedIsPool: 0,
     roundTrippers: 0, rowsBelowTokenAmountFloor: 0, rowsBelowUsdFloor: 0,
     rowsOutsideCohort: 0, rowsWithNullUsd: 0, nullUsdBecauseNoBucketPrice: 0,
+    nullUsdBecauseOutsideFence: 0, rowsNotFenceable: 0,
   };
 }
 

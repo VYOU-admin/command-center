@@ -636,6 +636,10 @@ export interface WritePlan {
   bySide: Record<string, number>;
   wallets: number;
   usdNull: number;
+  /** USD nulled because the row's implied price fell outside its bucket's fence. */
+  usdNulledByFence: number;
+  /** Rows whose bucket has no own-series price, so the fence could not test them. */
+  rowsNotFenceable: number;
   totals: { tokenAmount: number; usd: number };
   floors: {
     swapsBelowTokenRaw: number;
@@ -665,6 +669,8 @@ function emptyPlan(): WritePlan {
     bySide: { buy: 0, sell: 0 },
     wallets: 0,
     usdNull: 0,
+    usdNulledByFence: 0,
+    rowsNotFenceable: 0,
     totals: { tokenAmount: 0, usd: 0 },
     floors: {
       swapsBelowTokenRaw: 0,
@@ -696,6 +702,8 @@ function fold(plan: WritePlan, rows: WalletRow[], stats: RowStats, wallets: Set<
   plan.floors.swapsBelowPaidRaw += stats.swapsBelowPaidRawFloor;
   plan.floors.rowsBelowTokenAmount += stats.rowsBelowTokenAmountFloor;
   plan.floors.rowsBelowUsd += stats.rowsBelowUsdFloor;
+  plan.usdNulledByFence += stats.nullUsdBecauseOutsideFence;
+  plan.rowsNotFenceable += stats.rowsNotFenceable;
   plan.excluded.infrastructure += stats.walletsExcludedInfrastructure;
   plan.excluded.isAPool += stats.walletsExcludedIsPool;
   plan.excluded.roundTrippers += stats.roundTrippers;
@@ -744,6 +752,26 @@ export async function planOrWrite(
   const knownPools = new Set([...pools.values()].map((p) => p.pool));
   let stored = 0;
 
+  /*
+   * THE TOKEN'S OWN USD SERIES, for the row-price fence in buildRows.
+   *
+   * Loaded ONCE rather than per slice: it is one row per bucket over the token's
+   * life, and re-reading it per slice would be the paired-baseline mistake in a
+   * different costume -- two slices could fence against two different reads.
+   *
+   * A row whose bucket has no entry here cannot be fenced and is counted as such,
+   * never silently trusted.
+   */
+  const ownSeries = new Map<number, number>();
+  {
+    const r = await client.query<{ bucket_block: string; pons_usd: string }>(
+      `select bucket_block::text, pons_usd::text from ${cfg.tokenUsdTable}
+        where chain = $1`,
+      [cfg.chain],
+    );
+    for (const row of r.rows) ownSeries.set(Number(row.bucket_block), Number(row.pons_usd));
+  }
+
   for (let from = firstBlock; from <= lastBlock; from += sliceBlocks) {
     const to = Math.min(from + sliceBlocks - 1, lastBlock);
     const slice = await loadSlice(client, cfg, pools, from, to);
@@ -783,6 +811,7 @@ export async function planOrWrite(
       exclusions,
       knownPools,
       cohort,
+      ownSeries,
     );
     fold(plan, rows.concat(tRows), stats, wallets);
 

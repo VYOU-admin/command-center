@@ -255,6 +255,37 @@ export function derivePrices(
  * stored value came from a run that saw the whole bucket, so it is better than
  * anything this run could derive, and it is not rewritten.
  */
+/**
+ * The TOKEN's own USD series over a bucket range, for the row-price fence.
+ *
+ * Separate from `loadNativeForRange` because the two tables genuinely differ in
+ * column names (`bucket_block`/`pons_usd` against `block_number`/`eth_usd`), and
+ * parameterising one reader over both would hide that rather than fix it.
+ *
+ * Zero and non-finite prices are dropped rather than returned: a bucket with no
+ * usable price must read as ABSENT, so the caller counts the row unfenceable
+ * instead of fencing it against a zero.
+ */
+export async function loadTokenUsdForRange(
+  client: PoolClient,
+  table: string,
+  chain: string,
+  fromBucket: number,
+  toBucket: number,
+): Promise<Map<number, number>> {
+  const res = await client.query<{ bucket_block: string; pons_usd: string }>(
+    `select bucket_block::text, pons_usd::text from ${table}
+      where chain = $1 and bucket_block >= $2 and bucket_block <= $3`,
+    [chain, fromBucket, toBucket],
+  );
+  const out = new Map<number, number>();
+  for (const r of res.rows) {
+    const price = Number(r.pons_usd);
+    if (Number.isFinite(price) && price > 0) out.set(Number(r.bucket_block), price);
+  }
+  return out;
+}
+
 export async function loadNativeForRange(
   client: PoolClient,
   table: string,
