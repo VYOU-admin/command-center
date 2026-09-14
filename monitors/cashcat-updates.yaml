@@ -1,0 +1,119 @@
+# Hourly incremental update of CASHCAT cohort wallet rows.
+#
+# EVERY PRICING VALUE BELOW COMES FROM intake/cashcat.yaml, not from another
+# token's monitor. Step 15 records that copying one is the natural shortcut and
+# silently wrong: a bucket_origin from the wrong token matches no stored bucket
+# and prices every row null, and a missing bridge_assets drops every pool quoted
+# in that bridge.
+#
+id: cashcat-updates
+name: CASHCAT Cohort Updates
+source: token-updates
+
+enabled: true
+
+schedule: 1h
+
+alerts:
+  channel: system
+  # Red after three consecutive failures. Every failure alert goes to the system
+  # channel regardless of this block.
+  discord_on_consecutive_failures: 3
+
+options:
+  chain: robinhood
+  # Checksummed exactly as the chain returns it and as `tokens.mint` and
+  # `wallet_tags.mint` store it. Lowercasing here would match no cohort.
+  token: "0x020bfC650A365f8BB26819deAAbF3E21291018b4"
+
+  # One window. 2,245 wallets, payment-proven once each at cohort time.
+  cohort_tags:
+    - CASHCAT-P1
+
+  # WHERE THE INTAKE STOPPED, never the head. This is max(to_block) over
+  # token_sweep_progress -- the last block the sweep actually READ, and the same
+  # bound the write phase uses -- so the cursor starts exactly where the rows end
+  # with no gap and no overlap. Seeding at the head skips the backlog silently.
+  seed_cursor_block: 62152931
+
+  rpc:
+    url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+    # Read from the process environment, never interpolated here -- monitor
+    # options are persisted into monitors.config, so a key in YAML is a key in
+    # the database.
+    key_var: ALCHEMY_API_KEY
+    request_timeout_ms: 60000
+
+    # ~20 seconds at 0.1s blocks, so a tip reorg cannot strand rows. This chain's
+    # reorg depth has not been measured; the figure is a margin, not a finding.
+    lag_blocks: 200
+
+    # One hour is 35,622 blocks, measured. 40,000 leaves headroom so a late run
+    # catches up rather than falling permanently behind.
+    max_blocks_per_run: 40000
+
+    # HARD CEILING PER RUN. CASHCAT is denser than any token loaded before -- its
+    # sweep read 14,957,528 logs against CHUMP's 687,982 -- so this is set ABOVE
+    # the 5,000 the other four monitors carry rather than copied from them.
+    # Near head the token measured 0.0502 transfer logs/block, so a 40,000-block
+    # slice is ~2,000 transfer logs plus its swaps: comfortably one request per
+    # stream, but the ceiling allows for result-cap splitting on a busy hour.
+    cu_ceiling: 15000
+
+    # STARTING SPAN, SIZED FROM CASHCAT'S OWN MEASURED DENSITY. sweep-probe
+    # measured 0.0502 logs/block over 61,900,000-62,000,000, its near-head rate,
+    # so a 40,000-block slice is ~2,000 logs -- far below the result cap, and the
+    # whole slice fits in one request. The span halves on a size refusal.
+    log_span_blocks: 40000
+    # Below this, a size refusal is a livelock rather than something to retry.
+    min_log_span_blocks: 25
+
+  venues:
+    v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+    v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+  pricing:
+    # Identical to intake/cashcat.yaml. All 590 in-scope pools quote CASHCAT
+    # against one of these three, so it needs NO bridge and `bridge_assets` is
+    # absent rather than empty -- the intake config has no such key either, and
+    # the write phase's gate compares the two.
+    assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+      - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+      - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+    usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    native_assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+      - "0x0000000000000000000000000000000000000000"
+
+    # READS the chain's ETH/USD series, never writes it. token-updates (PONS)
+    # owns it; this monitor derives it in memory for its own slice and persists
+    # nothing, so no two writers race for a bucket.
+    derives_native_usd: false
+
+    bucket_blocks: 10000
+    # THE EXISTING RESIDUE-3150 GRID, matching intake/cashcat.yaml exactly.
+    # VERIFIED rather than asserted: of the 6,208 buckets spanning CASHCAT's life
+    # (83,150..62,153,150) the series holds 6,190. The 18 missing sit in
+    # 93,150..743,150, all BELOW the window's first bucket at 843,150, and they
+    # are gaps where the ETH/USD market never traded -- not a grid mismatch.
+    bucket_origin: 8963150
+    # A tick outside this multiple of its bucket's median is discarded.
+    tick_fence_multiple: 100
+    native_fence_multiple: 10
+
+  floors:
+    token_raw_units: 1
+    paid_raw_units: 1
+    # Whole tokens. THE ONE THAT IS EASY TO OMIT: a USD-only floor once let
+    # through a row of 1.7e-6 tokens carrying $980,393.99 of allocated USD.
+    token_amount: 0.001
+    # Applies ONLY to rows that have a USD value. A null-USD row is unpriced,
+    # not small, and is never dropped by this.
+    usd: 0.01
+
+  tables:
+    # `token_usd` is configured; the COLUMN inside it is `pons_usd` on every
+    # token's table and is not configurable. Step 12.
+    token_usd: cashcat_usd_prices
+    native_usd: native_usd_prices

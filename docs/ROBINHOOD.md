@@ -1032,6 +1032,29 @@ adjudicate is not evidence of agreement, and a guard that quietly shrinks the
 denominator is indistinguishable from a check that passed. Every cell carries
 `in_region`, `sampled`, `excluded_multi_swap` and `tested`.
 
+**AND THE EXCLUSION RATE IS PART OF THE RESULT, BECAUSE IT SETS HOW STRONG THE
+EVIDENCE IS.** On CASHCAT the guard excluded **80–90% of every v4 sample** against
+**0–12% of every v3 sample**:
+
+```
+v4  in-window     718 of 800 excluded   ->  82 tested       v3  45 of 800  -> 755
+v4  before-window  24 of  29 excluded   ->   5 tested       v3   0 of 800  -> 799
+v4  after-window  638 of 800 excluded   -> 162 tested       v3  98 of 800  -> 702
+```
+
+**A headline "2,505 of 2,505 unanimous" is true and is NOT the strength of the v4
+evidence.** CASHCAT's v4 convention rests on **82 in-window tests, and 5 in the
+before-window region** — not on 800 apiece. **Read the tested column, never the
+total**, and where a venue's tested count is small say so next to the verdict rather
+than letting the sum speak for it.
+
+This costs nothing in correctness — step 6 is a check, not a source of direction, and
+direction always comes from the transfer — but a future reader deciding how much to
+trust a v4 amount on this token should see 82 rather than 2,505. **Where a guard
+removes most of a venue's sample, raising the sample cap for that venue is the way to
+buy evidence back**, and it was not done here because unanimity at 82 was enough to
+proceed.
+
 **One limitation, stated rather than discovered later:** `token_swap_logs` holds only
 the token's IN-SCOPE pools, so a hop on a REJECTED pool is invisible to this count.
 `build-cohort.ts` layers `v4_swaps_all` on top for exactly that case, and that layer
@@ -1459,6 +1482,15 @@ dashboard.
 once two queries scoped differently, so the plan printed a small number and the
 fetch would have done a much larger job. If the two disagree, the job stops
 rather than spending against a figure nobody saw.
+
+**THE SAME RULE APPLIES TO ANY JOB THAT PRINTS A WORK SET, and `eth-usd-series`
+broke it in the other direction — it printed ZERO and then wrote 140.** Its estimate
+asked "which buckets do already-unpriced rows need", a repair question, while its
+write asked "which buckets in this range have no price". For a token being repaired
+those agree; for CASHCAT, pre-filled before a single row existed, the first was empty
+and the second was 158. **Under-reporting a work set is the same defect as
+over-reporting one**: the figure the operator approved was not the figure the job
+acted on. Fixed 2026-09-14 — see section 9.
 
 **THE WORK-SET DERIVATION MUST BE MATERIALISED, AND ON CHUMP IT HUNG FOR 10m34s.**
 It was a single statement whose body was an `exists` holding two
@@ -4593,6 +4625,13 @@ v4  before         24 of  29   82.8%       v3  before          0 of 800    0.0%
 v4  after-window  638 of 800   79.8%       v3  after-window   98 of 800   12.3%
 ```
 
+**THE v4 VERDICT RESTS ON 82 IN-WINDOW TESTS, NOT ON 800, AND THAT IS THE NUMBER TO
+CARRY FORWARD.** The unanimous 2,505 is dominated by v3 (2,256 of it). CASHCAT's v4
+convention is established on **82 in-window, 5 before-window and 162 after-window
+tests** — unanimous in all three, and a far thinner base than the total suggests. It is
+enough to proceed because step 6 is a check rather than a source of direction, but
+**anyone re-reading this should not take 2,505 as the weight behind a v4 amount here.**
+
 **Nine in ten of CASHCAT's v4 swaps sit in a transaction holding more than one
 CASHCAT swap.** That is what its v4 side *is*: routers splitting and arbitraging
 across its 398 trading v4 pools, rather than end users buying on one. It also explains
@@ -4929,8 +4968,8 @@ worth recording: the document's decision procedure assumes transfers already exi
   what "verified" means for every token. That is an operator's call, and CASHCAT's
   intake is stopped at step 6 until it is made.
 
-- **`eth-usd-series` REPORTS A WORK SET IT DOES NOT USE, and on CASHCAT it printed
-  `buckets_missing_in_range: 0` and then wrote 140.** Found 2026-09-14. Its
+- **FIXED 2026-09-14 — `eth-usd-series` REPORTED A WORK SET IT DID NOT USE, printing
+  `buckets_missing_in_range: 0` on CASHCAT and then writing 140.** Its
   "BEFORE THE FIRST REQUEST" figure is derived from
   `wallet_transactions … usd_amount is null` — buckets needed by rows that are ALREADY
   unpriced — which is a repair tool's work set and was right for INDEX, whose 6,052
@@ -4945,11 +4984,23 @@ worth recording: the document's decision procedure assumes transfers already exi
   and 3,600 CU. It spent against a figure nobody saw, and it happened to be spending
   worth doing.
 
-  **The fix is to make the work set the union of both questions**: buckets needed by
-  existing unpriced rows, AND buckets in the requested range with no stored price.
+  **The fix: the reported work set is now the one the job acts on** — every whole
+  bucket on the grid inside `--from..--to` that has no stored price. The
+  repair-oriented figure is kept beside it as `buckets_needed_by_unpriced_rows`,
+  clearly labelled, because it is genuinely the right question when repairing a token
+  whose nulls already exist. Neither question is lost and neither is mistaken for the
+  other.
+
+  **The residual is now explained rather than merely absent.** Not every candidate
+  bucket can be filled — a bucket where the market never traded stays a gap, by step
+  10's rule — so the run reports `still_missing` after writing, with that reason. On
+  CASHCAT that is 18 of 158, all in the sparse 93,150–743,150 region. **A work set
+  that shrinks between the estimate and the write is fine; one that shrinks without
+  saying why is the defect.**
+
   Pre-filling before rows exist is strictly better than repairing afterwards — nothing
-  is written wrong and nothing needs reinserting — so the tool should be able to say
-  so before it starts.
+  is written wrong and nothing needs reinserting — and the tool can now say so before
+  it starts.
 
 - **`token_swap_logs` is created by no code in this repository.** Every reader
   assumes it exists because the first intake made it by hand. A fresh database

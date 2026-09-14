@@ -55,13 +55,44 @@ async function main(): Promise<void> {
     await c.query(ETHUSD_SCHEMA);
 
     /*
-     * THE WORK SET IS THE BUCKETS THAT ARE MISSING, stated before the first
-     * request. Sizing this from a token's life instead was a 9.6x overshoot on
-     * PONS (step 9), and sizing a sweep from the wrong population has been wrong
-     * by 16x and 27% here (step 5).
+     * THE REPORTED WORK SET IS THE ONE THIS JOB ACTS ON.
+     *
+     * It used to be "buckets that already-unpriced wallet_transactions need",
+     * which is a REPAIR question and was right for INDEX, whose 6,052 nulls
+     * existed before the fix. The write asks a different one: which buckets in
+     * `from..to` have no stored price. For a token being repaired the two
+     * agree; for CASHCAT, pre-filled before a single row existed, the first was
+     * EMPTY and the second was 158 -- so it printed `0` and then wrote 140.
+     *
+     * Step 9: one derivation, shared by the estimate and the fetch, and a
+     * disagreement stops the job rather than spending against a figure nobody
+     * saw. UNDER-reporting a work set is the same defect as over-reporting one.
+     *
+     * Only WHOLE buckets inside the range count, matching what the derivation
+     * will write -- step 10 forbids a bucket computed from a fraction of its
+     * ticks.
      */
-    const missing = await c.query<{ n: string; lo: string | null; hi: string | null }>(
-      `select count(*)::text n, min(b)::text lo, max(b)::text hi from (
+    const size = cfg.bucketBlocks;
+    const firstWhole = bucketOf(from, size, cfg.bucketOrigin) === from
+      ? from : bucketOf(from, size, cfg.bucketOrigin) + size;
+    const lastWhole = bucketOf(to + 1, size, cfg.bucketOrigin) - size;
+    const candidates = lastWhole >= firstWhole
+      ? await c.query<{ n: string; lo: string | null; hi: string | null }>(
+        `select count(*)::text n, min(b)::text lo, max(b)::text hi
+           from generate_series($2::bigint, $3::bigint, $4::bigint) as b
+          where not exists (
+            select 1 from native_usd_prices n
+             where n.chain = $1 and n.block_number = b)`,
+        [cfg.chain, firstWhole, lastWhole, size],
+      )
+      : { rows: [{ n: '0', lo: null, hi: null }] };
+    /*
+     * Kept beside it, clearly labelled: the repair question is still the right
+     * one when a token's nulls already exist, and losing it would trade one
+     * blind spot for another.
+     */
+    const needed = await c.query<{ n: string }>(
+      `select count(*)::text n from (
          select distinct ${bucketExpr(cfg.bucketOrigin, cfg.bucketBlocks)} as b
            from wallet_transactions w
           where w.chain = $1 and w.side in ('buy','sell') and w.usd_amount is null
@@ -70,12 +101,19 @@ async function main(): Promise<void> {
          select 1 from native_usd_prices n where n.chain = $1 and n.block_number = x.b)`,
       [cfg.chain, from, to],
     );
+    const candidateCount = Number(candidates.rows[0]!.n);
     log.info('BEFORE THE FIRST REQUEST', {
       range: `${from}..${to}`, blocks: to - from + 1,
       grid: { bucket_blocks: cfg.bucketBlocks, bucket_origin: cfg.bucketOrigin,
         residue: cfg.bucketOrigin % cfg.bucketBlocks },
-      buckets_missing_in_range: Number(missing.rows[0]!.n),
-      missing_from: missing.rows[0]!.lo, missing_to: missing.rows[0]!.hi,
+      whole_buckets_in_range: lastWhole >= firstWhole
+        ? (lastWhole - firstWhole) / size + 1 : 0,
+      buckets_missing_in_range: candidateCount,
+      buckets_needed_by_unpriced_rows: Number(needed.rows[0]!.n),
+      work_set: 'buckets_missing_in_range -- what this run can fill. '
+        + 'buckets_needed_by_unpriced_rows is the REPAIR question and is reported '
+        + 'beside it, not instead of it.',
+      missing_from: candidates.rows[0]!.lo, missing_to: candidates.rows[0]!.hi,
       estimated_cu: 480 + Math.ceil((to - from + 1) / 3_700_000 * 10_080),
       ceiling, commit,
       writes: commit ? 'market swaps AND native_usd_prices buckets'
@@ -139,8 +177,19 @@ async function main(): Promise<void> {
       log.info('nothing written to native_usd_prices; pass --commit', {});
     } else {
       const w = await persistEthUsd(c, cfg.chain, derived.buckets);
-      log.info('buckets written', {
+      /*
+     * THE RESIDUAL IS EXPLAINED, NOT MERELY ABSENT. A candidate bucket the market
+     * never traded in stays a gap by step 10's rule, so the count that could not
+     * be filled is reported with that reason. A work set that shrinks between the
+     * estimate and the write is fine; one that shrinks without saying why is the
+     * defect this whole block exists to close.
+     */
+    log.info('buckets written', {
         ...w,
+        candidates_before: candidateCount,
+        still_missing: Math.max(0, candidateCount - (w.inserted ?? 0)),
+        still_missing_reason: 'the market did not trade in those buckets, so they stay '
+          + 'gaps -- step 10: not interpolated, not carried forward',
         note: 'already-present buckets are NEVER rewritten; the skipped count is '
           + 'reported so added coverage is distinguishable from silent agreement',
       });
