@@ -364,7 +364,8 @@ end to end. Phases filled in as the run proceeds:
 | density probe | ~1 min | ~900 | 15 `eth_getLogs`, 7 samples from the deployment block |
 | **sweep** | **199.8 min** | **218,230** | ~191,000 estimated — **14.2% over on CU, 9x under on TIME** |
 | scope, RE-RUN after the sweep | **5.8 s** | 2,896 | + 7 `eth_getCode`; routers 7 probed / 6 identified |
-| conventions | 37 s | 0 | **RAISED** — v4/in-window 779 of 790. See section 8 |
+| conventions, first run | 37 s | 0 | **RAISED** — v4/in-window 779 of 790, no multi-swap guard |
+| conventions, WITH the guard | **7.4 s** | 0 | **unanimous, 2,505 of 2,505** across all six cells |
 
 **THE SWEEP'S CU ESTIMATE WAS GOOD AND ITS WALL-CLOCK ESTIMATE WAS 9x LOW, and the
 reason generalises.** I sized the time by scaling CHUMP's 13.1 minutes by the expected
@@ -4444,7 +4445,57 @@ stopping the phase and naming where is the guard working, not a failure.
 **2,360 candidates against CHUMP's 636 and PONS's 16,910** puts CASHCAT in the middle
 of the range, and the cost is quoted from its own count rather than from either.
 
-#### STEP 6 FAILED ITS OWN CRITERION, AND THE RUN STOPPED THERE
+#### STEP 6, AFTER THE GUARD: UNANIMOUS, 2,505 of 2,505
+
+Re-run 2026-09-14 with the one-swap-per-transaction guard (step 6, shared from
+`intake/adjudicable.ts`). **7,381 ms, 0 CU** — the phase reads stored logs and takes
+its bounds from `token_sweep_progress`.
+
+| venue | region | in region | sampled | **excluded** | tested | agreeing | convention |
+|---|---|---|---|---|---|---|---|
+| v3 | in-window | 17,314 | 800 | 45 | 755 | **755** | pool |
+| v4 | in-window | 2,741 | 800 | **718** | 82 | **82** | swapper |
+| v3 | before-window | 5,312 | 800 | **0** | 799 | **799** | pool |
+| v4 | before-window | 29 | 29 | 24 | 5 | **5** | swapper |
+| v3 | after-window | 2,366,347 | 800 | 98 | 702 | **702** | pool |
+| v4 | after-window | 1,989,098 | 800 | **638** | 162 | **162** | swapper |
+
+**Every cell agrees with itself and the two venues remain opposite** — v3 the POOL
+perspective, v4 the SWAPPER perspective — which is the fifth token to confirm it and
+the first to do so with the guard in place.
+
+**THE EXCLUSION RATES ARE THE REAL FINDING, AND THEY ARE LOPSIDED.** v4 excludes
+**80–90%** of every sample; v3 excludes **0–12%**:
+
+```
+v4  in-window     718 of 800   89.8%       v3  in-window      45 of 800    5.6%
+v4  before         24 of  29   82.8%       v3  before          0 of 800    0.0%
+v4  after-window  638 of 800   79.8%       v3  after-window   98 of 800   12.3%
+```
+
+**Nine in ten of CASHCAT's v4 swaps sit in a transaction holding more than one
+CASHCAT swap.** That is what its v4 side *is*: routers splitting and arbitraging
+across its 398 trading v4 pools, rather than end users buying on one. It also explains
+why the unguarded check produced exactly 11 disagreements rather than hundreds — the
+pairs it admitted were mostly the wrong ones, and only a minority of those happened to
+land on the wrong side of the sign.
+
+**v3 before-window excludes ZERO of 800**, which is stated rather than omitted: a
+guard that never fires in a cell is a result about that cell, and it says CASHCAT's
+early v3 trading is plain single-pool swapping.
+
+**The before-window region is REAL here, unlike CHUMP's.** CASHCAT's window opens at
+846,162 against a deployment at 88,836, so 757,326 blocks of life precede it and they
+hold **5,312 v3 and 29 v4 swaps**. CHUMP's before-window was empty by construction
+because its window started at its deployment block; CASHCAT is the first token to
+exercise all six cells with data in every one.
+
+**v4/before-window tested only 5 swaps** and that is reported rather than hidden. It
+is above zero, so the "a venue present in a region with nothing tested" raise does not
+fire — correctly, because 29 swaps of which 24 are multi-swap is a real property of
+the data and not a sample that failed to reach the venue.
+
+#### STEP 6 AS IT FIRST FAILED — kept, because the cause is the transferable part
 
 ```
 sign conventions are not unanimous: v4/in-window 779/790
