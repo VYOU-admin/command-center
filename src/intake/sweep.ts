@@ -32,6 +32,7 @@ import { RpcError, hexBlock, type RpcClient } from '../adapters/token-updates/rp
 import type { PoolRow } from '../adapters/token-updates/pools.js';
 import { abs } from '../adapters/token-updates/units.js';
 import type { PoolClient } from '../store/db.js';
+import { isAdjudicable } from './adjudicable.js';
 
 const SIZE_REFUSAL =
   /response size exceeded|exceeds limit|query returned more than|too large|limit of \d+/i;
@@ -280,6 +281,13 @@ export interface ConventionResult {
   region: string;
   agreeing: number;
   tested: number;
+  /**
+   * Swaps skipped because their transaction holds MORE THAN ONE swap of this
+   * token. Reported, never dropped in silence: a pair the check cannot
+   * adjudicate is not evidence of agreement, and a guard that quietly shrinks
+   * the denominator is indistinguishable from a check that passed.
+   */
+  excludedMultiSwap: number;
   convention: 'pool' | 'swapper' | 'undetermined';
 }
 
@@ -304,6 +312,12 @@ export function verifyConventions(
   transfers: LogEntry[],
   cfg: IntakeConfig,
   region: string,
+  /**
+   * Swaps of this token per transaction, from the WHOLE table -- see
+   * `loadSwapsPerTx`. Counting within the sample would miss a two-swap
+   * transaction that contributed only one swap to it.
+   */
+  swapsPerTx: Map<string, number>,
 ): ConventionResult[] {
   const token = normalizeAddress(cfg.token);
   const poolManager = cfg.v4PoolManager.toLowerCase();
@@ -316,9 +330,12 @@ export function verifyConventions(
     else byTx.set(t.txHash, [t]);
   }
 
-  const tally: Record<'v3' | 'v4', { pool: number; swapper: number; tested: number }> = {
-    v3: { pool: 0, swapper: 0, tested: 0 },
-    v4: { pool: 0, swapper: 0, tested: 0 },
+  const tally: Record<
+    'v3' | 'v4',
+    { pool: number; swapper: number; tested: number; excluded: number }
+  > = {
+    v3: { pool: 0, swapper: 0, tested: 0, excluded: 0 },
+    v4: { pool: 0, swapper: 0, tested: 0, excluded: 0 },
   };
 
   for (const { log, pool, venue } of swaps) {
@@ -328,6 +345,18 @@ export function verifyConventions(
      * topics[1] to read it from. See decodeSwap.
      */
     const swap = decodeSwap(log, venue, pool.pool);
+    /*
+     * ONE SWAP OF THIS TOKEN PER TRANSACTION, OR IT IS NOT EVIDENCE.
+     *
+     * A router buying on one pool and selling on another inside one
+     * transaction leaves only the NET out of the counterparty, so pairing each
+     * swap against that net transfer forces one of them to disagree. See
+     * ./adjudicable.ts -- the same rule build-cohort.ts applies as `spt.n = 1`.
+     */
+    if (!isAdjudicable(swapsPerTx.get(swap.txHash))) {
+      tally[venue].excluded += 1;
+      continue;
+    }
     const counterparty = venue === 'v3' ? pool.pool : poolManager;
     const moves = byTx.get(swap.txHash) ?? [];
 
@@ -365,7 +394,10 @@ export function verifyConventions(
     } else {
       agreeing = Math.max(t.pool, t.swapper);
     }
-    return { venue, region, agreeing, tested: t.tested, convention };
+    return {
+      venue, region, agreeing, tested: t.tested,
+      excludedMultiSwap: t.excluded, convention,
+    };
   });
 }
 

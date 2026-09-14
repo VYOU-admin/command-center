@@ -984,6 +984,42 @@ before-window region really does hold zero swaps, because its window starts at i
 deployment block — that is a result, and it is distinguishable from a region that was
 dropped only if it is printed.
 
+**A TRANSACTION HOLDING MORE THAN ONE SWAP OF THE TOKEN IS NOT EVIDENCE, AND THE
+COUNT MUST BE EXCLUDED RATHER THAN DROPPED IN SILENCE.** Approved and implemented
+2026-09-14 after CASHCAT raised `v4/in-window 779/790`. A router can buy the token on
+one pool and sell it on another inside one transaction; only the NET leaves the
+PoolManager, so pairing **each** swap against that single net transfer forces one of
+them to disagree. The 11 disagreements were arithmetic, not a convention.
+
+**The guard is `exactly one swap of this token in the transaction`**, counted over
+`token_swap_logs` — not over `v4_swaps_all`, which held **0 rows anywhere inside
+CASHCAT-P1** and could not have adjudicated anything here.
+
+**THE COUNT COMES FROM THE WHOLE TABLE, NEVER FROM THE SAMPLE.** The conventions phase
+draws up to 800 swaps per venue per region, so a transaction with two swaps may
+contribute only one of them to the sample. Counting within the sample would report
+that transaction as single-swap and admit exactly the pair the guard exists to reject.
+The count is loaded from `token_swap_logs` for the sampled transaction hashes.
+
+**ONE IMPLEMENTATION, SHARED.** `build-cohort.ts` has had this guard as `spt.n = 1`
+against its `_alltok` temp table since INDEX; `verifyConventions` never had it. Rather
+than write a second one, the definition now lives in `src/intake/adjudicable.ts` —
+one SQL text and one predicate — and both callers import it. **This is the fourth time
+two implementations of one rule produced a wrong answer here**, and the remedy this
+time is to remove the second implementation rather than to correct it.
+
+**Excluded transactions are REPORTED, per venue per region.** A pair the check cannot
+adjudicate is not evidence of agreement, and a guard that quietly shrinks the
+denominator is indistinguishable from a check that passed. Every cell carries
+`in_region`, `sampled`, `excluded_multi_swap` and `tested`.
+
+**One limitation, stated rather than discovered later:** `token_swap_logs` holds only
+the token's IN-SCOPE pools, so a hop on a REJECTED pool is invisible to this count.
+`build-cohort.ts` layers `v4_swaps_all` on top for exactly that case, and that layer
+is unavailable below block 15,115,267. For CASHCAT both hops were in-scope pools, so
+the guard sees them; a token whose multi-hop route touches a rejected pool below that
+block would still slip through, and nothing currently detects it.
+
 **`to == from - 1` IS THE EMPTY REGION; ANYTHING FURTHER INVERTED IS AN UNRESOLVED
 BOUND.** The two must not share a branch, and the first attempt at this fix collapsed
 them and raised on CHUMP's legitimate `23,791,950..23,791,949`. A window that starts
@@ -3216,6 +3252,35 @@ These are not about Robinhood Chain, but the code that loads it obeys them.
   This is the wall-clock rule from section 4 doing its job. The phase was not
   slow, it was wrongly built, and the tell was a database wait event rather than
   anything visible in the job's own log.
+
+  **APPLIED TO THE INTAKE SWEEP 2026-09-14, after CASHCAT paid for its absence.**
+  The rule above was written for the ETH/USD market sweep and fixed only there; the
+  intake sweep went on inserting one row per statement, and CASHCAT is the first
+  token big enough for that to dominate. **199.8 minutes for 14,957,528 rows —
+  1,248 rows/second — with `pg_stat_activity` showing the backend in `ClientRead`
+  between sub-second inserts.** All three streams and their `block_times`
+  companions now go through one batched writer at 500 rows.
+
+  **`block_times` is where the de-duplication trap actually bites.** Its key is
+  `(chain, block_number)` and **ten consecutive blocks share a timestamp on this
+  chain**, so a 500-row batch of logs routinely carries many rows for one block.
+  Two rows with the same key in one `VALUES` statement RAISE — `on conflict do
+  nothing` does not save you, because the conflict is inside the statement rather
+  than against the table. The writer keeps the first occurrence of each key per
+  batch; cross-batch duplicates are still handled by `on conflict`.
+
+  **The improvement is EXPECTED, not measured.** CASHCAT is not being re-swept, so
+  there is no before-and-after on the same data. The ETH/USD sweep measured
+  ~185 rows/second at one row per statement under autocommit and the intake managed
+  1,248 inside a transaction; batching removes ~500x the round trips per statement,
+  so the expectation is a large multiple rather than a known one. **BONER is the
+  first token that will measure it**, and the figure to record then is rows/second
+  against CASHCAT's 1,248.
+
+  **It does NOT restore progressive commit for the intake.** The runner still wraps
+  the whole phase in one transaction (section 9), so a batch here is not a commit
+  and a sweep that dies still leaves nothing. Batching buys throughput; the
+  durability half of this rule is a separate, still-open defect.
 - **A documented guarantee the code does not implement is a defect in the code.**
 - **A query that filters one side of a relationship but not the other** counts
   infrastructure as participants. Apply every address list to every side.

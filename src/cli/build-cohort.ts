@@ -23,6 +23,7 @@ import { loadPools } from '../adapters/token-updates/pools.js';
 import { loadExclusions } from '../adapters/token-updates/exclusions.js';
 import { effectiveExclusions } from '../intake/routers.js';
 import { buildCohort } from '../intake/cohort.js';
+import { SWAPS_PER_TX_SQL } from '../intake/adjudicable.js';
 
 const INFRA = 'config/infrastructure.yaml';
 
@@ -121,12 +122,13 @@ async function main(): Promise<void> {
      */
     await c.query(`create temp table if not exists _alltok (tx_hash text, n int)`);
     await c.query('truncate _alltok');
-    await c.query(
-      `insert into _alltok
-       select tx_hash, count(*) from token_swap_logs
-        where chain=$1 and token=$2 group by tx_hash`,
-      [cfg.chain, cfg.token],
-    );
+    /*
+     * THE SAME TEXT verifyConventions' GUARD USES. Shared from
+     * ../intake/adjudicable.ts so the two cannot drift: this guard existed here
+     * as `spt.n = 1` and NOT in verifyConventions, which is how CASHCAT raised
+     * a convention disagreement on eleven multi-pool router transactions.
+     */
+    await c.query(`insert into _alltok ${SWAPS_PER_TX_SQL}`, [cfg.chain, cfg.token]);
     await c.query('create index if not exists _alltok_tx on _alltok (tx_hash)');
     await c.query('analyze _alltok');
 

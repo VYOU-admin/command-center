@@ -50,6 +50,8 @@ import {
   recordSweepRange,
   verifyConventions,
 } from '../intake/sweep.js';
+import { loadSwapsPerTx } from '../intake/adjudicable.js';
+import { insertBatched } from '../store/batch.js';
 import { buildCohort, writeTags } from '../intake/cohort.js';
 import {
   derivePricesForLife,
@@ -747,23 +749,30 @@ async function main(): Promise<void> {
         const s = await adaptiveSweep(
           rpc, cfg, { address: v3, topics: [TOPICS.swapV3] }, firstBlock, head,
           async (logs, from, to) => {
-            for (const l of logs) {
-              const d = decodeSwap(l, 'v3');
-              await c.query(
-                `insert into token_swap_logs
-                   (chain, token, venue, pool, block_number, log_index, tx_hash,
-                    sender, recipient, amount0, amount1)
-                 values ($1,$2,'v3',$3,$4,$5,$6,$7,$8,$9,$10)
-                 on conflict do nothing`,
-                [cfg.chain, cfg.token, d.pool, d.block, d.logIndex, d.txHash,
-                 l.topics[1] ?? null, l.topics[2] ?? null, d.amount0.toString(), d.amount1.toString()],
-              );
-              await c.query(
-                `insert into block_times (chain, block_number, block_time)
-                 values ($1,$2,to_timestamp($3)) on conflict do nothing`,
-                [cfg.chain, d.block, d.timestamp],
-              );
-            }
+            /*
+             * BATCHED, 500 rows a statement. One row per statement pinned this
+             * at 1,248 rows/second on CASHCAT -- see src/store/batch.ts and
+             * section 7. `block_times` MUST de-duplicate within the batch: ten
+             * consecutive blocks share a timestamp here, so a batch of logs
+             * carries many rows for one block and two identical keys in one
+             * VALUES statement raise.
+             */
+            const decoded = logs.map((l) => ({ l, d: decodeSwap(l, 'v3') }));
+            await insertBatched(c, decoded, {
+              table: 'token_swap_logs',
+              columns: ['chain', 'token', 'venue', 'pool', 'block_number', 'log_index',
+                'tx_hash', 'sender', 'recipient', 'amount0', 'amount1'],
+              keyOf: ({ d }) => `${d.block}:${d.logIndex}`,
+              toValues: ({ l, d }) => [cfg.chain, cfg.token, 'v3', d.pool, d.block,
+                d.logIndex, d.txHash, l.topics[1] ?? null, l.topics[2] ?? null,
+                d.amount0.toString(), d.amount1.toString()],
+            });
+            await insertBatched(c, decoded, {
+              table: 'block_times',
+              columns: ['chain', 'block_number', 'block_time'],
+              keyOf: ({ d }) => String(d.block),
+              toValues: ({ d }) => [cfg.chain, d.block, new Date(d.timestamp * 1000)],
+            });
             await recordSweepRange(c, cfg, 'swap-v3', from, to, logs.length);
           },
         );
@@ -775,23 +784,22 @@ async function main(): Promise<void> {
           rpc, cfg, { address: cfg.v4PoolManager, topics: [TOPICS.swapV4, v4] },
           firstBlock, head,
           async (logs, from, to) => {
-            for (const l of logs) {
-              const d = decodeSwap(l, 'v4');
-              await c.query(
-                `insert into token_swap_logs
-                   (chain, token, venue, pool, block_number, log_index, tx_hash,
-                    sender, recipient, amount0, amount1)
-                 values ($1,$2,'v4',$3,$4,$5,$6,$7,null,$8,$9)
-                 on conflict do nothing`,
-                [cfg.chain, cfg.token, d.pool, d.block, d.logIndex, d.txHash,
-                 l.topics[2] ?? null, d.amount0.toString(), d.amount1.toString()],
-              );
-              await c.query(
-                `insert into block_times (chain, block_number, block_time)
-                 values ($1,$2,to_timestamp($3)) on conflict do nothing`,
-                [cfg.chain, d.block, d.timestamp],
-              );
-            }
+            const decoded = logs.map((l) => ({ l, d: decodeSwap(l, 'v4') }));
+            await insertBatched(c, decoded, {
+              table: 'token_swap_logs',
+              columns: ['chain', 'token', 'venue', 'pool', 'block_number', 'log_index',
+                'tx_hash', 'sender', 'recipient', 'amount0', 'amount1'],
+              keyOf: ({ d }) => `${d.block}:${d.logIndex}`,
+              toValues: ({ l, d }) => [cfg.chain, cfg.token, 'v4', d.pool, d.block,
+                d.logIndex, d.txHash, l.topics[2] ?? null, null,
+                d.amount0.toString(), d.amount1.toString()],
+            });
+            await insertBatched(c, decoded, {
+              table: 'block_times',
+              columns: ['chain', 'block_number', 'block_time'],
+              keyOf: ({ d }) => String(d.block),
+              toValues: ({ d }) => [cfg.chain, d.block, new Date(d.timestamp * 1000)],
+            });
             await recordSweepRange(c, cfg, 'swap-v4', from, to, logs.length);
           },
         );
@@ -801,20 +809,21 @@ async function main(): Promise<void> {
       const t = await adaptiveSweep(
         rpc, cfg, { address: cfg.token, topics: [TOPICS.transfer] }, firstBlock, head,
         async (logs, from, to) => {
-          for (const l of logs) {
-            const d = decodeTransfer(l);
-            await c.query(
-              `insert into token_transfer_logs
-                 (chain, token, block_number, log_index, tx_hash, from_addr, to_addr, amount)
-               values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing`,
-              [cfg.chain, cfg.token, d.block, d.logIndex, d.txHash, d.from, d.to, d.amount.toString()],
-            );
-            await c.query(
-              `insert into block_times (chain, block_number, block_time)
-               values ($1,$2,to_timestamp($3)) on conflict do nothing`,
-              [cfg.chain, d.block, d.timestamp],
-            );
-          }
+          const decoded = logs.map((l) => decodeTransfer(l));
+          await insertBatched(c, decoded, {
+            table: 'token_transfer_logs',
+            columns: ['chain', 'token', 'block_number', 'log_index', 'tx_hash',
+              'from_addr', 'to_addr', 'amount'],
+            keyOf: (d) => `${d.block}:${d.logIndex}`,
+            toValues: (d) => [cfg.chain, cfg.token, d.block, d.logIndex, d.txHash,
+              d.from, d.to, d.amount.toString()],
+          });
+          await insertBatched(c, decoded, {
+            table: 'block_times',
+            columns: ['chain', 'block_number', 'block_time'],
+            keyOf: (d) => String(d.block),
+            toValues: (d) => [cfg.chain, d.block, new Date(d.timestamp * 1000)],
+          });
           await recordSweepRange(c, cfg, 'transfer', from, to, logs.length);
         },
       );
@@ -953,7 +962,16 @@ async function main(): Promise<void> {
           ],
           data: '0x' + toWord(BigInt(r.amount)),
         }));
-        const regionResults = verifyConventions(swaps, transfers, cfg, region.label);
+        /*
+         * THE SWAP COUNT COMES FROM THE WHOLE TABLE, NOT FROM THIS SAMPLE.
+         * A two-swap transaction may contribute only one swap to the 800-row
+         * sample; counting inside the sample would call it single-swap and
+         * admit exactly the pair the guard exists to reject.
+         */
+        const swapsPerTx = await loadSwapsPerTx(c, cfg.chain, cfg.token, txs);
+        const regionResults = verifyConventions(
+          swaps, transfers, cfg, region.label, swapsPerTx,
+        );
         /*
          * A VENUE PRESENT IN THE REGION WHOSE SAMPLE HOLDS NONE OF IT IS A DEFECT.
          *
