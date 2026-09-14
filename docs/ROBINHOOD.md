@@ -366,6 +366,24 @@ end to end. Phases filled in as the run proceeds:
 | scope, RE-RUN after the sweep | **5.8 s** | 2,896 | + 7 `eth_getCode`; routers 7 probed / 6 identified |
 | conventions, first run | 37 s | 0 | **RAISED** — v4/in-window 779 of 790, no multi-swap guard |
 | conventions, WITH the guard | **7.4 s** | 0 | **unanimous, 2,505 of 2,505** across all six cells |
+| ETH/USD series extension | ~1 min | 3,600 | ~3,360 estimated — **7% over**, the tightest here |
+| **cohort** | **78.9 s** | **101,424** | ~101,716 from 2,360 candidates — **0.3% under** |
+| | **total 327,660 CU** | | **$0.147** |
+
+**THE COHORT ESTIMATE LANDED TO 0.3%, and it decomposes to the CU exactly:**
+
+```
+payment  2,453 transactions x 15 CU  =  36,795
+       +   341 receipts     x 15 CU  =   5,115      = 41,910  <- reported paymentCu
+getCode  2,289 survivors    x 26 CU  =  59,514
+                                        -------
+                                        101,424  <- the phase's cu_spent, exactly
+```
+
+**341 of 2,453 transactions needed a receipt — 13.9%** — against the 14% step 7
+measured on PONS. **A constant measured on one token holding on a token nineteen times
+older and a hundredth its window length is worth trusting**, and it is the second such
+constant CASHCAT confirms after identity's 816 CU.
 
 **THE SWEEP'S CU ESTIMATE WAS GOOD AND ITS WALL-CLOCK ESTIMATE WAS 9x LOW, and the
 reason generalises.** I sized the time by scaling CHUMP's 13.1 minutes by the expected
@@ -4178,7 +4196,8 @@ against a 2,000,000 ceiling.
 
 ### CASHCAT — `0x020bfC650A365f8BB26819deAAbF3E21291018b4`
 
-**IN PROGRESS 2026-09-14. Steps 1–7 only; the run stops at the cohort review.**
+**IN PROGRESS 2026-09-14. Steps 1–7 COMPLETE; stopped at the cohort review, 2,245
+wallets held for approval.** Total so far **327,660 CU = $0.147**.
 "Cash Cat", 18 decimals, supply 1,000,000,000, deployed at block **88,836**.
 
 **CASHCAT IS BY FAR THE EARLIEST TOKEN THIS PIPELINE HAS LOADED**, and almost
@@ -4498,6 +4517,53 @@ stopping the phase and naming where is the guard working, not a failure.
 
 **2,360 candidates against CHUMP's 636 and PONS's 16,910** puts CASHCAT in the middle
 of the range, and the cost is quoted from its own count rather than from either.
+
+#### STEP 7: COHORT 2,245, AND IT RECONCILES EXACTLY
+
+**78.9 s, 101,424 CU.** The work set was re-derived before spending rather than taken
+from the earlier session's figure, and came back identical: **2,360 candidate wallets**
+over 17,829 swap transactions, ~101,716 CU against a 400,000 ceiling — 3.9x headroom,
+so the guard did not trip.
+
+```
+candidate wallets for payment      2,352    (2,360 derived in SQL before the run)
+  proven free from token_payment_logs  0    <- REPORTED, and structurally zero here
+  proven over RPC                  2,289
+  no payment in any transaction       63     2,352 = 2,289 + 63
+code-checked at the window's END block 2,289
+  excluded as deployed contracts      44
+  EIP-7702 delegated accounts KEPT   160
+COHORT                              2,245     2,289 - 44 = 2,245
+excluded earlier: infrastructure 1,916, round-trippers 22, pools 126
+unused exclusions: the zero address and 0xb01ca24b... matched nothing -- reported
+```
+
+**`token_payment_logs` proved 0 of 2,352, and here the zero is STRUCTURAL rather than
+merely expected.** That table covers blocks **15,115,287–56,693,145**; CASHCAT-P1 ends
+at **3,789,108**. The overlap is not small, it is **empty** — the fast path could not
+have proved a single wallet no matter who traded. On CHUMP the zero meant "these buyers
+did not also buy PONS"; here it means "this table cannot see this era at all". **Two
+identical zeros with different meanings, and the difference is worth stating** —
+step 7's "not worth sweeping for a new token" holds for a third reason on this token.
+
+**1,916 wallets excluded as infrastructure is the router work paying off.** Six routers
+were persisted before this phase ran, five of them absent from
+`config/infrastructure.yaml`; without the post-sweep scope re-run those 1,916 sends
+would have been attributed to buyers. **That is the PONS defect avoided for the second
+token running**, and on a far larger scale than CHUMP's 285.
+
+**Only 22 round-trippers against CHUMP's 1,806**, despite CASHCAT having 133x the
+swaps. The per-transaction round-trip test is finding almost nothing here because
+CASHCAT's arbitrage happens BETWEEN pools rather than within one — the same behaviour
+the conventions guard excluded 80–90% of v4 pairs for. **Two independent tests seeing
+the same structure from different sides.**
+
+**160 EIP-7702 delegated accounts kept, 7.1% of the cohort**, against CHUMP's 29 (5.5%)
+and AI's 315 (9.0%).
+
+**The cohort is held in `token_intake_state` under `cohort:CASHCAT-P1` and NOT written
+to `wallet_tags`.** Verified on a fresh connection: tags **0**, rows **0**, windows
+**0**, scores **0**. The stop is real.
 
 #### STEP 6, AFTER THE GUARD: UNANIMOUS, 2,505 of 2,505
 
