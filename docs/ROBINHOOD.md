@@ -4876,6 +4876,75 @@ buckets and is not the constraint.
 has more transfer rows and would look worse on the raw share while being priced better.
 The denominator has to be the rows that can carry a price.
 
+#### STEP 13: SCORED, AND METRIC 5'S MAXIMUM IS EXACTLY 1/3 — A STRUCTURAL CEILING
+
+**2,245 wallets scored, 66 flagged `inflated-pnl`.** All three pump points were already
+stored and match the config exactly, so nothing was written for them:
+`2026-07-07T20:00Z`, `2026-08-04T00:00Z`, `2026-08-19T20:00Z`.
+
+| | wallets | score range |
+|---|---|---|
+| `weight_used` 1.0 | 2,238 | 0.0911 – 0.4456 |
+| `weight_used` 0.875 | 1 | 0.0965 |
+| `weight_used` 0 — **unscored, score NULL** | 6 | — |
+| | **2,245** | mean 0.2214, p50 0.2119, p90 0.3064 |
+
+**The six weight-0 wallets carry a NULL score, not a low one**, which is the correct
+outcome and worth stating because a zero would have been indistinguishable from a
+genuinely worthless wallet. In `order by score desc` Postgres sorts those NULLs FIRST,
+which reads at a glance as "the top-scoring wallets have no metrics at all" — they are
+the unscored ones. Anyone reading a ranked list must use `nulls last`.
+
+##### METRIC 5'S ACTUAL DISTRIBUTION, AND THE CEILING IS 1/n_pumps
+
+```
+n 2,245   null 6   zero 1,544   min 0
+p50  0.00000000
+p90  0.17437416
+p99  0.33333333
+max  0.3333333333333333   <- exactly 1/3
+wallets exactly at 1/3            168
+wallets ABOVE 1/3                   0     <- REPORTED: the count is zero
+```
+
+**`prePumpShare` is the MEAN over pumps of each pump's pre-48h buy share**
+(`src/scoring/metrics.ts:204-213`). CASHCAT's three pumps are weeks apart, so their
+48-hour windows are **disjoint** — 07-05 20:00Z–07-07 20:00Z, 08-02 00:00Z–08-04 00:00Z,
+08-17 20:00Z–08-19 20:00Z. **A buy dollar can therefore fall in at most ONE window**, so
+the shares sum to at most 1 and their mean is at most **1/n_pumps**. On this token that
+is 1/3, and 168 wallets sit exactly on it.
+
+**Proven on an individual record, not asserted from the aggregate.** Wallet
+`0x0300e281a7affee0c7b70a2f4cfa5dda16be4112` has exactly **one** priced buy —
+**$3,555.03** at **2026-07-06T04:27:27Z**, inside pump 1's window
+(`0x3570dca7bb23174bf4e65858924f6f6804a73653d3b9359c25c3fbfe120a5837`). Its shares are
+(1, 0, 0); their mean is 0.3333333333333333; that is the stored value.
+
+**WHY THIS IS A DEFECT AND NOT A CURIOSITY.** `normalised.prePumpShare` is the raw value
+passed through unchanged — no rescaling to the cohort — and the weight table assigns
+`prePumpShare: 0.05`. So on a three-pump token the metric can contribute at most
+**0.05 x 1/3 = 0.0167**, a THIRD of its stated weight, and a wallet that bought its
+entire position inside a pre-pump window — the exact behaviour this metric exists to
+find — is recorded as scoring 0.33 out of 1.
+
+**It is also not comparable across tokens.** A one-pump token's ceiling is 1.0, a
+three-pump token's is 0.333. Identical behaviour on two tokens produces different
+contributions for no reason but how many pumps were configured, which silently reweights
+the composite between tokens.
+
+**THE REMEDY IS A DEFINITION CHANGE AND HAS NOT BEEN MADE.** The candidates:
+
+| option | effect |
+|---|---|
+| **take the MAX over pumps instead of the mean** | "did they load up before any pump" — reaches 1.0, comparable across tokens, and a wallet buying before two pumps is not penalised for it |
+| divide by the share's own ceiling (1/n) | rescales to 0..1 but keeps the mean's meaning: buying before ALL pumps still cannot be distinguished from buying before one |
+| union the windows, then one share | cleanest arithmetic, reaches 1.0, loses per-pump structure metric 6 relies on |
+| leave it | metric 5 keeps a third of its weight on this token and a different fraction on the next |
+
+**The max is the likeliest right answer**, but it changes what every stored score means
+for every token and so waits for the operator. **The scores recorded above were computed
+with the mean, and that is what they mean.**
+
 #### STEP 7: COHORT 2,245, AND IT RECONCILES EXACTLY
 
 **78.9 s, 101,424 CU.** The work set was re-derived before spending rather than taken
@@ -5040,6 +5109,18 @@ worth recording: the document's decision procedure assumes transfers already exi
 ---
 
 ## 9. Rules here the code does not implement
+
+- **OPEN — metric 5 (`prePumpShare`) cannot exceed 1/n_pumps, so it carries a
+  fraction of its stated weight and is not comparable between tokens.** Measured on
+  CASHCAT 2026-09-14: max exactly **0.3333333333333333** with 168 wallets on it and
+  **zero above it**. The metric averages each pump's pre-48h buy share over the pumps;
+  the windows are disjoint, so the shares sum to at most 1 and the mean to at most 1/n.
+  The normalised value is the raw one unchanged, so a weight of 0.05 delivers at most
+  0.0167 on a three-pump token and the full 0.05 on a one-pump token. Proven on
+  `0x0300e281a7affee0c7b70a2f4cfa5dda16be4112`, whose single priced buy of $3,555.03
+  sits in one window and scores exactly 1/3. **The remedy is a definition change** —
+  taking the max over pumps is the likeliest — and is recorded with its alternatives in
+  section 8 under CASHCAT. Every score stored to date was computed with the mean.
 
 - **FIXED 2026-09-13, and this entry read as OPEN until 2026-09-14 — `--continue`
   could not cross two adjacent STOP phases, so the runner deadlocked between `pools`
