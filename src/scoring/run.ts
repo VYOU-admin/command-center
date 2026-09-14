@@ -15,6 +15,7 @@ import {
   computeFacts,
   distribution,
   score,
+  type ScoredWallet,
   type Trade,
 } from './metrics.js';
 import { FLAG_INFLATED_PNL, FLAG_LOW_WEIGHT, SCORES_SCHEMA } from './schema.js';
@@ -85,6 +86,16 @@ export interface ScoreOptions {
   write: boolean;
   /** How many top wallets to log. The monitor passes 0. */
   top: number;
+  /**
+   * Return every wallet's score and metrics on the result.
+   *
+   * OPT-IN, because the monitor stores its ScoreResult objects as records and a
+   * 13,823-wallet array would go into the record store on every cycle. Only
+   * `prepump-change` asks for it, so that a before/after comparison can read the
+   * new definition's output from THIS implementation rather than reimplementing
+   * the metric -- two implementations of one rule being the trap step 7 records.
+   */
+  detail?: boolean;
 }
 
 export interface ScoreResult {
@@ -98,6 +109,8 @@ export interface ScoreResult {
    * after a membership change; 733 on the PONS rebuild.
    */
   orphansRemoved: number;
+  /** Present only when `opts.detail` was set. See ScoreOptions.detail. */
+  wallets?: ScoredWallet[];
 }
 
 export async function scoreWindow(
@@ -478,6 +491,7 @@ export async function scoreWindow(
     lowWeightDerived: lowWeight.derived,
     flags: countBy(flagged.flatMap((x) => x.f)),
     written: stored,
+    ...(opts.detail ? { wallets: result.wallets } : {}),
   };
 }
 
