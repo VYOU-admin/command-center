@@ -200,7 +200,33 @@ export function computeFacts(input: ScoringInputs): Map<string, WalletFacts> {
       holdTime = Math.max(0, end - firstBuyTs);
     }
 
-    /* --- 5. how much they bought in the 48h before each pump ------------ */
+    /* --- 5. the LARGEST share bought in the 48h before any one pump ------ */
+    /*
+     * THE MAXIMUM OVER PUMPS, NOT THE MEAN. Changed 2026-09-14; see step 13.
+     *
+     * This averaged the per-pump shares, and that put a ceiling of 1/n_pumps on
+     * the metric that had nothing to do with the wallets. Two pumps more than 48
+     * hours apart have DISJOINT pre-windows, so a buy dollar lands in at most one
+     * of them: the shares sum to at most 1 and their mean to at most 1/n.
+     *
+     * Three tokens recorded a maximum sitting exactly on 1/n before anyone asked
+     * why -- PONS 1/3, CHUMP 1/2, CASHCAT 1/3 with 168 wallets on it and none
+     * above -- and this document had written down that landing on 1/n_pumps was
+     * "the signature", reading it as a fact about cohorts each time. A value that
+     * keeps landing on a round function of a CONFIGURED COUNT is a property of
+     * the code.
+     *
+     * The cost was not cosmetic: the normalised value is the raw one unchanged,
+     * so a stated weight of 0.05 delivered at most 0.0167 on a three-pump token
+     * and the full 0.05 on a one-pump token -- identical behaviour scored
+     * differently for no reason but how many pumps were configured.
+     *
+     * The maximum answers the question the metric is named for -- did this wallet
+     * load up before a pump -- reaches 1.0 on every token, and does not penalise
+     * a wallet for having also bought before a second one. It is still 0..1 by
+     * construction (each share is a fraction of the wallet's own usdIn), so it is
+     * still not min-maxed.
+     */
     let prePumpShare: number | null = null;
     if (usdIn !== null && usdIn > 0 && input.pumps.length > 0) {
       const shares = input.pumps.map((pump) => {
@@ -209,7 +235,7 @@ export function computeFacts(input: ScoringInputs): Map<string, WalletFacts> {
           .reduce((s, t) => s + (t.usd ?? 0), 0);
         return inWindowUsd / usdIn;
       });
-      prePumpShare = shares.reduce((s, x) => s + x, 0) / shares.length;
+      prePumpShare = Math.max(...shares);
     }
 
     /* --- 6. whether the buying grew as each pump approached ------------- */
