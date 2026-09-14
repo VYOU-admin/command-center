@@ -65,6 +65,15 @@ standalone CLIs, and that alone surfaced **nine defects**, one of which — a wr
 reported 3,200 rows stored over an empty table — is the worst failure recorded in this
 document. Its findings are in section 8 and every defect is in section 9.
 
+**CASHCAT IS LOADED. Steps 1–17 complete, 2026-09-14**, at a total of **327,660 CU =
+$0.147**: **97,834 rows** over a **2,245-wallet** cohort, 99.38% of trade rows priced,
+and **113 wallets on the watchlist**. It is the chain's earliest token and the second
+driven end to end through the runner. The defect it surfaced is the one worth carrying
+forward: **the four floors bound each side of a row independently and nothing bounded
+the ratio**, so `buildRows` now fences a row's implied price against its own bucket. Its
+findings are in section 8 and the one open item — **metric 5's 1/n_pumps ceiling** — is
+in section 9.
+
 **Read the V3-ONLY subsection before loading CASHCAT.** CHUMP is the first token whose
 market is v3, and that subsection exists so the next one does not rediscover it.
 
@@ -371,8 +380,11 @@ end to end. Phases filled in as the run proceeds:
 | tags | **1.1 s** | 0 | no network |
 | timestamps | **50.8 s** | **0** | toFetch 0 — the sweep carried all 55,076 |
 | prices | **75.6 s** | 0 | no network |
-| dry run | ~60 s | 0 | no network |
-| write | — | 0 | **RAISED** on its own price gate — see below |
+| dry run, first run | ~60 s | 0 | no network |
+| write, first attempt | — | 0 | **RAISED** on its own price gate — see below |
+| dry run, after the row fence | **107.9 s** | 0 | reconciles: 41,902 + 55,932 = 97,834 |
+| **write** | **148.3 s** | 0 | **97,834 rows stored; price check `outside: 0`** |
+| scoring, ALL 6 windows + watchlist | **13.7 s** | 0 | database only |
 | | **total 327,660 CU** | | **$0.147** |
 
 **`timestamps` took 50.8 s to fetch NOTHING, and that is the materialised work-set
