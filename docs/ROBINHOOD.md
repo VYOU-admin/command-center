@@ -4945,6 +4945,76 @@ the composite between tokens.
 for every token and so waits for the operator. **The scores recorded above were computed
 with the mean, and that is what they mean.**
 
+#### STEPS 14-17: PAGE EXECUTED, MONITOR HEALTHY, WATCHLIST WAS STALE BY 4
+
+**Step 14 — the page was EXECUTED in a DOM, not built and assumed.**
+`scripts/verify-tokens-page.mjs <base> CASHCAT 0x020b...18b4`:
+
+```
+token tabs           AI 3508 | CASHCAT 2245 | CHUMP 523 | INDEX 7239 | PONS 14219
+tab selected         CASHCAT 2245              script errors 0
+count line           2245 of 2245 wallets - 97928 transactions (page 1 of 23)
+wallet rows          100 rendered, 100 with a score, 0 unscored, 0 partial-weight
+top scores           0.4456, 0.4443, 0.4425    <- matches wallet_scores exactly
+exclude inflated-pnl 2245 -> 2179 (removed 66)
+expansion mint       MATCHES 0x020bfC650A365f8BB26819deAAbF3E21291018b4
+metric rows          8 of 8, 0 dropped as null
+```
+
+**97,928 on the page is the database's figure**, intake plus the monitor's 94, so the
+page and the store agree without either being adjusted to the other.
+
+**Step 15 — `cashcat-updates` is running and was running before this write.** 19 runs,
+`last_status` success at 22:30:54Z, `consecutive_failures` 0, recent cycles writing
+7, 5, 27 and 0 records in 2.7–3.2 s. **The zero cycle is reported rather than omitted**:
+an hour with no CASHCAT activity is a legitimate result for this monitor.
+
+**Step 17 — THE WATCHLIST WAS STALE AND THE STALENESS WAS VISIBLE IN ITS NUMBERS.**
+Before the refresh CASHCAT held **4** memberships against **113** slots, scored
+0.0300–0.7879 — a range `wallet_scores` does not contain. Both facts point the same
+way: those 4 were qualified at 22:48Z from scores computed over the **94 monitor rows**
+that existed before the intake write landed at 22:53Z. **A watchlist row whose score is
+outside its own token's score range is stale by construction, and is worth checking for
+directly.**
+
+After `run-once wallet-scores`:
+
+| tag | cohort | scored | null | slots | admitted | cutoff | max |
+|---|---|---|---|---|---|---|---|
+| **CASHCAT-P1** | **2,245** | **2,239** | **6** | **113** | **113** | **0.3142** | **0.4456** |
+| CHUMP-P1 | 523 | 522 | 1 | 27 | 27 | 0.2195 | 0.5897 |
+| AI-P1 | 3,508 | 3,496 | 12 | 176 | 176 | 0.2640 | 0.7581 |
+| PONS-P1 | 13,823 | 13,735 | 88 | 692 | 692 | 0.4412 | 0.6025 |
+| INDEX-P1 | 3,316 | 3,311 | 5 | 166 | 166 | 0.3054 | 0.5326 |
+| INDEX-P2 | 4,267 | 4,259 | 8 | 214 | 214 | 0.3311 | 0.6094 |
+
+**Every window admitted exactly its slot count**, so the 5% cut is the only thing
+binding — no window ran short of qualifying wallets.
+
+**The watchlist effect of adding CASHCAT: 1,279 rows / 1,185 wallets -> 1,388 / 1,289**
+(+114 memberships, -5 removed). **7 of CASHCAT's 113 also sit on another token's
+watchlist** — INDEX-P1 3, PONS-P1 3, INDEX-P2 1 — and wallets on two or more tokens rose
+from 65 to 70. **CASHCAT's cohort is therefore very nearly disjoint from the others**,
+which is what the cross-token overlap is for: 106 of 113 are new faces.
+
+#### CASHCAT'S COST: 327,660 CU, ABOUT $0.147
+
+| phase | CU | ceiling | |
+|---|---|---|---|
+| identity | 816 | 2,000 | |
+| windows | 1,100 | 5,000 | |
+| pools | 480 | 100,000 | |
+| sweep | 218,230 | 800,000 | 3.7x headroom |
+| scope | 2,896 | 50,000 | plus 2,714 on the superseded first run |
+| conventions | 0 | 50,000 | reads stored logs only |
+| cohort | 101,424 | 400,000 | 3.9x headroom |
+| tags, timestamps, prices, dryrun, write | 0 | 0 | no RPC by design |
+| **total** | **327,660** | | **~$0.147 at 0.45/MCU** |
+
+**Wall clock measured this session: dry run 107.9 s, write 148.3 s, scoring 13.7 s for
+all six windows.** No phase approached 3x its expectation, so no investigation was
+triggered. **Every ceiling held with real headroom and none was raised.**
+
 #### STEP 7: COHORT 2,245, AND IT RECONCILES EXACTLY
 
 **78.9 s, 101,424 CU.** The work set was re-derived before spending rather than taken
