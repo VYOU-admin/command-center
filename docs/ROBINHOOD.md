@@ -6266,8 +6266,27 @@ attribution.**
 
 ## 9. Rules here the code does not implement
 
-- **OPEN, found on BONER 2026-09-15: THE COHORT PHASE SPENDS WITHOUT PRINTING A WORK
-  SET.** Its log goes straight from `phase starting` to `phase finished` having spent
+- **FIXED 2026-09-15 — the cohort phase now derives, PRINTS and ENFORCES its work set
+  before the first paid call.** The candidate set is fully known after the slice loop
+  and before `provenBuyers`, which is where the spending starts, so that is where the
+  gate sits. It logs `BEFORE THE FIRST PAID CALL` with the candidate wallets, the
+  transactions to read, the receipt rate it is sizing with, the estimate and the
+  remaining ceiling — and **raises if the estimate exceeds what the ceiling can pay**,
+  rather than discovering it part-way through and leaving a half-proven cohort.
+
+  **The estimate and the fetch share one derivation** — the same `candidateTxs` map is
+  measured and then iterated, not re-queried — which is the form step 9 says the
+  one-derivation rule must take, because two queries scoped differently is how
+  `eth-usd-series` printed zero and wrote 140.
+
+  **It is an upper bound on the code-check half, deliberately.** Survivors are not
+  known until payment has run, so the `eth_getCode` term is sized at one call per
+  candidate wallet; the real figure is lower by whatever share fails to prove. **A
+  ceiling gate that under-estimates is not a gate.**
+
+  **The original finding, kept because the operator-discipline half is the lesson:**
+
+- **THE COHORT PHASE SPENT WITHOUT PRINTING A WORK SET UNTIL 2026-09-15.** Its log goes straight from `phase starting` to `phase finished` having spent
   **64,750 CU**, and there is no line anywhere between them stating the candidate count
   the spend was sized from. Grepped: the whole run emits `intake starting`,
   `phase starting`, `phase finished`, `STOPPED FOR REVIEW` and the schema lines, and
@@ -6293,8 +6312,18 @@ attribution.**
   its candidate count before the first paid call**, which is what step 9's one-derivation
   rule already requires of every job that spends.
 
-- **OPEN, found on BONER 2026-09-15: NOTHING IN THE REPOSITORY EVER WRITES
-  `tokens.role`.** Step 14 says "a token loaded only to price another is not a tracked
+- **FIXED 2026-09-15 — `role` is now an intake-config key, so the third bridge does
+  not repeat this.** `intake/nvda.yaml` and `intake/hims.yaml` both existed precisely
+  to say "this is a pricing source" and neither could; both now carry
+  `role: pricing-source`, `plan.ts` validates it against the two legal values, and the
+  identity phase writes it on the `tokens` row. **An unknown value raises rather than
+  defaulting**, because a typo silently leaving a bridge `tracked` is the failure this
+  entry records. The column keeps its `not null default 'tracked'`, so a config with no
+  `role` key behaves exactly as before.
+
+  **The original finding, kept because the near-miss is the lesson:**
+
+- **NOTHING IN THE REPOSITORY EVER WROTE `tokens.role` UNTIL 2026-09-15.** Step 14 says "a token loaded only to price another is not a tracked
   token. `tokens.role` records which it is", and `db.ts` declares the column
   `not null default 'tracked'` — so **every identity run writes `tracked` and no code
   path ever writes `pricing-source`.** NVDA's role was set by hand, outside the intake
