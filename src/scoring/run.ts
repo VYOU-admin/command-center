@@ -408,6 +408,7 @@ export async function scoreWindow(
       chain, token, tag, cohort: cohort.length, scored: flagged.length,
       lowWeightThreshold: lowWeight.threshold, lowWeightDerived: lowWeight.derived,
       flags: countBy(flagged.flatMap((x) => x.f)), written: 0, orphansRemoved: 0,
+      ...(opts.detail ? { wallets: result.wallets } : {}),
     };
   }
 
