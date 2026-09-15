@@ -421,6 +421,14 @@ const adapter: SourceAdapter<{ token: string }> = {
           characters: description.length,
           cap: CAP, margin: MARGIN, sink_slice: 4000,
           dropped_by_guard: Math.min(CAP, ordered.length) - shownCount,
+          /*
+           * THE DELIVERED BODY IS LOGGED, not just its length. Discord is the only
+           * other place it exists and nothing here can read it back, so an alert that
+           * is not logged is unrecoverable the moment it is sent -- the same lesson
+           * the per-bucket price detail above records, where a run's detail was later
+           * asked for and was simply gone.
+           */
+          body: description,
         });
 
         ctx.queueAlert({
@@ -565,6 +573,9 @@ const adapter: SourceAdapter<{ token: string }> = {
           margin: 3600,
           sink_slice: 4000,
           sent: launch.body !== null,
+          /* Logged for the same reason the first alert's is: Discord is the only
+           * other copy and nothing here can read it back. */
+          body: launch.body,
           note: launch.body === null
             ? 'NOTHING SENT: no token bought this slice deployed inside the window. '
               + 'That is the expected outcome on most runs, not a fault.'
