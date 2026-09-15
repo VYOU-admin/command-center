@@ -5718,6 +5718,93 @@ worth recording: the document's decision procedure assumes transfers already exi
 
 ---
 
+### BONER — `0x98096d17e191B3dA1d5f99a6D7b3584351b11E18`
+
+**IN PROGRESS 2026-09-15. Nothing loaded yet** — verified on a fresh connection before
+anything was written: `tokens` **RETURNED NO ROWS**, `token_intake_state` **RETURNED NO
+ROWS**, and tags, rows, windows, swaps, transfers and `pool_meta` all **0**.
+
+```
+window BONER-P1   2026-08-20T00:00:00-04:00 -> 2026-08-30T12:00:00-04:00
+pump              2026-08-30T12:00:00-04:00   <- IS the window end, like CHUMP's pump 1
+charted pool      0x9c89b04303dfa76f3f6fb02c2b77be0e8a00ab8fa00d507119acd54ab3e8640d
+                  a 32-BYTE v4 POOL ID, not an address. Recorded, never filtered on.
+pair              BONER/HIMS, v4
+```
+
+#### WHAT BEARS ON IT: THIS IS THE SECOND BRIDGE EVER, AND THE DOCUMENT NAMED IT
+
+**Step 4 names this token by name.** The bridge-decimals defect — `?? 18` where the
+token's own decimals raised — was fixed on 2026-09-14 and the entry says it "was
+dormant only because AI is the only token with a bridge and NVDA's `tokens` row
+exists. **BONER is queued and needs a HIMS bridge, so it stops being dormant on the
+next intake.**" This intake is that next intake. **The fix is about to be exercised
+for the first time, and the way to exercise it is to make HIMS resolvable BEFORE the
+prices phase rather than to discover the raise.**
+
+**Three consequences, none optional:**
+
+1. **HIMS needs its own identity run before the prices phase.** A bridge gets its
+   `tokens` row from a separate identity run and nothing in the prices phase checks
+   that it happened. With the fix in place a missing row now STOPS the job instead of
+   scaling every bridge amount by 10^12.
+2. **HIMS is resolved by ADDRESS, never by symbol.** Two tokens on this chain answer
+   `symbol()` with "NVDA", and the impostor's address ends `1e18` like a crowd of junk
+   counters — **BONER's own address ends `1E18`**, which is the same vanity suffix and
+   is worth noticing rather than reading as a signal. The address comes from the
+   charted pool's `Initialize` currencies, read from the chain.
+3. **`bridge_usd_prices` is keyed `(chain, bridge, bucket_block)` and section 9 warns
+   that two tokens pricing through ONE bridge on different grids would interleave two
+   series in one table.** Checked before starting: the table holds **one bridge, NVDA,
+   4,471 buckets on residue 1433**, and `bridge_assets` appears in exactly two files —
+   `intake/ai.yaml` and `monitors/ai-updates.yaml` — both naming NVDA. **Nothing else
+   can price through HIMS, so HIMS will be priced by BONER alone and the two-grid
+   hazard does not fire.** It is confirmed rather than assumed, and it fires the moment
+   a third token wants HIMS.
+
+#### BONER ALREADY HAS DIRECT PRICING POOLS, WHICH AI DID NOT — so the bridge is a
+#### question to be answered by SWAP SHARE, not a foregone conclusion
+
+The watcher has been recording BONER since 2026-09-13 and its 128 rows already name
+BONER's counter assets, for free and before any sweep:
+
+| counter | rows | priced |
+|---|---|---|
+| `0xccee82fe…3d09` — the HIMS candidate | 44 | **0** |
+| USDG | 34 | 34 |
+| WETH | 27 | 27 |
+| AI `0x2E8c3116…` | 15 | 0 |
+| native ETH | 8 | 8 |
+
+**69 of 128 already price without any bridge at all**, which is the opposite of AI:
+AI's charted NVDA pair was 56% of its swaps and the hop was worth **4.4x its cohort**,
+where BONER has live USDG, WETH and native pools. **That makes the bridge a decision
+rather than a necessity**, and step 3's rule decides it: *weigh the venue split by
+SWAPS, never by pool count*, and step 4's second hop is justified by what share of the
+token's market it recovers. **The 44 unpriced HIMS rows are the lower bound on what
+the hop would buy and they are a watcher sample, not the token's market.**
+
+**BONER also trades against AI**, which the AI findings predicted — "BONER and CASHCAT
+trade against AI" — and those 15 rows are correctly unpriced: AI is a memecoin, not a
+recognised pricing asset, and pricing BONER through AI would price a memecoin against a
+memecoin. **AI is not a bridge candidate here**, whatever its volume.
+
+#### `v4_swaps_all` CANNOT SEE THIS WINDOW, AND THAT IS ARITHMETIC RATHER THAN A PROBE
+
+`v4_swaps_all` spans **15,115,267–42,695,454**, confirmed from the table. PONS-P1 ends
+at 42,691,407 on 2026-08-21, so the table was built to that date and **BONER-P1 opens
+on 2026-08-20 and closes on 2026-08-30**. At 35,622 blocks/hour the window's closing
+bound sits roughly eight million blocks past the table's ceiling.
+
+**So the free v4 count is a lower bound over at most the first day of a ten-day
+window, and quoting a venue split from it would repeat CHUMP's error in CASHCAT's
+direction.** CHUMP's free query said 13 v4 swaps where the sweep found 10,722;
+CASHCAT's said 879,297 where the sweep found 1,991,868. **The coverage is checked
+against the window before the figure is quoted, not after**, and the split is quoted
+from the sweep.
+
+---
+
 ## 9. Rules here the code does not implement
 
 - **FIXED 2026-09-14 — metric 5 (`prePumpShare`) could not exceed 1/n_pumps, so it
