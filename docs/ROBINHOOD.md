@@ -976,6 +976,24 @@ response body. A read that requests a set must confirm every requested item came
 back and abort rather than emit a partial result — 490 of 1,046 batched balance
 reads once came back 429 and every one became a plausible zero balance.
 
+**A PRICING SOURCE NEEDS TICKS, NOT ATTRIBUTION — `sweep_transfers: false`.** Added
+2026-09-15 for HIMS. A bridge's only job is to produce a USD series from its own pools
+against recognised pricing assets, and that comes entirely from `Swap` logs. **NVDA is
+the proof it was always so: it holds 2,742,472 swaps and ZERO transfers**, and its
+bridge series derives fine.
+
+The transfer stream is a THIRD of a cap-bound sweep's requests — on BONER it was 1 of
+3 streams at ~308 requests each — so sweeping it for a bridge is **~25,000 CU spent to
+fill a table nothing reads.** For HIMS that is the difference between ~76,100 CU and
+~50,800.
+
+**It defaults to TRUE and is set false only on a pricing source.** A tracked token
+needs transfers for attribution, for router detection and for the transfer rows the
+cohort's `inflated-pnl` flag depends on — turning them off there would silently produce
+a cohort with no transfer rows, which is the AI defect step 15 records. **The key
+belongs per token, like `flow_probe` and `max_pools`**, and a global default of false
+would remove the guarantee for every future token.
+
 ---
 
 ### Step 5b — Reconcile the sweep

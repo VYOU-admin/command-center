@@ -63,6 +63,16 @@ max_pools: 20000
 # from other factories, and a price series does not need them.
 flow_probe: false
 
+# A BRIDGE NEEDS TICKS, NOT ATTRIBUTION. HIMS's series comes entirely from Swap
+# logs on its own pools against recognised pricing assets; nothing reads a HIMS
+# transfer. NVDA proves it -- 2,742,472 swaps and ZERO transfers, and its series
+# derives fine. The transfer stream is a third of a cap-bound sweep's requests, so
+# skipping it is the difference between ~76,100 CU and ~50,800 for this sweep.
+#
+# NEVER false on a tracked token: transfers are attribution, router detection and
+# the transfer rows inflated-pnl depends on.
+sweep_transfers: false
+
 scope_max_counter_reads: 40
 
 routers:
@@ -107,12 +117,36 @@ tables:
   token_usd: hims_usd_prices
   native_usd: native_usd_prices
 
+# THE SWEEP CEILING IS DERIVED FROM THE WORK SET, re-derived on 2026-09-15 rather
+# than carried over from the estimate quoted at BONER's cohort stop.
+#
+#   HIMS life          20,950,062 .. 63,255,841  =  42,305,779 blocks
+#   streams            swap-v3 (4 pools) + swap-v4 (127 pools = 1 chunk of 500)
+#                      transfers SKIPPED -- sweep_transfers: false
+#   density            MEASURED on the RIGHT filter, free, from v4_swaps_all over
+#                      the span it covers: peak 0.002040/block across
+#                      40,258,519..42,694,912, overall 0.000704/block
+#   is the cap binding?  6,000 / 0.00204 = a 2.9M-block natural span, so YES --
+#                      density would have to exceed 0.06/block, 29x the measured
+#                      peak, before the 100,000 cap stopped binding
+#   requests           ceil(42,305,779 / 100,000) = 424 per stream x 2 = 848
+#   estimate           848 x 60 = 50,880 CU = $0.0229
+#
+# THE UNCOVERED REGION IS STATED RATHER THAN INFERRED PAST. v4_swaps_all ends at
+# 42,695,454 and HIMS's life runs to 63.3M, so the density above is measured over
+# the first 17% of the range. The only signal past it is a TRANSFER probe, which
+# is a different filter and peaked at 0.119/block; swaps ran ~0.30x transfers on
+# BONER, so a worst case of ~0.036/block still leaves the cap binding.
+#
+# 120,000 covers the worst case of every span halving once, and a span collapse to
+# the 25-block floor would still blow through it in ~2,000 requests -- so it keeps
+# catching the defect a ceiling exists for.
 ceilings:
   identity: 1500
   windows: 5000
   pools: 3000
   scope: 25000
-  sweep: 0
+  sweep: 120000
   conventions: 0
   cohort: 0
   tags: 0

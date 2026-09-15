@@ -85,6 +85,19 @@ export interface IntakeConfig {
    * here. HIMS repeated it on the very next bridge. See section 9.
    */
   role: 'tracked' | 'pricing-source';
+  /**
+   * Sweep the token's `Transfer` logs. TRUE except on a pricing source.
+   *
+   * A bridge needs TICKS, not attribution: its series comes entirely from `Swap`
+   * logs on its own pools against recognised pricing assets. NVDA proves it --
+   * 2,742,472 swaps and zero transfers, and its series derives fine. The transfer
+   * stream is a third of a cap-bound sweep's requests, so sweeping it for a bridge
+   * spends ~25,000 CU filling a table nothing reads.
+   *
+   * NEVER false on a tracked token: transfers are attribution, router detection
+   * and the transfer rows `inflated-pnl` depends on.
+   */
+  sweepTransfers: boolean;
   windows: IntakeWindow[];
 
   rpcUrlTemplate: string;
@@ -292,6 +305,7 @@ export async function loadIntakeConfig(path: string): Promise<IntakeConfig> {
         + 'A pricing source is a bridge loaded only to price another token.',
       );
     })(),
+    sweepTransfers: raw['sweep_transfers'] === false ? false : true,
     windows,
 
     rpcUrlTemplate: String(req(rpc['url_template'], 'rpc.url_template')),

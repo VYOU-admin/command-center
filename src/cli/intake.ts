@@ -816,7 +816,13 @@ async function main(): Promise<void> {
         totals['v4'] = s.logs;
       }
 
-      const t = await adaptiveSweep(
+      /*
+       * A PRICING SOURCE SKIPS THIS STREAM ENTIRELY. A bridge needs ticks, not
+       * attribution -- NVDA holds 2.7M swaps and zero transfers and its series
+       * derives fine -- and the transfer stream is a third of a cap-bound sweep's
+       * requests. Never false on a tracked token: see plan.ts.
+       */
+      const t = cfg.sweepTransfers ? await adaptiveSweep(
         rpc, cfg, { address: cfg.token, topics: [TOPICS.transfer] }, firstBlock, head,
         async (logs, from, to) => {
           const decoded = logs.map((l) => decodeTransfer(l));
@@ -836,7 +842,7 @@ async function main(): Promise<void> {
           });
           await recordSweepRange(c, cfg, 'transfer', from, to, logs.length);
         },
-      );
+      ) : { logs: 0, requests: 0, skipped: true as const };
       totals['transfer'] = t.logs;
 
       /*
@@ -850,7 +856,20 @@ async function main(): Promise<void> {
        */
 
       const coverage: Record<string, unknown> = {};
-      for (const kind of ['swap-v3', 'swap-v4', 'transfer']) {
+      /*
+       * A SKIPPED STREAM IS REPORTED AS SKIPPED, NEVER GAP-CHECKED INTO A FAILURE.
+       * A pricing source does not sweep transfers, so there are no ranges to cover
+       * and `checkCoverage` would read that as a total gap. Saying "SKIPPED" keeps
+       * it distinguishable from a stream that was swept and came back empty --
+       * which would be a real defect.
+       */
+      const streams = cfg.sweepTransfers
+        ? ['swap-v3', 'swap-v4', 'transfer'] : ['swap-v3', 'swap-v4'];
+      if (!cfg.sweepTransfers) {
+        coverage['transfer'] = 'SKIPPED -- sweep_transfers is false for this pricing '
+          + 'source; a bridge needs ticks, not attribution';
+      }
+      for (const kind of streams) {
         const chk = await checkCoverage(c, cfg, kind, firstBlock, head);
         coverage[kind] = chk;
         if (chk.gaps.length > 0 || chk.coveredBlocks !== chk.expectedBlocks) {
