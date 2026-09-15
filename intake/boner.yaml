@@ -83,15 +83,19 @@ pricing:
     - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
     - "0x0000000000000000000000000000000000000000"
 
-  # NO `bridge_assets` KEY YET, DELIBERATELY.
+  # HIMS, THE SECOND BRIDGE EVER, and the address came from the chain.
   #
-  # The bridge is decided at step 4 from the measured swap share, and HIMS's
-  # address is read from the charted pool's `Initialize` currencies rather than
-  # asserted here. Writing an address into this file before the chain has been
-  # asked would be exactly the "value asserted rather than read" that section 2
-  # forbids. The key is added, with the address the chain returned, once step 4
-  # has decided the hop is worth taking -- and the write phase's gate compares
-  # this file against the monitor, so both move together.
+  # Read from the charted pool's own `Initialize` currencies -- currency0 is
+  # BONER, currency1 is this -- not asserted here and never resolved by symbol.
+  # Step 4's hop is justified by the measured swap share, not by the pair name:
+  # over the 968,935 blocks of BONER-P1 that `v4_swaps_all` can see, HIMS carries
+  # 8,874 of 10,498 swaps (84.5%) on ONE pool while 155 USDG pools carry 56.
+  #
+  # `intake/hims.yaml` gives HIMS its own identity run, which must exist before
+  # the prices phase: a bridge with no `tokens` row now RAISES rather than
+  # defaulting its decimals to 18 and scaling every bridge amount by 10^12.
+  bridge_assets:
+    - "0xccee82fe024c36fa15e1005ede3e9e4787e23d09"   # HIMS, 18 decimals
 
   # READS the chain's ETH/USD series, never writes it. token-updates (PONS) owns
   # it. Step 10's one-owner rule; the intake honours the key since 2026-09-13.

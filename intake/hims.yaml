@@ -1,0 +1,115 @@
+# HIMS — loaded as a PRICING SOURCE, not as a cohort. THE SECOND BRIDGE EVER.
+#
+# BONER's charted market is BONER/HIMS, and measured over the 968,935 blocks of
+# BONER-P1 that `v4_swaps_all` can see it is 8,874 of 10,498 swaps -- 84.5% --
+# on a single pool, against 56 swaps across 155 USDG pools. It is out of scope on
+# its own: HIMS is not a recognised pricing asset. Step 4 gives the route -- price
+# BONER through HIMS, provided HIMS itself has an on-chain USD route derived from
+# ITS pools against a recognised pricing asset.
+#
+# THE SCOPE RULE APPLIES RECURSIVELY, which is why this file lists no
+# bridge_assets of its own. HIMS's series may come only from HIMS/USDG, HIMS/WETH
+# and HIMS/native pools. Pools where HIMS is some third token's pricing side are
+# excluded -- including them would price HIMS against the thing it is pricing.
+#
+# NO COHORT IS BUILT FROM THIS FILE. Every phase past scope has a zero ceiling.
+#
+# WHY THIS FILE HAS TO EXIST BEFORE BONER'S PRICES PHASE. A bridge gets its
+# `tokens` row from a separate identity run, and until 2026-09-14 a missing row
+# silently defaulted the bridge's decimals to 18 -- scaling every bridge amount
+# by 10^12 with nothing raised. That now RAISES, and step 4 names BONER as the
+# token that would exercise it. Creating this file first is how the raise is
+# prevented rather than discovered.
+
+chain: robinhood
+ticker: HIMS
+# READ FROM THE CHAIN, from the charted pool's own Initialize currencies, not
+# inferred from a pool name and not resolved by symbol. Exactly one token on this
+# chain answers symbol() with "HIMS" as of 2026-09-15 -- checked -- but that is a
+# measurement with a date on it, and NVDA proves a second can exist. Everything
+# below keys on the address.
+token: "0xccee82fe024c36fa15e1005ede3e9e4787e23d09"
+charted_pair: "0x0000000000000000000000000000000000000000"   # not applicable
+
+# HIMS is priced across BONER's window. It is not a cohort window and no wallet
+# is tagged from it.
+windows:
+  - label: HIMS-PRICING
+    start: "2026-08-20T00:00:00-04:00"
+    end:   "2026-08-30T12:00:00-04:00"
+
+rpc:
+  url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+  key_var: ALCHEMY_API_KEY
+  request_timeout_ms: 120000
+  max_log_span_blocks: 100000
+  sparse_log_span_blocks: 40000000
+  min_log_span_blocks: 25
+  target_logs_per_request: 6000
+
+# A tokenised equity is a pricing asset for other tokens, so it has many pools.
+# NVDA needed 20,000; raised deliberately, per token, as the cap intends.
+max_pools: 20000
+
+# Off. Enumeration finds every v4 pool from Initialize and every v3 pool from the
+# configured factory; the probe would sweep every HIMS transfer to find v3 pools
+# from other factories, and a price series does not need them.
+flow_probe: false
+
+scope_max_counter_reads: 40
+
+routers:
+  min_recipients: 50
+  min_swap_share: 0.5
+
+venues:
+  v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+  v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+pricing:
+  assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+    - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+    - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+  usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+  native_assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+    - "0x0000000000000000000000000000000000000000"
+  # NO bridge_assets. The recursive scope rule: a bridge's own series comes only
+  # from pools pairing it with a recognised pricing asset.
+  derives_native_usd: false
+  bucket_blocks: 10000
+  # UNUSED for the bridge series, and set to match BONER deliberately.
+  # deriveBridgeUsd is called with the config of the token being priced, so HIMS's
+  # series lands on BONER's grid (origin 8,963,150, residue 3150) -- NOT on this
+  # value. Setting it to the same number means nothing can derive HIMS on a second
+  # grid by accident. NVDA's series sits on AI's residue-1433 grid for the same
+  # reason, and `bridge_usd_prices` is keyed (chain, bridge, bucket_block): two
+  # BRIDGES cannot collide, but one bridge on two anchors would. See step 10.
+  bucket_origin: 8963150
+  tick_fence_multiple: 100
+  native_fence_multiple: 10
+
+floors:
+  token_raw_units: 1
+  paid_raw_units: 1
+  token_amount: 0.001
+  usd: 0.01
+
+tables:
+  token_usd: hims_usd_prices
+  native_usd: native_usd_prices
+
+ceilings:
+  identity: 1500
+  windows: 5000
+  pools: 3000
+  scope: 25000
+  sweep: 0
+  conventions: 0
+  cohort: 0
+  tags: 0
+  timestamps: 0
+  prices: 0
+  dryrun: 0
+  write: 0
