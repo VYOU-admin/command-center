@@ -5803,6 +5803,108 @@ CASHCAT's said 879,297 where the sweep found 1,991,868. **The coverage is checke
 against the window before the figure is quoted, not after**, and the split is quoted
 from the sweep.
 
+#### STEPS 1–3 AS MEASURED, and the identity constant holds for a SIXTH token
+
+| phase | wall-clock | CU | against estimate |
+|---|---|---|---|
+| identity | **805 ms** | **816** | ~800 — **exact, and 816 for the sixth token running** |
+| windows | **470 ms** | 560 | ~1,040 for one window — **46% under**, the start instant short-circuited |
+| pools | **990 ms** | 240 | ~500 — **52% under**, 4 sparse `eth_getLogs` for 388 candidates |
+
+```
+name "Boner Coin"   symbol BONER   decimals 18   supply 999,946,321.609311065068912732
+deployment block    41,726,520          head at identity 63,252,853
+BONER-P1            41,726,520 .. 50,134,751     8,408,231 blocks
+pools               388 candidates = 379 v4 from Initialize + 9 v3 from the factory
+flow probe          NOT RUN -- reported as such, never as a zero
+```
+
+**THE WINDOW START RESOLVED TO THE DEPLOYMENT BLOCK EXACTLY, which is the low-bound
+clamp firing for the second time after CHUMP.** `2026-08-20T00:00:00-04:00` returned
+41,726,520 — the deployment block itself — because `resolveWindows` passes it as the
+search's low bound and `blockForInstant` opens `if (target <= loTs) return lo`. The
+window therefore opens where the token opens, and **`before-window` will be
+`41,726,520..41,726,519`, empty by construction** — the shape section 6 says must be
+reported as RETURNED NO ROWS rather than omitted. It also explains the 46% CU
+under-run: one bound short-circuited instead of bisecting.
+
+**The supply matches the `token_decimals_cache` read from 2026-09-15 to the last
+digit** — 999946321609311065068912732 raw against the identity phase's
+999,946,321.609311065068912732. **Two independent reads of the same contract through
+different code paths agreeing exactly** is the cross-check the supply backfill never
+had, arriving for free.
+
+**The charted pool was created IN THE DEPLOYMENT BLOCK.** `0x9c89b043…8640d` carries
+`block: 41726520`, so there is no bonding curve here — the same finding PONS records.
+
+#### HIMS IS `0xccee82fe024c36fa15e1005ede3e9e4787e23d09`, READ FROM THE CHAIN
+
+Resolved from the charted pool's own `Initialize` currencies, **by address**:
+
+```
+currency0  0x98096d17e191b3da1d5f99a6d7b3584351b11e18   BONER itself
+currency1  0xccee82fe024c36fa15e1005ede3e9e4787e23d09   the bridge
+symbol     HIMS       name "Hims & Hers Health • Robinhood Token"    decimals 18
+supply     110,184.084      <- a tokenised EQUITY, the same shape as NVDA
+```
+
+**Exactly ONE token on this chain answers `symbol()` with "HIMS"** — checked, and it is
+this one, so the NVDA impostor problem does not repeat here. **It is still matched by
+address**, because the check that found one today is a measurement with a date on it
+and a second HIMS can be deployed at any time.
+
+**BONER's own address ends `1E18`** — the vanity suffix the AI findings record for a
+crowd of junk counters. **It is a coincidence of address space and says nothing about
+the token**, noted here only so a future reader does not read it as a signal.
+
+#### THE VENUE SPLIT BY POOLS IS THE OPPOSITE OF THE SPLIT BY SWAPS — a THIRD time
+
+**Step 3's rule — weigh the split by SWAPS, never by pool count — has now misled on
+three consecutive tokens, and BONER is the widest gap yet.** Measured over the
+968,935 blocks of the window that `v4_swaps_all` can see:
+
+| counter | pools (all 388 candidates) | swaps over the covered blocks |
+|---|---|---|
+| **HIMS** | **3** | **8,874 — 84.5%**, on ONE pool |
+| USDG | **155** | 56 — **0.5%** |
+| native ETH | 80 | 931 |
+| AI | 5 | 637 |
+
+**155 USDG pools carry half a percent of the swaps; three HIMS pools carry
+eighty-four.** By pool count BONER reads as a USDG token with a bridge it barely
+needs. By swaps it is a HIMS token, and the hop is its market rather than an
+optimisation. CHUMP looked 96% v4 by pools and was 96.1% v3 by swaps; CASHCAT was the
+mirror; **BONER is the same error with a 50-to-1 ratio in the other direction.**
+
+**THE 128 WATCHER ROWS POINTED THE RIGHT WAY AND WOULD HAVE BEEN A WEAK BASIS.** They
+gave HIMS 44 rows against USDG's 34 and WETH's 27 — the right ORDER, but 34% rather
+than 84.5%, because a watchlist sample is 28 wallets' trades and not the token's
+market. **It is worth reading before a sweep and never worth quoting as the split.**
+
+#### A ZERO FROM `v4_swaps_all` THAT WAS MY QUERY, NOT THE COVERAGE
+
+The first count of BONER's v4 swaps returned **0 swaps across 0 pools**, and the
+obvious reading was the coverage artefact the INDEX findings name — the table stops at
+42,695,454 and the window runs to 50,134,751. **That reading was wrong and the zero
+was mine.** The query addressed the stored candidate list as
+`detail->'candidates'` where `detail` **is** the array, so the subquery matched no
+pool ids at all and the join had nothing to join to.
+
+Corrected, the same range gives **10,498 swaps across 10 pools, 41,726,586–42,695,034**.
+
+**Section 7's rule caught it: when a query disagrees with itself, suspect the query.**
+The tell was that `pools` came back 0 as well — a genuine coverage artefact would
+match the pools and find no swaps in them. **A zero that arrives with a second zero
+beside it is usually one fault, not two findings**, and this document had the shape
+recorded for the INDEX case, which is exactly why it was tempting to file it there.
+
+**The real coverage limit, stated properly:** `v4_swaps_all` sees
+41,726,520–42,695,454 of an 8,408,231-block window — **968,935 blocks, 11.5%** — and
+**only 21 of BONER's 388 pools were created inside it**. So 10,498 is a lower bound
+over the first ninth of the window across a twentieth of the pools, and the split
+above carries that limit with it. **The sweep replaces it; nothing is quoted from the
+free query as final.**
+
 ---
 
 ## 9. Rules here the code does not implement
