@@ -5909,6 +5909,36 @@ free query as final.**
 
 ## 9. Rules here the code does not implement
 
+- **OPEN, found on BONER 2026-09-15: NOTHING IN THE REPOSITORY EVER WRITES
+  `tokens.role`.** Step 14 says "a token loaded only to price another is not a tracked
+  token. `tokens.role` records which it is", and `db.ts` declares the column
+  `not null default 'tracked'` — so **every identity run writes `tracked` and no code
+  path ever writes `pricing-source`.** NVDA's role was set by hand, outside the intake
+  and outside every dry-run discipline here, and nothing recorded that it was a manual
+  step.
+
+  **HIMS surfaced it by repeating it.** Loading the second bridge ever put
+  `role = 'tracked'` on a token with no window, no cohort and no rows — which is
+  exactly the state step 14 describes as making NVDA "a dashboard tab for a token
+  nobody is tracking, with nothing in it". Two live readers filter on the column:
+  `token-price` (`where role = 'tracked'`, every minute) and the dashboard
+  (`server.ts`).
+
+  **It did NOT fail this time, and the reason is worth recording rather than being
+  relieved by.** NVDA failed `token-price` every minute because it had no pool with a
+  recognised quote at the liquidity floor; **HIMS has 110 USDG pools**, so the same
+  monitor priced it without complaint — `last_status` success, `consecutive_failures`
+  0, across every cycle after the identity run. **The defect is identical and only the
+  blast radius differed**, which is the kind of near-miss that stays invisible unless
+  it is written down.
+
+  **The fix applied now is the same manual one NVDA got**, scoped to one row and
+  dry-run first. **The fix NOT applied is the code change**: the intake should take
+  the role from the config — `intake/nvda.yaml` and `intake/hims.yaml` both exist
+  precisely to say "this is a pricing source" and neither can. Until then, **every
+  future bridge needs the same manual UPDATE and a reader has no way to know that from
+  the code.**
+
 - **FIXED 2026-09-14 — metric 5 (`prePumpShare`) could not exceed 1/n_pumps, so it
   carried a fraction of its stated weight and was not comparable between tokens.** It
   averaged each pump's pre-48h buy share over the pumps; pre-windows more than 48 hours
