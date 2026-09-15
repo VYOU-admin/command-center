@@ -54,8 +54,13 @@ native ETH/USD 10,159 buckets: 9,652 token-incidental, 489 market-derived,
 watchlist      1,275 memberships, 1,181 distinct wallets, top 5%  (CHUMP added 27)
 monitors       token-updates, index-updates, ai-updates, chump-updates, token-price,
                wallet-scores, watchlist-watch, oil-prices, postgres-disk  all enabled
-watcher        watchlist_activity: 303 rows, 103 tokens (mostly UNTRACKED), cursor
-               61,595,492.  67.6% of trades priced since it derives ETH/USD per slice.
+watcher        watchlist_activity: 18,144 rows, 1,282 tokens (mostly UNTRACKED),
+               cursor 63,333,149.  68.7% of trades priced (12,457) since it derives
+               ETH/USD per slice.  TWO ALERTS on the same 30-minute run: the existing
+               one, and the LAUNCH alert (age-filtered, 2026-09-15; it replaced a
+               market-cap filter dropped on evidence -- step 17).
+               token_decimals_cache: 1,282 rows, supply on all 1,282; age asked of
+               710 -- 509 proven older than a window, 201 with a deployment block.
                /watchlist tab: DOM-verified 303 rendered = 303 claimed, 0.38 MB
 ```
 
