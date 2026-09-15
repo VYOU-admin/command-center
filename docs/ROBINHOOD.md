@@ -6242,6 +6242,63 @@ capped metric 5 at 1/n_pumps under the old mean. **With one pump the ceiling is
 2026-09-14 the metric is the maximum anyway. Recorded as a prediction for step 13, not
 an assumption.
 
+#### THE HIMS SWEEP: 4.38 min, 51,790 CU, 1.8% over a re-derived estimate
+
+**Re-derived rather than trusted.** The figure quoted at the cohort stop was
+~50,800 CU from block count at the cap; it was recomputed from the work set before
+the first request rather than carried over.
+
+```
+HIMS life        20,950,062 .. 63,286,064  =  42,336,003 blocks
+streams          swap-v3 (4 pools) + swap-v4 (127 pools, ONE chunk) -- transfers SKIPPED
+estimate         848 requests x 60 = 50,880 CU      ceiling 120,000, derived
+spent            51,790 CU = 863 eth_getLogs x 60 + 1 eth_blockNumber x 10, EXACTLY
+                 863 requests against 848 estimated -- 1.8% over
+duration         262,776 ms = 4.38 min
+logs             v3 196,749   v4 91,725   transfer 0 (SKIPPED)
+coverage         both swap streams 42,336,003 / 42,336,003, 0 gaps, 0 overlaps
+                 transfer: "SKIPPED -- sweep_transfers is false for this pricing source"
+```
+
+**THE DENSITY THAT SIZED IT WAS MEASURED ON THE RIGHT FILTER, AND THE PROBE WAS NOT.**
+`sweep-probe` measures the token's TRANSFER filter; HIMS sweeps SWAPS. Running the
+probe anyway gave 0.0006–0.119 logs/block across six samples, and **using it would have
+been the fifth instance of a density taken from the wrong population** — the mistake
+this document records at 16x on AI, 27% on INDEX, 2.0x on the ETH/USD market and a
+142x spread on BONER.
+
+The right filter was free: **HIMS's own v4 swaps from `v4_swaps_all`**, which peaks at
+**0.002040/block** over 40,258,519–42,694,912 and runs 0.000704 overall. At the
+6,000-log target that is a 2.9M-block natural span, so **the 100,000 cap binds
+everywhere** — density would have to exceed 0.06/block, **29x the measured peak**,
+before it stopped. That is what made 848 requests the estimate and 863 the outcome.
+
+**The uncovered region was stated, not inferred past.** `v4_swaps_all` ends at
+42,695,454, so the measured density covers the first 17% of HIMS's life. The only
+signal beyond it is the transfer probe — a different filter — and at BONER's measured
+swap:transfer ratio of 0.30 its 0.119 peak implies ~0.036, still under the cap. **The
+ceiling was set at 120,000 to cover every span halving once**, and was never approached.
+
+**HIMS IS v3-DOMINANT BY SWAPS AND v4-DOMINANT BY POOLS — a FOURTH inversion.**
+
+| | pools in scope | swaps swept |
+|---|---|---|
+| v3 | **4** | **196,749 — 68.2%** |
+| v4 | **127** | 91,725 — 31.8% |
+
+**Four v3 pools carry more than two-thirds of a tokenised equity's trading while 127
+v4 pools carry the rest.** CHUMP, CASHCAT, BONER and now HIMS: **every token measured
+on this chain has had its venue split misread by pool count**, in both directions.
+Whatever intuition pool count creates, it has now been wrong four times out of four.
+
+**A BRIDGE NEEDS TICKS, NOT ATTRIBUTION — and skipping transfers saved a third of the
+sweep.** `sweep_transfers: false` is new for this run and is the config key that made
+the approved swaps-only figure reachable; the runner's transfer stream was
+unconditional before. NVDA is the precedent that says it is safe: 2,742,472 swaps and
+zero transfers, and its series derives fine. **The skipped stream is reported as
+SKIPPED in the coverage block rather than gap-checked into a failure**, which keeps it
+distinguishable from a stream that was swept and came back empty.
+
 #### HIMS'S SPREAD AGAINST DIRECT TRADES CANNOT BE MEASURED YET, AND SAYING SO IS THE
 #### ANSWER
 

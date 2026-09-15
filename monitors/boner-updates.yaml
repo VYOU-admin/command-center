@@ -1,0 +1,139 @@
+# Hourly incremental update of BONER cohort wallet rows.
+#
+# EVERY PRICING VALUE BELOW COMES FROM intake/boner.yaml, not from another
+# token's monitor. Step 15 records that copying one is the natural shortcut and
+# silently wrong: a bucket_origin from the wrong token matches no stored bucket
+# and prices every row null, and a missing bridge_assets drops every pool quoted
+# in that bridge.
+#
+# ON THIS TOKEN A MISSING `bridge_assets` WOULD DROP THREE QUARTERS OF IT. HIMS
+# carries 54,270 of BONER-P1's 73,845 in-window swaps -- 73.5% -- on a single
+# pool. AI's equivalent omission priced 5,033 NVDA-quoted rows null across 672
+# cycles that all reported success; BONER's exposure is larger.
+#
+id: boner-updates
+name: BONER Cohort Updates
+source: token-updates
+
+enabled: true
+
+schedule: 1h
+
+alerts:
+  channel: system
+  # Red after three consecutive failures. Every failure alert goes to the system
+  # channel regardless of this block.
+  discord_on_consecutive_failures: 3
+
+options:
+  chain: robinhood
+  # Checksummed exactly as the chain returns it and as `tokens.mint` and
+  # `wallet_tags.mint` store it. Lowercasing here would match no cohort.
+  token: "0x98096d17e191B3dA1d5f99a6D7b3584351b11E18"
+
+  # One window. 1,352 wallets, payment-proven once each at cohort time.
+  cohort_tags:
+    - BONER-P1
+
+  # WHERE THE INTAKE STOPPED, never the head. This is max(to_block) over
+  # token_sweep_progress -- the last block the sweep actually READ, and the same
+  # bound the write phase uses -- so the cursor starts exactly where the rows end
+  # with no gap and no overlap. Seeding at the head skips the backlog silently.
+  seed_cursor_block: 63261364
+
+  rpc:
+    url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+    # Read from the process environment, never interpolated here -- monitor
+    # options are persisted into monitors.config, so a key in YAML is a key in
+    # the database.
+    key_var: ALCHEMY_API_KEY
+    request_timeout_ms: 60000
+
+    # ~20 seconds at 0.1s blocks, so a tip reorg cannot strand rows. This chain's
+    # reorg depth has not been measured; the figure is a margin, not a finding.
+    lag_blocks: 200
+
+    # One hour is 35,622 blocks, measured. 40,000 leaves headroom so a late run
+    # catches up rather than falling permanently behind.
+    max_blocks_per_run: 40000
+
+    # HARD CEILING PER RUN, sized from BONER's OWN near-head density rather than
+    # copied. sweep-probe measured 0.0388 transfer logs/block over
+    # 63,100,000-63,200,000, so a 40,000-block slice is ~1,550 transfer logs plus
+    # its swaps -- one request per stream. The bridge adds one eth_getLogs per
+    # venue per slice for HIMS's own pools, which the other monitors except
+    # ai-updates do not pay. 15,000 covers that and still stops a run whose scope
+    # went wrong.
+    cu_ceiling: 15000
+
+    # STARTING SPAN. At 0.0388 logs/block a 40,000-block slice is far below the
+    # result cap and fits in one request. The span halves on a size refusal.
+    log_span_blocks: 40000
+    # Below this, a size refusal is a livelock rather than something to retry.
+    min_log_span_blocks: 25
+
+  venues:
+    v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+    v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+  pricing:
+    # Identical to intake/boner.yaml.
+    assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+      - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+      - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+    usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    native_assets:
+      - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+      - "0x0000000000000000000000000000000000000000"
+
+    # THE SECOND HOP, and it must be here as well as in intake/boner.yaml. This
+    # is the SECOND BRIDGE EVER; AI/NVDA was the first. HIMS pools are 73.5% of
+    # BONER's in-window swaps, so without this line every one of them prices null
+    # on every hourly run -- and the adapter raises if a bridge is configured and
+    # `bridge_usd_prices` holds no series for it, which is the check that turns a
+    # silent 73.5% loss into a failed run.
+    #
+    # The address was read from the charted pool's own Initialize currencies, by
+    # ADDRESS. A SECOND token on this chain answers symbol() with "HIMS"
+    # (0xdaab75e5...7c01, found by HIMS's own scope phase), exactly as two answer
+    # "NVDA". Nothing here resolves a token by symbol.
+    bridge_assets:
+      - "0xccee82fe024c36fa15e1005ede3e9e4787e23d09"   # HIMS, 18 decimals
+
+    # READS the chain's ETH/USD series, never writes it. token-updates (PONS)
+    # owns it; this monitor derives it in memory for its own slice and persists
+    # nothing, so no two writers race for a bucket.
+    derives_native_usd: false
+
+    bucket_blocks: 10000
+    # THE EXISTING RESIDUE-3150 GRID, matching intake/boner.yaml exactly -- the
+    # grid PONS, INDEX, CHUMP and CASHCAT already read. No fourth residue was
+    # created.
+    #
+    # IT ALSO FIXES THE GRID HIMS'S BRIDGE SERIES LANDS ON, because
+    # deriveBridgeUsd runs on the grid of the token being priced. NVDA's series
+    # sits on AI's residue-1433 grid and HIMS's sits on 3150; `bridge_usd_prices`
+    # is keyed (chain, bridge, bucket_block), so two BRIDGES cannot collide. What
+    # would collide is one bridge priced by two tokens on different anchors, and
+    # BONER is the only token that names HIMS.
+    bucket_origin: 8963150
+    # A tick outside this multiple of its bucket's median is discarded.
+    tick_fence_multiple: 100
+    native_fence_multiple: 10
+
+  floors:
+    token_raw_units: 1
+    paid_raw_units: 1
+    # Whole tokens. THE ONE THAT IS EASY TO OMIT: a USD-only floor once let
+    # through a row of 1.7e-6 tokens carrying $980,393.99 of allocated USD.
+    token_amount: 0.001
+    # Applies ONLY to rows that have a USD value. A null-USD row is unpriced,
+    # not small, and is never dropped by this.
+    usd: 0.01
+
+  tables:
+    # `token_usd` is configured; the COLUMN inside it is `pons_usd` on every
+    # token's table and is not configurable. Step 12.
+    token_usd: boner_usd_prices
+    native_usd: native_usd_prices
