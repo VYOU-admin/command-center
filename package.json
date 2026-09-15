@@ -35,6 +35,7 @@
     "eth-usd-series": "node dist/cli/eth-usd-series.js",
     "prepump-change": "node dist/cli/prepump-change.js",
     "token-supply": "node dist/cli/token-supply.js",
+    "bridge-spread": "node dist/cli/bridge-spread.js",
     "eth-usd-repair": "node dist/cli/eth-usd-repair.js",
     "watch-probe": "node dist/cli/watch-probe.js",
     "verify-watchlist": "node scripts/verify-watchlist-page.mjs",
