@@ -6299,8 +6299,70 @@ zero transfers, and its series derives fine. **The skipped stream is reported as
 SKIPPED in the coverage block rather than gap-checked into a failure**, which keeps it
 distinguishable from a stream that was swept and came back empty.
 
-#### HIMS'S SPREAD AGAINST DIRECT TRADES CANNOT BE MEASURED YET, AND SAYING SO IS THE
-#### ANSWER
+#### THE SPREAD, MEASURED: median 0.89% apart, and the THIN SIDE IS THE DIRECT ONE
+
+**This is the measurement the bridge path has a STOP for**, and step 4's warning that
+"two bucketed medians multiplied compound their error" is now a number rather than a
+caution. `npm run bridge-spread -- intake/boner.yaml`, read-only, 0 CU:
+
+```
+bridge route   median(HIMS per BONER) over BONER's 3 HIMS pools  x  HIMS/USD for that
+               bucket                                              -- TWO medians
+direct route   boner_usd_prices, from BONER/USDG ticks             -- ONE median
+grid           origin 8,963,150, residue 3150 -- the same grid both sides live on
+
+buckets compared   1,489
+mean                1.27%      median   0.89%      p90   2.38%      max   64.75%
+within 5%           1,457  (97.9%)
+within 10%          1,478  (99.3%)
+over 10%               11  (0.7%)
+```
+
+**A median of 0.89% is well inside section 1's stated tolerance** — USD error up to
+about 5% changes no decision — and **97.9% of buckets sit inside it.** Multiplying two
+bucketed medians did not compound into anything that moves a figure here. **That is
+measured on 1,489 buckets and was not assumed.**
+
+**THE ELEVEN OUTLIERS ARE MOSTLY THE DIRECT ROUTE BEING THIN, WHICH IS THE OPPOSITE OF
+WHAT THE WARNING PREDICTS.** Tick counts on every bucket over 10%:
+
+| bucket | apart | BONER/HIMS ticks | HIMS/USD ticks | **BONER/USDG ticks** |
+|---|---|---|---|---|
+| 41,753,150 | **64.7%** | 1,125 | 487 | **2** |
+| 48,393,150 | 28.0% | 4,509 | 771 | 1,793 |
+| 48,003,150 | 17.4% | 60 | 20 | **2** |
+| 47,973,150 | 15.3% | 3,240 | 1,189 | 80 |
+| 48,133,150 | 14.4% | 42 | 23 | **2** |
+| 48,143,150 | 12.5% | 15 | 7 | **1** |
+| 50,443,150 | 11.6% | 692 | 308 | 294 |
+| 48,383,150 | 10.7% | 4,410 | 1,875 | 257 |
+| 56,223,150 | 10.7% | 259 | 1,328 | 52 |
+| 62,993,150 | 10.2% | 2,907 | 1,306 | 1,034 |
+| 48,313,150 | 10.1% | 30 | 21 | **1** |
+
+**The worst bucket in the whole comparison — 64.7% — has 1,125 BONER/HIMS ticks and
+487 HIMS/USD ticks against TWO BONER/USDG ticks.** The two-median route is resting on
+1,600 trades; the one-median route is resting on two. **Where they disagree most, the
+bridge is the better-founded number**, and calling the direct route "the truth" would
+be backwards.
+
+**Five of the eleven have one or two direct ticks. This is the ETH/USD finding
+repeating exactly** — "every one of the five worst disagreements is a token-derived
+bucket resting on 2 or 3 USD ticks" — on a different pair of series, which is what
+makes it a property of thin buckets rather than of either derivation.
+
+**The remaining few are real.** 48,393,150 disagrees by 28% with 1,793 direct ticks
+and 4,509 bridge ticks; 62,993,150 by 10.2% with over a thousand on each side. **Those
+are two genuinely different markets moving apart inside one ~17-minute bucket**, which
+is the irreducible part and is exactly what the spread was measured to size.
+
+**The compounded error is therefore SMALL AND MEASURED, with the caveat that it is
+smallest where both sides are deep.** It does not license assuming it small on the next
+bridge: HIMS has a median of **28 HIMS/USD ticks per bucket**, and a bridge thinner
+than that could look very different.
+
+#### WHY THE SPREAD COULD NOT BE MEASURED AT THE STEP 7 STOP — kept, because the
+#### reasoning is what decided the order of work
 
 Step 4 requires it: *two bucketed medians multiplied compound their error — report the
 spread against direct token/USD trades in the same buckets rather than assuming it
