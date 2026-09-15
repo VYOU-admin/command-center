@@ -83,14 +83,24 @@ computed with the MEAN and is left as that run produced it**; every score in the
 tables is now the maximum. The definition, the measured effect on all six windows, and
 the check that no other metric has the same shape are in step 13.
 
-**BONER IS IN PROGRESS, STOPPED AT THE COHORT REVIEW 2026-09-15.** Steps 1–7 complete
-at **133,106 CU = $0.060** including HIMS; cohort **1,352 wallets** held in
-`token_intake_state` and **nothing written** — tags, rows, windows and scores all 0,
-verified on a fresh connection. **It is the SECOND BRIDGE EVER** (HIMS,
-`0xccee82fe…3d09`, a tokenised equity like NVDA) and **the first sweep since the
-batching fix — 3,202 rows/sec against CASHCAT's 1,248.** Two open items it surfaced are
-in section 9: nothing in the repository writes `tokens.role`, and the cohort phase
-spends without printing a work set.
+**BONER IS LOADED. Steps 1–17 complete, 2026-09-15**, at **184,896 CU = $0.083**
+including HIMS: **21,016 rows** over a **1,352-wallet** cohort, **99.10% of trade rows
+priced**, and **68 wallets on the watchlist**. **It is the SECOND BRIDGE EVER** — HIMS,
+`0xccee82fe…3d09`, a tokenised equity like NVDA — and the bridge carries **73.5% of its
+in-window swaps**, so it is the token that finally exercised the bridge-decimals fix
+step 4 named it for.
+
+**Three things it settled that nothing else could.** The batching fix measured at
+**3,202 rows/sec against CASHCAT's 1,248**. The compounded error of two bucketed
+medians multiplied, which step 4 has warned about since AI: **median 0.89% apart over
+1,489 buckets, 97.9% within 5%** — and where they disagree most, the BRIDGE is the
+better-founded side. And **metric 5 reaching 1.0 for the first time**, because n=1
+leaves no 1/n ceiling.
+
+**Both defects it surfaced are FIXED**: `role` is now an intake-config key, and the
+cohort phase derives, prints and enforces its work set before the first paid call.
+**One item stays open in section 9** — the v4 in-window convention rests on zero tested
+pairs, established only from 82 after-window ones.
 
 **Read the V3-ONLY subsection before loading CASHCAT.** CHUMP is the first token whose
 market is v3, and that subsection exists so the next one does not rediscover it.
@@ -6179,8 +6189,20 @@ routers is a market where almost every transaction touches BONER more than once.
 from the after-window region and nothing else**, and direction never depends on it —
 step 6 is a check and direction always comes from the transfer. **Raising the v4 sample
 cap for this token is the way to buy in-window evidence back**, and it was not done
-here because the cohort does not depend on it. **Anyone re-reading BONER's v4 amounts
-should see 82, from outside the window, rather than "unanimous".**
+here because the cohort does not depend on it.
+
+> **WHAT BONER'S v4 IN-WINDOW CONVENTION RESTS ON, stated so it cannot be missed:**
+>
+> - **800 of 800 sampled in-window pairs EXCLUDED as multi-swap. ZERO tested.**
+> - The convention is established **only from 82 after-window pairs**, outside the
+>   cohort window entirely.
+> - **The first cell on any token to exclude its entire sample.** CASHCAT's worst was
+>   89.8%.
+> - **The run was RIGHT not to raise** — step 6 raises only when a venue is established
+>   in no region at all, and v4 is established after-window.
+> - **A future reader must not read the run's totals as unanimity inside the window.**
+>   Every in-window v4 amount BONER stores is written on a convention that its own
+>   window never tested.
 
 #### THE COHORT: 1,352, AND IT RECONCILES TO THE CU EXACTLY
 
@@ -6398,6 +6420,129 @@ all three streams as the runner sweeps them         ~1,269 requests  ~76,100 CU 
 **NVDA is the precedent that says swaps alone suffice: it holds 2,742,472 swaps and
 ZERO transfers**, and its bridge series derives fine. **A bridge needs ticks, not
 attribution.**
+
+#### STEPS 8–17: 21,016 ROWS, AND THE BRIDGE CARRIES 73.5% OF THEM
+
+| phase | wall-clock | CU | |
+|---|---|---|---|
+| tags | 606 ms | 0 | 1,352 stored, 0 refreshed, 0 manual, 0 removed, window row written |
+| timestamps | 15.9 s | **0** | **12,499 needed, 12,499 stored, 0 to fetch** — a swept token pays nothing, third token running |
+| prices | 12.6 s | 0 | see below |
+| dry run | 11.6 s | 0 | reconciles: 10,712 + 10,304 = 21,016 |
+| **write** | **20.4 s** | 0 | **21,016 stored; price check `outside: 0`** |
+| scoring, ALL 7 windows + watchlist | ~14 s | 0 | database only |
+
+**PRICES, and the bridge derived cleanly on the first attempt:**
+
+```
+token/USD ticks    156,928   discarded by the 100x fence   1
+token/ETH ticks    105,673   discarded by the 100x fence   3
+derived native buckets 1,458  discarded by the 10x fence   0   <- the soundness signal
+boner_usd_prices    1,523 buckets, 41,753,150..63,253,150
+native_usd_prices   1,458 derived and NOT written -- BONER does not own the series
+BRIDGE (HIMS)       buckets_with_ticks 1,983   priced 1,983   fence discards 0   inserted 1,983
+```
+
+**TWO BRIDGES NOW COEXIST AND THEY DO NOT COLLIDE — verified from the data rather than
+argued.** `bridge_usd_prices` holds:
+
+| bridge | buckets | span | residue |
+|---|---|---|---|
+| HIMS | 1,983 | 41,733,150–63,253,150 | **3150** (BONER's grid) |
+| NVDA | 4,474 | 18,281,433–63,261,433 | **1433** (AI's grid) |
+
+The table is keyed `(chain, bridge, bucket_block)`, so **two BRIDGES on different grids
+are different rows.** What section 9 warns about is one BRIDGE priced by two tokens on
+different anchors, and BONER is the only token naming HIMS. **The hazard is still open
+for the third bridge; it simply did not fire here.**
+
+**THE WRITE'S PRICE CHECK PASSED AT ITS TIGHTEST MARGIN YET.** `outside: 0` over 9,011
+comparable rows, 1,605 not comparable — but **`worstRatio` 9.38 against a 10x fence**,
+where CHUMP measured 6.58 and CASHCAT 6.54. It passed; it passed by less than any token
+before it, and a token quoted through a bridge is where that would be expected.
+
+**THE NULL BREAKDOWN, by reason:**
+
+| reason | rows |
+|---|---|
+| transfer rows — null by construction | 10,304 |
+| **trade rows genuinely unpriced** | **96** |
+| | 10,400 |
+
+**10,616 of 10,712 trade rows priced — 99.10%.** Quote the trade share, not the row
+share: the raw 49.5% null is transfers, which never carry a USD.
+
+#### SCORES: THE TOP WALLET IS AN UNDER-MEASURED ONE, AND METRIC 5 FINALLY REACHES 1.0
+
+```
+cohort 1,352   scored 1,349   3 unscored (every metric null, score NULL)
+min 0.0823  p25 0.1314  median 0.1687  p75 0.2096  p90 0.2596  p99 0.3888  max 0.8054
+weight_used   1,333 at 1.000     16 at 0.300     3 at 0
+flags         low-weight 16   inflated-pnl 8     threshold 0.8, NOT derivable
+```
+
+**The maximum, 0.8054, rests on 30% of the weight and is flagged `low-weight`** — the
+same shape AI's top two had. **A token's highest score being an under-measured wallet is
+a property of min-max normalisation, not a finding about the wallet**, and the flag is
+what keeps it readable.
+
+**METRIC 5 REACHES 1.0 FOR THE FIRST TIME ON ANY TOKEN, and n=1 is why.**
+
+```
+n 1,352   null 19   zero 785 (58.1%)   min 0   max 1.0   mean 0.2976   p50 0   p90 1.0
+at exactly 1.0    293  (21.7%)
+strictly between  255  (18.9%)
+```
+
+**With ONE pump there is no 1/n ceiling to hit** — the prediction recorded in
+`intake/boner.yaml` before the run, now measured. Every earlier token's maximum sat on
+1/n under the old mean: PONS 1/3, CHUMP 1/2, CASHCAT 1/3. **BONER is the first token
+whose metric 5 uses its full range**, and it separates: 58% at zero, 22% at the
+ceiling, 19% spread across the middle. **The 5% weight is not wasted here.**
+
+#### THE WATCHLIST: +68 MEMBERSHIPS, 0 REMOVED
+
+```
+memberships   1,388 -> 1,456   (+68, exactly BONER's slot count)
+wallets       1,282 -> 1,341   (+59)
+entering 68   leaving 0        wallets entering 59   wallets leaving 0
+BONER-P1      cohort 1,352  slots 68  admitted 68  cutoff 0.260269  max 0.805443
+wallets on 2+ tokens   77 -> 82
+```
+
+**Nothing was displaced.** Slots are fixed per window by cohort size, so adding a
+seventh window ADDS its slots rather than competing for existing ones — and the
+re-scoring of the other six moved no membership at all. **9 of BONER's 68 were already
+on the list through another token**: AI-P1 4, PONS-P1 3, CASHCAT-P1 2, INDEX-P1 2,
+INDEX-P2 2. **59 are new faces.**
+
+#### THE MONITOR FAILED AT BOOT AND THAT WAS THE GUARD, NOT A DEFECT
+
+`monitors/boner-updates.yaml` was deployed BEFORE the write phase, as step 15 requires —
+so the scheduler booted it at **02:06:33**, while `wallet_tags` still held nothing for
+BONER, and it raised:
+
+> `no wallets carry any of the tags BONER-P1 ... A cohort filter matching nothing would
+> make every run report zero rows.`
+
+**That is the filter-matched-nothing rule doing exactly what it exists for.** One
+failure, no alert — `discord_on_consecutive_failures: 3` — and `last_status` is now
+`success` with `consecutive_failures: 0`. **The ordering is unavoidable**: the write
+phase refuses to run without a monitor file, and a monitor file boots before the tags
+exist. **Expect one failed cycle on every future token, and do not read it as a
+defect.**
+
+**The first real run proves the bridge carries forward**, which is the failure mode AI
+demonstrated at 5,033 null rows across 672 successful cycles:
+
+```
+slice 63,261,365..63,293,149   31,785 blocks   550 CU   2.7 s
+bridges  HIMS  swaps_read 234   buckets_priced 3   ticks_discarded 0   inserted 3
+rows_built 15   trade_rows 13   transfer_rows 2   null_usd_rows 0
+```
+
+**`null_usd_rows: 0` on a token whose market is 73.5% bridge-quoted** is the whole
+point of `bridge_assets` being in the monitor as well as the intake.
 
 ---
 
