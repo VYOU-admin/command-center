@@ -1,0 +1,153 @@
+# BONER — THE SECOND TOKEN EVER TO NEED A BRIDGE, and the first since the
+# bridge-decimals defect was fixed.
+#
+# Step 4 names this token by name: the `?? 18` default on a bridge's decimals
+# "was dormant only because AI is the only token with a bridge and NVDA's
+# `tokens` row exists. BONER is queued and needs a HIMS bridge, so it stops being
+# dormant on the next intake." This is that intake.
+#
+# THREE THINGS FOLLOW AND NONE IS OPTIONAL:
+#
+#   1. HIMS NEEDS ITS OWN IDENTITY RUN BEFORE THE PRICES PHASE. A bridge gets its
+#      `tokens` row from a separate identity run and nothing in the prices phase
+#      checks that it happened. With the fix in place a missing row STOPS the job
+#      rather than scaling every bridge amount by 10^12.
+#   2. HIMS IS RESOLVED BY ADDRESS, NEVER BY SYMBOL. Two tokens on this chain
+#      answer symbol() with "NVDA". BONER's own address ends `1E18`, the same
+#      vanity suffix that crowd of junk counters shares -- a reason to match on
+#      the address, not a signal about the token.
+#   3. `bridge_usd_prices` IS KEYED (chain, bridge, bucket_block) WITH NO ROOM
+#      FOR TWO GRIDS. Checked before this file was written: the table holds one
+#      bridge, NVDA, and `bridge_assets` appears in exactly two files, both
+#      naming NVDA. HIMS will be priced by BONER alone, so the two-grid hazard
+#      section 9 records does not fire. It fires the moment a third token wants
+#      HIMS.
+#
+# AND THE BRIDGE IS A DECISION, NOT A FOREGONE CONCLUSION. Unlike AI -- whose
+# charted NVDA pair carried 56% of its swaps and whose hop was worth 4.4x its
+# cohort -- BONER already has live USDG, WETH and native-ETH pools: the watcher
+# has 128 rows for it and 69 of them price with no bridge at all. The hop is
+# justified by SWAP SHARE at step 4, measured from the sweep, not by the pair
+# name on the chart.
+
+chain: robinhood
+ticker: BONER
+# Checksummed exactly as supplied and as the chain returns it. Lowercasing here
+# would match no cohort, since wallet_tags.mint stores this string.
+token: "0x98096d17e191B3dA1d5f99a6D7b3584351b11E18"
+# A 32-BYTE v4 POOL ID, not an address -- a v4 pool has no contract of its own.
+# Recorded, NEVER used as a filter: collecting only the charted pair silently
+# drops every wallet an aggregator routed elsewhere.
+charted_pair: "0x9c89b04303dfa76f3f6fb02c2b77be0e8a00ab8fa00d507119acd54ab3e8640d"
+
+# 00:00 and 12:00 Eastern are 04:00Z and 16:00Z in August. Both bounds carry
+# their offset: a bare local time is a different moment depending on who reads
+# it, and the runner rejects one without an offset rather than guessing.
+windows:
+  - label: BONER-P1
+    start: "2026-08-20T00:00:00-04:00"
+    end:   "2026-08-30T12:00:00-04:00"
+
+# ONE PUMP, AND IT IS THE WINDOW END -- the same shape as CHUMP's pump 1 and
+# CASHCAT's. A cohort member can only have bought before a pump it could
+# physically precede, and here there is exactly one such pump, so metric 5's
+# ceiling is 1/1 = 1.0 and the 1/n_pumps effect that misled three tokens cannot
+# arise. Recorded as a prediction to be measured at step 13, not assumed.
+pump_points:
+  - "2026-08-30T12:00:00-04:00"
+
+rpc:
+  url_template: "https://robinhood-mainnet.g.alchemy.com/v2/{key}"
+  key_var: ALCHEMY_API_KEY
+  request_timeout_ms: 120000
+  max_log_span_blocks: 100000
+  sparse_log_span_blocks: 40000000
+  min_log_span_blocks: 25
+  target_logs_per_request: 6000
+
+routers:
+  min_recipients: 50
+  min_swap_share: 0.5
+
+venues:
+  v3_factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+  v4_pool_manager: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+
+pricing:
+  assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"   # WETH, 18 decimals
+    - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"   # USDG,  6 decimals
+    - "0x0000000000000000000000000000000000000000"   # native ETH, 18
+  usd_asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+  native_assets:
+    - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+    - "0x0000000000000000000000000000000000000000"
+
+  # NO `bridge_assets` KEY YET, DELIBERATELY.
+  #
+  # The bridge is decided at step 4 from the measured swap share, and HIMS's
+  # address is read from the charted pool's `Initialize` currencies rather than
+  # asserted here. Writing an address into this file before the chain has been
+  # asked would be exactly the "value asserted rather than read" that section 2
+  # forbids. The key is added, with the address the chain returned, once step 4
+  # has decided the hop is worth taking -- and the write phase's gate compares
+  # this file against the monitor, so both move together.
+
+  # READS the chain's ETH/USD series, never writes it. token-updates (PONS) owns
+  # it. Step 10's one-owner rule; the intake honours the key since 2026-09-13.
+  derives_native_usd: false
+
+  bucket_blocks: 10000
+  # THE EXISTING RESIDUE-3150 GRID that PONS, INDEX, CHUMP and CASHCAT read.
+  # Step 10 prefers an existing grid over a new one wherever the token shares a
+  # series. BONER's window sits around blocks 42M-51M, comfortably inside the
+  # span that grid already covers, so this adds no third residue.
+  #
+  # IT ALSO FIXES THE GRID HIMS'S BRIDGE SERIES LANDS ON, because
+  # deriveBridgeUsd is called with the config of the token being priced. NVDA's
+  # series sits on AI's residue-1433 grid; HIMS's will sit on 3150. Different
+  # bridges, different rows, and the key includes the bridge -- so they cannot
+  # interleave. What WOULD interleave is a second token pricing through HIMS on
+  # another anchor, which is why that is checked rather than assumed.
+  bucket_origin: 8963150
+  tick_fence_multiple: 100
+  native_fence_multiple: 10
+
+floors:
+  token_raw_units: 1
+  paid_raw_units: 1
+  token_amount: 0.001
+  usd: 0.01
+
+tables:
+  token_usd: boner_usd_prices
+  native_usd: native_usd_prices
+
+# CEILINGS, each sized before the phase runs rather than copied.
+#
+# sweep: BONER's deployment block is not known until identity runs, so this is
+# sized from the WINDOW's neighbourhood instead. If it deployed near its window
+# it has ~20M blocks of life to head; at the 100,000-block cap that is ~200
+# requests per stream. The v4 stream multiplies by the chunk count (500 pool ids
+# per request), which CASHCAT's 583 in-scope v4 pools turned into 2 chunks and a
+# doubled request count -- so this is sized for several chunks rather than one.
+# 600,000 CU is loose enough to absorb that and tight enough to catch a span
+# collapse. Revised in this file if identity puts the deployment far earlier.
+#
+# cohort: CHUMP spent 28,690 CU on 642 candidates, CASHCAT 101,424 on 2,352.
+# 400,000 allows roughly 9,300 candidates at the measured ~43 CU each. The work
+# set is derived and reported BEFORE the phase runs, so this is a backstop and
+# not the estimate.
+ceilings:
+  identity: 2000
+  windows: 5000
+  pools: 100000
+  scope: 50000
+  sweep: 600000
+  conventions: 50000
+  cohort: 400000
+  tags: 0
+  timestamps: 500000
+  prices: 0
+  dryrun: 0
+  write: 0
