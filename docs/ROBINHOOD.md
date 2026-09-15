@@ -3577,6 +3577,81 @@ without anyone running the backfill again and the weekly re-reads drain a few pe
 response is inspected individually and a token that errors is recorded as
 attempted-and-unresolved rather than skipped silently.
 
+#### BUILT AND MEASURED 2026-09-15 — the supply read, and the first two-alert run
+
+**THE SUPPLY READ LANDED EXACTLY ON ITS ESTIMATE, and every token answered.**
+
+```
+work set                    1,227   never read 1,227   stale 0   already fresh 0
+estimated                  31,902 CU  $0.0144     ceiling 38,283 (1.2x, set from the work set)
+spent                      31,902 CU  $0.0144     0.0% against estimate
+resolved                    1,227     unresolved 0   empty return 0   errored 0
+wall clock                   23.1 s
+read back from the table    total 1,227  with_supply 1,227  attempted_no_supply 0  never 0
+```
+
+**1,227 of 1,227 is the strongest possible answer to "is `totalSupply()` readable",
+and the 2026-09-14 measurement predicted it correctly from a proxy** — every one of
+those tokens had already answered `decimals()`, the same ERC-20 call shape, and the
+prediction was recorded as evidence rather than proof. It held. **The zero unresolved
+count is reported rather than omitted**, because it is the figure that says the `0x`
+path was never exercised: the null-supply branch of the alert is untested against real
+data and will stay so until a token declines to answer.
+
+**The estimate landed at 0.0% because the unit of work is exactly one call per token**
+— unlike a sweep, where density decides the request count and this document records
+three estimates wrong by 16x, 27% and 2.0x. **Quote a per-token job from the token
+count and it is not an estimate at all**, which is the same thing step 7 says about
+quoting a cohort from its candidate count.
+
+**THE FIRST RUN CARRYING BOTH ALERTS**, slice 63,223,150–63,233,149:
+
+```
+existing alert   107 trades, 49 tokens, 38 wallets   2,405 characters   0 dropped by the guard
+market-cap alert  62 buy rows, 26 tokens, 25 wallets  2,298 characters   0 dropped
+  qualifying at $200,000      3      <- Analyst $115.2k, PEG $118.6k, Carbonoid $8.0k
+  qualifying at $150,000      3      <- MEASURED ALONGSIDE, reported, never rendered
+  above the threshold        16
+  no supply                   0      <- the backfill had covered every token
+  no price                    7
+incremental supply read     6 tokens, 6 resolved, 156 CU   (1,227 fresh, 0 stale)
+```
+
+**THE FILTER SURFACED A TOKEN THE UNFILTERED ALERT BURIED, which is the whole case for
+building it.** `Carbonoid` — 1 wallet, $123, an $8.0k market cap — sits in the
+market-cap alert's top three and is **not in the existing alert's twelve**, because
+that alert orders by buying wallets then USD and Carbonoid fell into its 37 omitted.
+The two alerts are looking at the same 107 trades and disagreeing about what matters,
+which is what a second question is for.
+
+**$200,000 and $150,000 selected the SAME THREE TOKENS on this slice**, so the first
+run gives no evidence for moving the cut. That is a result and it is recorded as one —
+the comparison runs on every cycle, and the figure to watch is the first slice where
+the two counts differ.
+
+**Both alerts fitted well inside the guard** — 2,405 and 2,298 against a 3,600
+margin — so the drop path did not run. It remains untested against real data on the
+new alert for the same reason the null-supply branch is: nothing has been big enough.
+
+#### A DEPLOY FAILED TO BOOT ON THE OPTION ALLOW-LIST, AND THAT IS THE GUARD WORKING
+
+The first deploy of this change **failed**: the monitor YAML gained four options and
+`watchlist-watch`'s `validate` refused them — `unexpected option(s)
+max_market_cap_usd, compare_market_cap_usd, supply_ttl_days, supply_reads_per_run` —
+so the container would not start.
+
+**This is the behaviour to want, and the reason is in step 15.** `bridge_assets` was
+accepted by the config parser and read by nobody, silently doing nothing for **80% of
+AI's volume**. An option the adapter does not know is almost always a typo, and a
+threshold that silently does not apply is worse than a refusal. **The previous
+container kept serving throughout** — Railway does not replace a deployment that fails
+to boot — so no alert was missed and nothing was half-configured.
+
+**The deployment list is what found it, not waiting.** Five minutes of marker polling
+showed the old SHA; section 4's rule says to check the list at ~3x rather than wait,
+and the list said `FAILED` immediately. **A build that is failing and a build that is
+slow look identical from inside the container.**
+
 #### Ordering: buying wallets first, USD second
 
 **Tokens are ordered by DISTINCT BUYING WALLETS descending, then total USD bought.** It
