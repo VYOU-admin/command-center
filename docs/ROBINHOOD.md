@@ -5905,6 +5905,100 @@ over the first ninth of the window across a twentieth of the pools, and the spli
 above carries that limit with it. **The sweep replaces it; nothing is quoted from the
 free query as final.**
 
+#### HIMS AS A PRICING SOURCE: 131 in-scope pools, and a SECOND token answers "HIMS"
+
+`intake/hims.yaml`, modelled on `intake/nvda.yaml`, run before BONER's scope so the
+bridge's `tokens` row exists before anything prices through it.
+
+| phase | wall-clock | CU | |
+|---|---|---|---|
+| identity | 692 ms | **816** | the constant holds for a **SEVENTH** token |
+| windows | 978 ms | 1,100 | 55 `eth_getBlockByNumber` |
+| pools | 1,925 ms | 480 | 669 candidates — 660 v4, 9 v3 |
+| scope | 1,777 ms | 2,194 | 84 `eth_call`; **131 in scope, 538 rejected** |
+
+```
+HIMS in-scope pools        USDG 108 v4 + 2 v3 = 110
+                           native ETH 13 v4
+                           WETH  6 v4 + 2 v3 = 8      total 131
+deployment block           20,950,062     -- 20.8M blocks BEFORE BONER
+supply                     110,184.084    -- a tokenised equity, like NVDA
+```
+
+**A SECOND TOKEN ANSWERS `symbol()` WITH "HIMS", AND I SAID THERE WAS ONLY ONE.** The
+check above was made against `token_decimals_cache`, which holds only what the watcher
+has happened to touch, and it found one. **HIMS's own scope phase — which reads
+`symbol()` from each counter contract — found `0xdaab75e5bdc200180f72ae3c531fd560f5377c01`
+answering "HIMS" with one pool.** The NVDA situation exactly, on the very next bridge.
+
+**The correction matters less than what it says about the check.** A cache is a record
+of what was asked, not of what exists, and "exactly one token answers X" is only ever
+true of the set that was read. **The address is what made this harmless**: everything
+keyed on `0xccee82fe…3d09` from the charted pool's `Initialize`, so the impostor was
+never a candidate. It has **0 pools with the real HIMS** — the pool that surfaced it
+pairs HIMS with the impostor.
+
+**NVDA appears as a HIMS counter with 5 pools and is correctly classified
+`no-usd-reference`** — the recursive scope rule holding by itself. A bridge's series
+may come only from pools pairing it with a RECOGNISED pricing asset, and pricing HIMS
+through NVDA would price one bridge against another.
+
+#### BONER SCOPE: 241 in scope, and the bridge is what buys 84.5% of the market
+
+**2,766 CU, 241 of 388 in scope, 147 rejected.** Routers `probed: 0` — correct and
+expected, because scope runs before the sweep and there are no transfers to probe.
+**It is not evidence BONER has no routers** and detection is re-run after the sweep.
+
+| counter | venue | in-scope pools |
+|---|---|---|
+| USDG | v4 155 + v3 1 | 156 |
+| native ETH | v4 | 80 |
+| **HIMS** | v4 | **3** |
+| WETH | v3 | 2 |
+| | | **241** |
+
+**Those three HIMS pools are the entire point of the bridge.** Without `bridge_assets`
+they are out of scope and produce **no rows at all** — not null-priced rows — and with
+84.5% of the swaps that is the token's market discarded. It is the AI/NVDA case again
+at a different ratio: AI's hop was worth 4.4x its cohort on 56% of swaps.
+
+#### DENSITY: 142x SPREAD, THE WIDEST RECORDED HERE
+
+Probed from the DEPLOYMENT BLOCK across the range actually to be swept — five samples,
+11 requests, **960 CU / $0.00043**, 0 refusals of either kind:
+
+| range | blocks | logs | logs/block |
+|---|---|---|---|
+| 41,726,520–41,926,520 (deployment) | 200,001 | 16,784 | 0.0839 |
+| 45,000,000–45,100,000 | 100,001 | **56** | **0.0006** — the floor |
+| 50,000,000–50,100,000 | 100,001 | 1,707 | 0.0171 |
+| 56,000,000–56,100,000 | 100,001 | 8,536 | **0.0854** — the peak |
+| 63,100,000–63,200,000 (near head) | 100,001 | 3,877 | 0.0388 |
+
+**142.3x between the sparsest and densest sample**, against CHUMP's 91x, CASHCAT's 58x
+and AI's 16x. **The peak is at 56M — fourteen million blocks after the window closed
+and seven million before head** — and the floor at 45M sits *inside* the token's
+post-window life. **A density taken from the window would have been 1.8x too generous;
+one taken from the sparsest point, 142x too tight.**
+
+**Sizing the sweep from the blocks actually to be read**, 41,726,520 → 63,255,841 =
+21,529,321 blocks:
+
+```
+at the densest 0.0854   natural span  70,258   -> 306 requests per stream
+at the mean    0.0452   natural span 132,861   -> capped at 100,000 -> 215 per stream
+three streams (transfer, swap-v3, swap-v4 x 1 chunk of 500 for 238 pools)
+                                   ~645-918 requests x 60 CU = ~39,000-55,000 CU
+ceiling in config                   600,000    -- a backstop, not the estimate
+```
+
+**THE DEPLOYMENT-BLOCK FIX SAVES MORE HERE THAN ON ANY TOKEN YET.** BONER deployed at
+41,726,520, so a sweep from block 0 would have paid
+`ceil(41,726,520 / 100,000) = 418` wasted requests per stream-pass across three
+streams — **1,254 requests, 75,240 CU, $0.034** — against CHUMP's 42,660 and CASHCAT's
+240. **The waste scales with how LATE a token launched**, and BONER is the latest
+loaded here, which is the rule's own prediction confirmed at a third point.
+
 ---
 
 ## 9. Rules here the code does not implement
