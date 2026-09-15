@@ -3869,6 +3869,80 @@ silence from a dead monitor.
 the shared `fitBody` in `alert-format.ts` — one implementation, as with every other
 shared rule here. **The footer states the true omitted count**, never cap arithmetic.
 
+##### MEASURED 2026-09-15: WHAT THIS ALERT WOULD HAVE SURFACED, AND IT IS NOT ZERO
+
+**The measurement that says whether this alert will ever fire was run before the alert
+was, over the `watchlist_activity` already stored, and the answer is 199.**
+
+```
+lookback                      24 hours       window 60 min = 35,622 blocks
+tokens with a buy row            698
+  deployed INSIDE the window     199   <- 28.5%
+  proven older than the window   499
+  age unresolved                   0   <- failed 0, bisect-capped 0, anomalous 0
+distinct wallets                 154
+buy rows                       1,134
+USD bought                  $80,088.08
+```
+
+**199 + 499 = 698 EXACTLY, and 0 unresolved is stated rather than omitted** — it is the
+figure that says the unknown-age branch was never exercised and remains untested
+against real data, the same way the null-supply branch still is.
+
+| token | wallets | buys | minutes after deployment | USD |
+|---|---|---|---|---|
+| IPO | 18 | 52 | **0.9** | $4,953 |
+| JUDE | 16 | 45 | 5.7 | $312 |
+| SCALPERS | 12 | 29 | **0.3** | unpriced |
+| HUMANITY | 11 | 75 | **0.2** | $363 |
+| GOLDGOOSE | 10 | 34 | 0.7 | $0.30 |
+| NEOPETS | 9 | 17 | 4.5 | $107 |
+
+**EIGHTEEN WATCHLIST WALLETS BOUGHT `IPO` WITHIN 54 SECONDS OF ITS DEPLOYMENT.** That
+is the event this alert exists to carry, and the market-cap filter had no way to
+express it. It is also the clearest possible answer to the question the measurement
+was for: **this will fire on most runs, not rarely.** 199 tokens over 48 runs is ~4 a
+run.
+
+**THE ANCHOR IS EACH TOKEN'S FIRST BUY, AND THE LIVE ALERT'S IS THE HEAD — a
+difference worth stating rather than glossing.** The measurement asks "was this bought
+within an hour of its deployment", anchoring at the token's earliest buy. The live
+alert asks "was this deployed within the hour ending now". They agree on the
+interesting case and diverge at the edge: a token deployed 50 minutes ago and bought
+now appears in both, while one first bought 70 minutes after deploying appears in
+neither. The measurement is therefore an estimate of the alert's rate, not a replay of
+it.
+
+**THE ESTIMATE WAS WRONG ON THE TERM THAT COULD NOT BE KNOWN IN ADVANCE, AND BY HOW
+MUCH IS RECORDED RATHER THAN SMOOTHED.**
+
+```
+estimated base   18,148 CU   (698 tokens x 26, the one call each)
+spent           105,640 CU   $0.04754   +482.1% against the base
+  eth_getCode     3,910 calls      eth_getBlockByNumber   199 calls
+wall clock         97.4 s
+```
+
+**The base term landed exactly and the BISECT term is the whole of the miss.** 199
+launches x 436 CU = 86,764, plus the 18,148 base, is 104,912 against 105,640 spent —
+the remainder is the upper-end verification on each positive. **This is the fourth
+estimate in this document to be wrong because DENSITY decided the request count**, and
+it is the same lesson as the three sweeps: a per-token job quotes exactly, a job whose
+per-token work depends on what it finds does not. **The worst case WAS quoted** —
+340,624 CU, every token a launch — so the ceiling held and the job never approached it.
+
+**The per-run figure is revised from this measurement, upward, and stated plainly:**
+
+| | earlier estimate | revised from the 28.5% measured |
+|---|---|---|
+| base, 9.1 novel tokens/run | 237 CU | 237 CU |
+| bisect, 2.6 launches/run | not estimated | ~1,133 CU |
+| **per run** | **237 CU** | **~1,370 CU** |
+| **per month** | **$0.15** | **~$0.89** |
+
+**It still does not exceed what the existing alert spends**, and that comparison is
+now measured rather than argued — see the run below.
+
 #### A DEPLOY FAILED TO BOOT ON THE OPTION ALLOW-LIST, AND THAT IS THE GUARD WORKING
 
 The first deploy of this change **failed**: the monitor YAML gained four options and
