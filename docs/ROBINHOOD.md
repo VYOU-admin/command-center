@@ -396,6 +396,25 @@ end to end. Phases filled in as the run proceeds:
 | scoring, ALL 6 windows + watchlist | **13.7 s** | 0 | database only |
 | | **total 327,660 CU** | | **$0.147** |
 
+BONER, the SECOND BRIDGE EVER and the first sweep after the batching fix. Steps 1–7
+only; the run stops at the cohort review.
+
+| phase | BONER wall-clock | CU | against estimate |
+|---|---|---|---|
+| identity | **805 ms** | 816 | ~800 — exact, the **sixth** token at 816 |
+| windows | **470 ms** | 560 | ~1,040 — **46% under**, the start instant clamped to the deployment block |
+| pools | **990 ms** | 240 | ~500 — **52% under**, 4 sparse `eth_getLogs` for 388 candidates |
+| scope, first run | **~2 s** | 2,766 | 106 `eth_call`; routers probed 0, as expected before the sweep |
+| density probe | ~20 s | 960 | 5 samples from the deployment block, 11 requests, **142x spread** |
+| **sweep** | **10.45 min** | **55,450** | 645–918 requests estimated, **924 actual** — 0.7% above the top |
+| scope, RE-RUN after the sweep | **11.5 s** | 2,974 | + 8 `eth_getCode`; routers **8 probed / 8 identified** |
+| conventions | **2.5 s** | 0 | v4 in-window **800 of 800 excluded, 0 tested** — see below |
+| **cohort** | **59.7 s** | **64,750** | **no work set was printed before spending** — section 9 |
+| | **total 127,556 CU** | | **$0.057**, plus HIMS 4,590 and the probe 960 |
+
+**HIMS as a pricing source cost 4,590 CU**: identity 816, windows 1,100, pools 480,
+scope 2,194. **The whole intake to the cohort stop is 133,106 CU = $0.060.**
+
 **`timestamps` took 50.8 s to fetch NOTHING, and that is the materialised work-set
 query rather than a defect.** It resolves the blocks the rows will need across 4.38M
 swaps and 10.6M transfers; the answer was **55,076 needed, 55,076 already stored,
@@ -6047,9 +6066,172 @@ which CHUMP demonstrated with eight empty polls followed by 412,997. **The log f
 `ps` are the progress signals through the runner; the progress table is not**, and
 knowing that is what kept this from being escalated at the 3x mark.
 
+#### THE VENUE SPLIT FROM THE SWEEP, and it differs in-window from over the life
+
+**Both figures matter and quoting one would mislead** — the rule CASHCAT established:
+
+| | v3 | v4 | |
+|---|---|---|---|
+| **full life** | 66,764 — 14.6% | 391,009 — **85.4%** | 171 v4 pools traded, 2 v3 |
+| **inside BONER-P1** | **0 — RETURNED NO ROWS** | 73,845 — **100%** | 63 v4 pools traded |
+
+**BONER-P1 is entirely v4. Its v3 market did not exist yet inside the window** — both
+v3 pools are WETH pools that traded only after it closed. The cohort therefore comes
+from v4 alone, while cost basis and realised PnL over the full life take 14.6% from v3.
+
+**The counter split, in-window, from the sweep:**
+
+| counter | swaps | share | pools traded |
+|---|---|---|---|
+| **HIMS** | **54,270** | **73.5%** | 1 |
+| USDG | 11,950 | 16.2% | 49 |
+| native ETH | 7,625 | 10.3% | 13 |
+
+**The free `v4_swaps_all` query said 84.5% and the sweep says 73.5%** — the right ORDER
+and an 11-point overstatement, on a 6.1x undercount of the raw number (8,874 against
+54,270). **Treated as a lower bound it was useful; quoted as the split it would have
+been wrong**, which is what the rule asks for.
+
+**Over the full life HIMS is only 41.7%** — 190,918 of 457,773 — against USDG's 34.8%
+and WETH's 14.6%. **The bridge matters far more to the cohort than to the accounting**,
+and a single "BONER is a HIMS token" would be wrong for half the work.
+
+**68 in-scope pools never traded at all**, reported rather than omitted: a pool in
+scope with no swaps is a real result and is why "pools in scope" is the wrong
+denominator for a venue split.
+
+#### ROUTERS: 8 PROBED, 8 IDENTIFIED — the first token with no distributor at all
+
+**11.5 s, 2,974 CU** on the re-run after the sweep, against `probed: 0` before it.
+
+| address | recipients | sends | in a swap tx | verdict |
+|---|---|---|---|---|
+| `0xb92fe925…` | 5,799 | 18,761 | 64.2% | router — **in the config list** |
+| `0x39b38686…` | 216 | 9,001 | 80.7% | router — new |
+| `0xe492912f…` | 141 | 341 | **100.0%** | router — new |
+| `0xb300000b…` | 87 | 406 | 94.3% | router — new |
+| `0xb477751b…` | 87 | 602 | 58.5% | router — new |
+| `0x8f10b468…` | 69 | 11,233 | 65.1% | router — new |
+| `0x6e2a35a7…`, `0x542298e7…` | | | | routers — new |
+
+**Every candidate cleared the bar: 58.5%–100.0%, nothing at 0.0%.** PONS found 39 of
+72, INDEX 19 of 40, CHUMP 3 of 4, CASHCAT 6 of 7 — **BONER is the first token where the
+discriminator rejected nobody**, so it separated nothing here. That is not the rule
+failing; it is a token whose two-way addresses happen to all be routers. **Seven of the
+eight are absent from `config/infrastructure.yaml`**, and `0xb01ca24b…` matched nothing
+and is reported as unused.
+
+#### CONVENTIONS: THE v4 IN-WINDOW SAMPLE WAS 100% EXCLUDED, AND NOTHING RAISED
+
+| venue | region | in region | sampled | **excluded** | tested | agreeing | convention |
+|---|---|---|---|---|---|---|---|
+| v3 | in-window | **0** | — | — | — | — | **RETURNED NO ROWS** |
+| **v4** | **in-window** | **73,845** | **800** | **800** | **0** | — | **undetermined** |
+| v3 | after-window | 66,764 | 800 | 250 | 550 | **550** | pool |
+| v4 | after-window | 317,164 | 800 | 699 | **82** | **82** | swapper |
+| both | before-window | **0** | — | — | — | — | **RETURNED NO ROWS**, by construction |
+
+**THE RUN DID NOT RAISE AND THAT IS CORRECT, BY THE RULE THE DOCUMENT ALREADY
+SEPARATES.** Step 6 distinguishes a sample that never REACHED a venue — the defect,
+which raises — from one that reached it where every swap was ambiguous, which is a
+property of the data and raises only if the venue is established in **no region at
+all**. v4 is established after-window at 82 of 82. So the guard behaved exactly as
+specified.
+
+**What it means is still uncomfortable and must be said plainly: BONER's v4 convention
+INSIDE ITS COHORT WINDOW rests on ZERO tested pairs.** Every one of the 800 sampled
+in-window v4 swaps sits in a transaction carrying more than one BONER swap. CASHCAT's
+worst cell was 89.8% excluded; **this is 100.0%**, and it is the first cell on any token
+to exclude its entire sample.
+
+**The cause is visible in the same run: 8 routers, none rejected, and 54,270 of the
+window's 73,845 swaps on ONE HIMS pool.** A market that is one deep pool plus eight
+routers is a market where almost every transaction touches BONER more than once.
+
+**The honest reading of the verdict:** the v4 swapper convention holds on **82 pairs
+from the after-window region and nothing else**, and direction never depends on it —
+step 6 is a check and direction always comes from the transfer. **Raising the v4 sample
+cap for this token is the way to buy in-window evidence back**, and it was not done
+here because the cohort does not depend on it. **Anyone re-reading BONER's v4 amounts
+should see 82, from outside the window, rather than "unanimous".**
+
+#### THE COHORT: 1,352, AND IT RECONCILES TO THE CU EXACTLY
+
+**59.7 s, 64,750 CU.**
+
+```
+raw buyers in window                  8,931
+  excluded as infrastructure         14,703   <- the 8 routers paying off
+  excluded as round-trippers         32,640
+  excluded as pools                       0
+candidate wallets for payment         1,471
+  proven free from token_payment_logs     0   <- REPORTED; the table ends at 56,693,145
+  proven over RPC                     1,445
+  no payment in any transaction          26     1,471 = 1,445 + 26
+code-checked at the window's END block 1,445
+  excluded as deployed contracts         93
+  EIP-7702 delegated accounts KEPT       95
+COHORT                                1,352     1,445 - 93 = 1,352
+unused exclusions                     0xb01ca24b... matched nothing -- reported
+```
+
+**The CU decomposes exactly, with no residual:**
+
+```
+payment  1,493 transactions x 15 CU = 22,395
+       +   319 receipts      x 15 CU =  4,785   = 27,180  <- reported paymentCu
+getCode  1,445 survivors     x 26 CU = 37,570
+                                       -------
+                                        64,750  <- the phase's cu_spent, exactly
+```
+
+**319 of 1,493 transactions needed a receipt — 21.4% — against 14% on PONS and 13.9% on
+CASHCAT.** That is the first material departure from a constant this document had twice
+called worth trusting. **More of BONER's buyers paid in an ERC-20 rather than native
+ETH**, which fits a token whose market is a HIMS pair rather than an ETH pair: paying in
+HIMS is an ERC-20 leg, and the cheap native test cannot answer it. **The constant is a
+property of how a token is QUOTED, not of the chain**, and this is the counter-example
+that shows it.
+
+**95 EIP-7702 delegated accounts kept, 7.0% of the cohort**, against CASHCAT's 7.1%,
+AI's 9.0% and CHUMP's 5.5%.
+
+**`token_payment_logs` proved 0 of 1,471, and the zero is STRUCTURAL rather than
+merely expected**, as it was on CASHCAT for the opposite reason: that table covers
+15,115,287–56,693,145 and BONER-P1 runs 41,726,520–50,134,751, so the overlap is real
+— but the table stopped growing when the hourly job was paused and holds only wallets
+that paid into a *PONS* pool. A BONER buyer appears only if they also bought PONS.
+
 ---
 
 ## 9. Rules here the code does not implement
+
+- **OPEN, found on BONER 2026-09-15: THE COHORT PHASE SPENDS WITHOUT PRINTING A WORK
+  SET.** Its log goes straight from `phase starting` to `phase finished` having spent
+  **64,750 CU**, and there is no line anywhere between them stating the candidate count
+  the spend was sized from. Grepped: the whole run emits `intake starting`,
+  `phase starting`, `phase finished`, `STOPPED FOR REVIEW` and the schema lines, and
+  nothing else.
+
+  **CHUMP and CASHCAT look like counter-examples and are not.** Both findings sections
+  record "the cohort work set, derived before spending" — but that derivation was done
+  by the OPERATOR in SQL at the preceding STOP, never by the phase. **The phase has
+  never printed one on any token**, and the discipline held only because somebody
+  stopped and ran a query by hand each time.
+
+  **On BONER nobody did, and that is my error as much as the code's.** Running
+  `--continue` from the conventions stop chains conventions into cohort in one
+  invocation, so 64,750 CU was spent against a figure nobody saw — the exact failure
+  step 9 names for `eth-usd-series` ("it spent against a figure nobody saw") and the
+  reason `--stop-after` exists. **`--stop-after conventions` was the control that
+  should have been used and was not.**
+
+  **The outcome was sound — the phase's own report reconciles to the CU exactly
+  (1,493 x 15 + 319 x 15 + 1,445 x 26 = 64,750), and a retrospective derivation gives
+  31,589 in-window swap transactions behind 1,471 candidates.** That is luck about the
+  size of the token, not the rule working. **The fix is for the phase to derive and log
+  its candidate count before the first paid call**, which is what step 9's one-derivation
+  rule already requires of every job that spends.
 
 - **OPEN, found on BONER 2026-09-15: NOTHING IN THE REPOSITORY EVER WRITES
   `tokens.role`.** Step 14 says "a token loaded only to price another is not a tracked
