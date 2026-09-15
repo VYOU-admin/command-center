@@ -30,6 +30,7 @@ import { tradeLegs } from '../adapters/token-updates/rows.js';
 import { fastPathPayers, provenBuyers } from './payment.js';
 import { loadLegsInput } from './write.js';
 import type { PoolClient } from '../store/db.js';
+import { log } from '../logger.js';
 
 export interface TagReport {
   /** Genuinely new tag rows. */
@@ -142,6 +143,82 @@ export async function buildCohort(
     excludedAsPools += stats.walletsExcludedIsPool;
     candidateWallets += stats.candidateWallets;
   }
+  /*
+   * ------------------------------------------------------------------------
+   * THE WORK SET, DERIVED AND STATED BEFORE THE FIRST PAID CALL.
+   *
+   * Everything above reads stored logs and spends nothing; `provenBuyers` below
+   * is where the money starts. Until 2026-09-15 this phase logged nothing
+   * between `phase starting` and `phase finished`, so BONER spent 64,750 CU
+   * against a figure nobody saw -- the same failure step 9 records for
+   * `eth-usd-series`, which printed zero and then wrote 140.
+   *
+   * ONE DERIVATION SERVES BOTH THE ESTIMATE AND THE FETCH: the numbers below are
+   * measured from `candidateTxs`, and `provenBuyers` then iterates THAT MAP. They
+   * cannot drift, which is the form step 9 requires -- two queries scoped
+   * differently is how the estimate and the job disagreed before.
+   * ------------------------------------------------------------------------
+   */
+  const candidateWalletCount = candidateTxs.size;
+  const candidateTxCount = new Set([...candidateTxs.values()].flat()).size;
+  /*
+   * 14% on PONS, 13.9% on CASHCAT, 21.4% on BONER -- a property of how a token is
+   * QUOTED rather than of the chain, so the high-water mark is used for sizing. An
+   * estimate that under-reads the ceiling is not a gate.
+   */
+  const RECEIPT_RATE = 0.22;
+  const CU_TX = 15; const CU_RECEIPT = 15; const CU_GETCODE = 26;
+  const estimatePayment = Math.ceil(
+    candidateTxCount * CU_TX + candidateTxCount * RECEIPT_RATE * CU_RECEIPT,
+  );
+  /*
+   * AN UPPER BOUND, DELIBERATELY. Survivors are not known until payment has run,
+   * so the code check is sized at one call per candidate wallet; the real figure
+   * is lower by whatever share fails to prove.
+   */
+  const estimateGetCode = candidateWalletCount * CU_GETCODE;
+  const estimateTotal = estimatePayment + estimateGetCode;
+  const remaining = rpc.ceilingRemaining;
+
+  log.info('BEFORE THE FIRST PAID CALL', {
+    window: window.label,
+    blocks: `${startBlock}..${endBlock}`,
+    candidate_wallets: candidateWalletCount,
+    candidate_transactions: candidateTxCount,
+    receipt_rate_used: RECEIPT_RATE,
+    estimated_payment_cu: estimatePayment,
+    estimated_getcode_cu_upper_bound: estimateGetCode,
+    estimated_total_cu: estimateTotal,
+    estimated_usd: ((estimateTotal * 0.45) / 1e6).toFixed(4),
+    ceiling_remaining_cu: remaining,
+    derivation: 'candidate wallets and their capped transaction lists, measured from '
+      + 'the same map provenBuyers iterates -- the estimate and the fetch cannot drift',
+  });
+
+  /*
+   * A WORK SET OF NOTHING IS A SUSPECTED DEFECT, NOT A CLEAN PASS. A window with
+   * swaps but no candidate buyers means the leg builder matched nothing, which
+   * reads exactly like a quiet window.
+   */
+  if (candidateWalletCount === 0) {
+    throw new Error(
+      `cohort ${window.label}: no candidate wallets over ${startBlock}..${endBlock}. `
+      + 'A candidate set matching nothing is a suspected defect, not an empty result.',
+    );
+  }
+  /*
+   * ENFORCED, not merely printed. Discovering the ceiling part-way through leaves
+   * a half-proven cohort and spends everything up to that point for nothing.
+   */
+  if (estimateTotal > remaining) {
+    throw new Error(
+      `cohort ${window.label}: the work set needs about ${estimateTotal} CU `
+      + `(${candidateTxCount} transactions, ${candidateWalletCount} wallets) and only `
+      + `${remaining} CU remain under this phase's ceiling. Raise the cohort ceiling `
+      + 'in the intake config, or narrow the window. Refusing before spending.',
+    );
+  }
+
   /*
    * PAYMENT, ONCE PER WALLET. Every candidate slice has been read, so each
    * wallet is proven a single time across the whole window rather than once per

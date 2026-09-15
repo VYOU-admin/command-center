@@ -87,6 +87,17 @@ export class RpcClient {
     private readonly ceiling: number,
   ) {}
 
+  /**
+   * What this job may still spend under its ceiling.
+   *
+   * Exposed so a phase can size its work set against the budget BEFORE the first
+   * paid call rather than discovering the ceiling part-way through -- the cohort
+   * gate added 2026-09-15 after BONER spent 64,750 CU against a figure nobody saw.
+   */
+  get ceilingRemaining(): number {
+    return Math.max(0, this.ceiling - this.spent);
+  }
+
   get cuSpent(): number {
     return this.spent;
   }

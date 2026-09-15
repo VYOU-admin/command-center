@@ -71,6 +71,20 @@ export interface IntakeConfig {
   token: string;
   ticker: string;
   chartedPair: string | null;
+  /**
+   * What this token IS, written onto `tokens.role` by the identity phase.
+   *
+   * `tracked` for a token with a window and a cohort; `pricing-source` for a
+   * bridge loaded solely so another token can be priced through it. Step 14: a
+   * pricing source has no window, no cohort and no rows, and both the dashboard
+   * and the every-minute `token-price` monitor filter on this column.
+   *
+   * UNTIL 2026-09-15 NOTHING IN THE REPOSITORY WROTE IT. The column defaults to
+   * `tracked`, so every identity run wrote `tracked` and NVDA's `pricing-source`
+   * was set by hand -- outside the intake and outside every dry-run discipline
+   * here. HIMS repeated it on the very next bridge. See section 9.
+   */
+  role: 'tracked' | 'pricing-source';
   windows: IntakeWindow[];
 
   rpcUrlTemplate: string;
@@ -264,6 +278,20 @@ export async function loadIntakeConfig(path: string): Promise<IntakeConfig> {
     token,
     ticker: String(req(raw['ticker'], 'ticker')),
     chartedPair: typeof raw['charted_pair'] === 'string' ? raw['charted_pair'] : null,
+    /*
+     * AN UNKNOWN VALUE RAISES RATHER THAN DEFAULTING. A typo that silently left a
+     * bridge `tracked` is the exact failure this key exists to prevent, and a
+     * default would reproduce it while looking configured.
+     */
+    role: ((): 'tracked' | 'pricing-source' => {
+      const r = raw['role'];
+      if (r === undefined || r === null) return 'tracked';
+      if (r === 'tracked' || r === 'pricing-source') return r;
+      throw new Error(
+        `role must be "tracked" or "pricing-source"; got ${JSON.stringify(r)}. `
+        + 'A pricing source is a bridge loaded only to price another token.',
+      );
+    })(),
     windows,
 
     rpcUrlTemplate: String(req(rpc['url_template'], 'rpc.url_template')),

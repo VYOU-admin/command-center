@@ -460,12 +460,22 @@ async function main(): Promise<void> {
       const value = await readIdentity(rpc, cfg);
       firstBlock = await deploymentBlock(rpc, cfg.token, head);
       await c.query(
-        `insert into tokens (mint, chain, ticker, name, decimals, charted_pair)
-         values ($1, $2, $3, $4, $5, $6)
+        /*
+         * `role` IS WRITTEN HERE, and until 2026-09-15 it was not written anywhere.
+         * The column defaults to `tracked`, so every identity run wrote `tracked`
+         * and a bridge's `pricing-source` had to be set by hand -- NVDA's was, and
+         * HIMS repeated it. Both the dashboard and the every-minute `token-price`
+         * monitor filter on this column, so a bridge left `tracked` becomes a tab
+         * for a token nobody tracks and an entry in a monitor that may fail on it.
+         */
+        `insert into tokens (mint, chain, ticker, name, decimals, charted_pair, role)
+         values ($1, $2, $3, $4, $5, $6, $7)
          on conflict (mint) do update set ticker = excluded.ticker,
            name = excluded.name, decimals = excluded.decimals,
-           charted_pair = coalesce(excluded.charted_pair, tokens.charted_pair)`,
-        [cfg.token, cfg.chain, cfg.ticker, value.name, value.decimals, cfg.chartedPair],
+           charted_pair = coalesce(excluded.charted_pair, tokens.charted_pair),
+           role = excluded.role`,
+        [cfg.token, cfg.chain, cfg.ticker, value.name, value.decimals, cfg.chartedPair,
+          cfg.role],
       );
       return {
         report: { ...value, head, deployment_block: firstBlock },

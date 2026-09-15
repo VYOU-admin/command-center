@@ -23,6 +23,13 @@
 
 chain: robinhood
 ticker: HIMS
+# THIS IS A PRICING SOURCE, NOT A TRACKED TOKEN, and as of 2026-09-15 the intake
+# can finally say so. `tokens.role` was written by no code until then: the column
+# defaults to `tracked`, so every identity run wrote `tracked` and this file's
+# whole purpose -- "loaded only to price another token" -- had to be applied by a
+# manual UPDATE. Both the dashboard and the every-minute token-price monitor
+# filter on the column. See step 14 and section 9.
+role: pricing-source
 # READ FROM THE CHAIN, from the charted pool's own Initialize currencies, not
 # inferred from a pool name and not resolved by symbol. Exactly one token on this
 # chain answers symbol() with "HIMS" as of 2026-09-15 -- checked -- but that is a

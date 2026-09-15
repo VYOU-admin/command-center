@@ -15,6 +15,13 @@
 
 chain: robinhood
 ticker: NVDA
+# THIS IS A PRICING SOURCE, NOT A TRACKED TOKEN, and as of 2026-09-15 the intake
+# can finally say so. `tokens.role` was written by no code until then: the column
+# defaults to `tracked`, so every identity run wrote `tracked` and this file's
+# whole purpose -- "loaded only to price another token" -- had to be applied by a
+# manual UPDATE. Both the dashboard and the every-minute token-price monitor
+# filter on the column. See step 14 and section 9.
+role: pricing-source
 # READ FROM THE CHAIN during AI's scope phase, not inferred from a pool name.
 # A SECOND token also answers symbol() with "NVDA", at
 # 0xa90b49763f970d79d6772270c96ac02bc1b71e18, and it has one AI pool against
