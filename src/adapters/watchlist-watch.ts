@@ -47,7 +47,21 @@ const adapter: SourceAdapter<{ token: string }> = {
         throw new Error(`${monitorId}: watchlist-watch requires a "${k}" option`);
       }
     }
-    const known = new Set(['chain', 'config', 'slice_blocks', 'head_lag', 'ceiling']);
+    /*
+     * THE ALLOW-LIST IS THE GUARD, AND EVERY NEW OPTION BELONGS IN IT.
+     *
+     * An option the adapter does not know is almost always a typo that would
+     * silently do nothing -- which is exactly what `bridge_assets` did on the hourly
+     * job, accepted by the parser and read by no one, for 80% of AI's volume. This
+     * refuses to boot instead. Adding the four market-cap options to the YAML without
+     * adding them here failed the deploy on 2026-09-15, which is the guard working:
+     * the previous container kept serving and nothing silently ignored a threshold.
+     */
+    const known = new Set([
+      'chain', 'config', 'slice_blocks', 'head_lag', 'ceiling',
+      'max_market_cap_usd', 'compare_market_cap_usd',
+      'supply_ttl_days', 'supply_reads_per_run',
+    ]);
     const extra = Object.keys(options ?? {}).filter((k) => !known.has(k));
     if (extra.length > 0) {
       throw new Error(`${monitorId}: unexpected option(s) ${extra.join(', ')}`);
