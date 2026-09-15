@@ -3943,6 +3943,70 @@ per-token work depends on what it finds does not. **The worst case WAS quoted** 
 **It still does not exceed what the existing alert spends**, and that comparison is
 now measured rather than argued — see the run below.
 
+##### BUILT AND RUN 2026-09-15 — the first run carrying the launch alert
+
+Slice **63,323,150–63,333,149**, both alerts delivered:
+
+```
+existing alert   143 trades, 39 tokens, 32 wallets   2,499 characters   0 dropped
+launch alert       3 launched                         1,016 characters   0 dropped
+  older than the window       22
+  age unknown                  0      <- failed 0, bisect-capped 0, anomalous 0
+  tokens with buys            25
+slice sweep                2,232 CU
+incremental supply read        4 tokens, 4 resolved,    104 CU
+age resolution                 4 requests, 3 old + 1 launch, 540 CU
+```
+
+**THE CACHE CARRIED 35 OF THE SLICE'S 39 TOKENS AT ZERO COST, WHICH IS THE WHOLE
+DESIGN WORKING.** 7 were settled by a stored `deployment_block` — arithmetic, no
+request — and 28 by a stored `existed_at_block`, the permanent negative. **Only 4
+tokens needed a call at all.** That ratio is what the backfill bought and what makes
+the steady state cheap: the alert asks about NOVEL tokens, not about every token the
+watcher has seen.
+
+**THE COST GATE IS NOW MEASURED RATHER THAN ARGUED. 540 CU against the slice sweep's
+2,232 CU — 24%.** The requirement was to stop if the age check exceeded what the
+existing alert spends. It does not, on the measured run, and the supply read beside it
+cost 104 CU. The 540 breaks down exactly: 3 negatives x 26 = 78, plus one launch at
+26 (window start) + 26 (upper-end check) + 16 x 26 (bisect) + 20 (timestamp) = 488.
+
+**WHAT THE ALERT ACTUALLY SAID, and why `GDP` is the case for building it:**
+
+| token | age | wallets | USD | mcap (displayed, filters nothing) |
+|---|---|---|---|---|
+| breadpeople | 42 min | 4 | $3,374 | $71.2k |
+| flygram | **14 min** | 4 | $3,034 | $151.1k |
+| GDP | 24 min | 1 | $120 | $124.7k |
+
+**`GDP` SAT TWELFTH AND LAST IN THE EXISTING ALERT — the bottom of its list, one wallet
+and $120, one place from being cut — and the launch alert puts it third of three.** The
+two alerts are reading the same 143 trades and disagreeing about what matters, which is
+what a second question is for. `flygram` deployed at block 63,326,391, INSIDE the slice
+being read.
+
+**ZERO UNKNOWN-AGE TOKENS ON THIS RUN AND ZERO ON THE 698-TOKEN BACKFILL**, so the
+unknown-age path has still never been exercised against real data. Recorded rather than
+taken as evidence that it works, the same way the null-supply branch is.
+
+**THE BODIES ARE NOW LOGGED, NOT JUST THEIR LENGTHS.** Discord was the only other copy
+and nothing here could read one back, so an alert was unrecoverable the moment it was
+sent — the same lesson this step already records for the per-bucket price detail, found
+the same way: the detail was wanted afterwards and was simply gone.
+
+**Read back on a fresh connection after the run:**
+
+```
+token_decimals_cache   1,282 rows   existed_at_block 509   deployment_block 201
+                       age_checked_at 710   attempted-but-unresolved 0
+                       509 + 201 = 710 exactly
+contradictions (existed_at_block < deployment_block)                    0
+watchlist_activity     18,144 rows, 1,282 tokens
+wallet_scores 29,034 · wallet_tags 31,564 · token_windows 14 · wallet_transactions
+863,456 · tokens 10 · pool_meta 2,838 · wallet_watchlist 1,456  -- UNCHANGED
+watchlist-watch        7 runs in 2 hours, 0 failures
+```
+
 #### A DEPLOY FAILED TO BOOT ON THE OPTION ALLOW-LIST, AND THAT IS THE GUARD WORKING
 
 The first deploy of this change **failed**: the monitor YAML gained four options and
