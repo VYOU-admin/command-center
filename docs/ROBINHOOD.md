@@ -3459,6 +3459,124 @@ four-line block plus footer growth, not a measurement.
 and then reporting "…and 18 more" from the cap arithmetic would understate what was
 left out, which is the same failure as a silent trim one step removed.
 
+#### THE SECOND ALERT: buys only, filtered by total-supply market cap — built 2026-09-15
+
+**A SECOND MESSAGE TO THE SAME CHANNEL ON THE SAME RUN, not a replacement.** The
+existing alert is unchanged and still posts first. This one answers a different
+question: *which SMALL tokens are the watchlist buying?* The first alert ranks whatever
+the watchlist touched; this one cuts to tokens under a market-cap ceiling, where an
+early position is still an early position.
+
+**How the two differ, stated so a future reader cannot mistake one for the other:**
+
+| | existing alert | market-cap alert |
+|---|---|---|
+| sides | buys AND sells, kept separate | **buys only** |
+| ordering | distinct buying wallets, then USD | same |
+| filter | none — every token the slice touched | **implied market cap ≤ `max_market_cap_usd`** |
+| what it needs | the slice's rows | the rows **plus a stored `totalSupply`** |
+| tokens it cannot value | shown with `unpriced` | **given their own section, never dropped** |
+
+**MARKET CAP HERE IS TOTAL-SUPPLY MARKET CAP AND THE ALERT SAYS SO IN ITS OWN BODY.**
+It is `totalSupply / 10^decimals x slice-implied price`, and BOTH terms carry a
+limitation that is stated rather than buried:
+
+- **Total supply is not circulating supply.** A burn address or a locked LP position
+  makes the two diverge and nothing here measures either. The alert labels the column
+  `mcap (total supply)` so the figure cannot be read as a float-adjusted one.
+- **The slice-implied price is not a market price.** It is the same volume-weighted
+  average over one wallet set's trades in ~10,000 blocks that the existing alert's
+  price line already uses — a signal figure, never to be compared with a
+  `<token>_usd_prices` bucket. This step already draws that distinction for the
+  nearest-preceding-bucket lookup; it applies here unchanged, and multiplying it by a
+  supply does not make it more of a market figure than it was.
+
+**The threshold is a CONFIG VALUE with its reasoning, not a constant.**
+`max_market_cap_usd`, default **200000**. It is an operator preference like
+`top_percent` and there is no natural break in the data to measure it against — the
+2026-09-14 measurement found the five tokens whose market cap was then derivable
+sitting between **$16.7M and $571M**, three orders of magnitude above any plausible
+cut, so the data offered no boundary at all. **$150,000 is measured alongside every
+run and reported in the log**, so the cut can be moved from evidence rather than
+picked again.
+
+**THE TOKENS THE FILTER CANNOT SEE GET THEIR OWN SECTION, and that is the point of the
+alert rather than an edge case.** 439 tokens in the 2026-09-14 measurement are quoted
+only against other memecoins and have **no USD route at any effort**; the earliest
+signal is likeliest to be exactly there. They are listed below the filtered set, never
+dropped, and the two reasons are labelled DISTINCTLY because they are not the same
+condition:
+
+| kind | what is known | how it renders |
+|---|---|---|
+| **no price** | wallets and token amount only | USD column reads `unpriced` |
+| **no supply** | wallets and a real USD figure | the USD figure, plus `mcap unknown` |
+
+**A token whose USD we DO know is not rendered as `unpriced`.** Printing `unpriced`
+over a figure the run computed would misstate what is known, which is the failure this
+document spends most of section 5 on. The instruction was to show the USD column as
+`unpriced` for the unpriceable set, and that is what it does — the no-supply set keeps
+its dollars and loses only the market cap.
+
+**ONE IMPLEMENTATION OF EVERY SHARED RULE.** The symbol-is-a-label rendering, the
+DexScreener link, the `$0`-is-never-printed figure formatter, the price scale, and the
+measure-and-drop character guard are **extracted into `src/intake/alert-format.ts` and
+imported by both alerts**. They were inline in the watcher adapter and copying them
+would have been the fifth instance of the two-implementations trap this document
+records — the one failure mode it names more often than any other.
+
+**The character guard is the same 3,600-character measure-and-drop**, and with two
+sections it drops from the UNPRICEABLE tail first and the filtered tail second, so the
+filtered list — the thing the alert is named for — survives longest. **The footer
+states what the guard actually dropped from each section**, not a cap arithmetic.
+
+**Nothing is sent on an empty period**, and "empty" means BOTH sections are empty. A
+slice with no qualifying token but a full unpriceable section still posts, because that
+section is the signal this alert exists to carry.
+
+#### STORING `totalSupply`: read once, re-read weekly, and the timestamp IS the flag
+
+**Supply is cached like decimals and expires unlike decimals.** `token_decimals_cache`
+is permanent because decimals are immutable and a pool is a pool for good (step 3).
+**Total supply is neither** — a mint or a burn changes it — so a permanent cache would
+go stale silently, which is the failure shape this document records most often.
+
+```
+alter table token_decimals_cache add column if not exists total_supply   numeric;
+alter table token_decimals_cache add column if not exists supply_read_at timestamptz;
+```
+
+**`supply_read_at` does the work of two flags and that is deliberate.** It is set on
+every read ATTEMPT, successful or not, so:
+
+| state | meaning |
+|---|---|
+| `supply_read_at is null` | never read — this token is work |
+| `supply_read_at` older than `supply_ttl_days` | stale — this token is work again |
+| `supply_read_at` set, `total_supply` null | **read, and the contract did not answer** |
+
+The third row is why a separate settled-negative boolean is not needed: a token that
+genuinely does not answer `totalSupply()` is not re-asked until its TTL expires, which
+is exactly what `meta_read` buys for name and symbol, without a second column that
+could disagree with the first. **The staleness is visible rather than assumed** — the
+timestamp is on the row and the alert's log reports the oldest one it used.
+
+**A `0x` RETURN IS UNKNOWN, NEVER ZERO — step 1, and here it decides whether a token
+appears in the alert at all.** A supply of zero would compute a market cap of `$0`,
+which clears any ceiling and would put every unreadable token at the top of the
+filtered list. It stores **null** instead and the token falls to the no-supply section,
+which is the honest place for it.
+
+**The backfill is its own CLI with its own ceiling**, `npm run token-supply`, dry-run
+by default, reporting the work set BEFORE the first request per step 9's rule that one
+derivation serves both the estimate and the fetch. The monitor also reads supply
+incrementally, bounded by `supply_reads_per_run`, so a newly-seen token gets a supply
+without anyone running the backfill again and the weekly re-reads drain a few per cycle.
+
+**Batched `eth_call` returns per-item errors inside an HTTP 200** (step 5), so every
+response is inspected individually and a token that errors is recorded as
+attempted-and-unresolved rather than skipped silently.
+
 #### Ordering: buying wallets first, USD second
 
 **Tokens are ordered by DISTINCT BUYING WALLETS descending, then total USD bought.** It
