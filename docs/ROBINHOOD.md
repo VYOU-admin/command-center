@@ -83,7 +83,7 @@ computed with the MEAN and is left as that run produced it**; every score in the
 tables is now the maximum. The definition, the measured effect on all six windows, and
 the check that no other metric has the same shape are in step 13.
 
-**BONER IS LOADED. Steps 1–17 complete, 2026-09-15**, at **184,896 CU = $0.083**
+**BONER IS LOADED. Steps 1–17 complete, 2026-09-15**, at **185,796 CU = $0.084**
 including HIMS: **21,016 rows** over a **1,352-wallet** cohort, **99.10% of trade rows
 priced**, and **68 wallets on the watchlist**. **It is the SECOND BRIDGE EVER** — HIMS,
 `0xccee82fe…3d09`, a tokenised equity like NVDA — and the bridge carries **73.5% of its
@@ -96,6 +96,12 @@ medians multiplied, which step 4 has warned about since AI: **median 0.89% apart
 1,489 buckets, 97.9% within 5%** — and where they disagree most, the BRIDGE is the
 better-founded side. And **metric 5 reaching 1.0 for the first time**, because n=1
 leaves no 1/n ceiling.
+
+```
+BONER intake   127,556 CU     HIMS intake  56,380 CU (4,590 + a 51,790 sweep)
+density probes   1,860 CU     BONER 960 + HIMS 900, run outside the intake state
+total          185,796 CU  =  $0.084
+```
 
 **Both defects it surfaced are FIXED**: `role` is now an intake-config key, and the
 cohort phase derives, prints and enforces its work set before the first paid call.
