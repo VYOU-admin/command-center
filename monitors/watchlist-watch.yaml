@@ -45,3 +45,30 @@ options:
   # first runs also classify every pool the watchlist touches, one-off, so the
   # ceiling has room for that and still stops a run whose scope went wrong.
   ceiling: 100000
+
+  # ---- the SECOND alert: small-cap buys -------------------------------------
+  #
+  # A separate message to the same `crypto` channel on the same run. The first
+  # alert is unchanged and still posts first; this one asks which SMALL tokens
+  # the watchlist is buying.
+  #
+  # THE THRESHOLD IS A PREFERENCE, NOT A MEASUREMENT, and that is why it is here
+  # rather than in code. The data offered no boundary to derive it from: the five
+  # tokens whose market cap was derivable on 2026-09-14 sat between $16.7M and
+  # $571M, three orders of magnitude above any plausible cut. So it is set and
+  # then TUNED FROM EVIDENCE -- `compare_market_cap_usd` is measured on every run
+  # and reported in the log beside the live figure, never rendered in the alert.
+  max_market_cap_usd: 200000
+  compare_market_cap_usd: 150000
+
+  # SUPPLY IS CACHED LIKE DECIMALS AND EXPIRES UNLIKE DECIMALS. A mint or a burn
+  # changes totalSupply, so a permanent cache goes stale silently. Read once on
+  # first sight, re-read after this many days, and `supply_read_at` carries the
+  # timestamp so staleness is visible rather than assumed.
+  supply_ttl_days: 7
+
+  # Bounded per run so a backlog cannot turn one 30-minute cycle into a
+  # 1,220-token job against the shared ceiling above. At ~474 newly-seen tokens a
+  # day plus the weekly re-reads, a typical run needs ~14 of these; the cap is
+  # room for a backlog to drain over a few cycles. 200 x 26 CU = 5,200 CU.
+  supply_reads_per_run: 200

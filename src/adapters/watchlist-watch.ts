@@ -26,6 +26,13 @@ import {
   WATCHER_SCHEMA, deriveSliceEthUsd, loadWatchlistWallets, persistWatchRows,
   sweepWatchlistActivity, type SweepReport,
 } from '../intake/watcher.js';
+import {
+  chartUrl, n0, px as priceFigure, short, tokenLabel, usdFigure,
+} from '../intake/alert-format.js';
+import {
+  SUPPLY_SCHEMA, SUPPLY_TTL_DAYS, loadSupplies, readSupplies, supplyWorkSet,
+} from '../intake/supply.js';
+import { buildMcapAlert } from '../intake/mcap-alert.js';
 
 interface Pending { stored: number }
 const pending = new Map<string, Pending>();
@@ -49,6 +56,7 @@ const adapter: SourceAdapter<{ token: string }> = {
 
   async migrate(client) {
     await client.query(WATCHER_SCHEMA);
+    await client.query(SUPPLY_SCHEMA);
   },
 
   async fetch(ctx: AdapterContext): Promise<{ token: string }[]> {
@@ -57,6 +65,17 @@ const adapter: SourceAdapter<{ token: string }> = {
     const slice = Number(ctx.options['slice_blocks'] ?? 20000);
     const lag = Number(ctx.options['head_lag'] ?? 200);
     const ceiling = Number(ctx.options['ceiling'] ?? 100000);
+    /*
+     * THE MARKET-CAP ALERT'S OWN CONFIG. The threshold is an operator preference,
+     * like `top_percent`, and the data offered no boundary to measure it against --
+     * the five tokens whose market cap was derivable on 2026-09-14 sat between
+     * $16.7M and $571M. `compare` is measured alongside on every run and reported,
+     * so the cut can be moved from evidence rather than picked again.
+     */
+    const maxMcap = Number(ctx.options['max_market_cap_usd'] ?? 200000);
+    const compareMcap = Number(ctx.options['compare_market_cap_usd'] ?? 150000);
+    const supplyTtlDays = Number(ctx.options['supply_ttl_days'] ?? SUPPLY_TTL_DAYS);
+    const supplyPerRun = Number(ctx.options['supply_reads_per_run'] ?? 200);
 
     const key = ctx.configVars.get(cfg.rpcKeyVar);
     if (!key) throw new Error(`${cfg.rpcKeyVar} is not set in this process`);
@@ -250,25 +269,13 @@ const adapter: SourceAdapter<{ token: string }> = {
           byToken.set(r.token, e);
         }
 
-        const short = (a: string): string => `${a.slice(0, 6)}…${a.slice(-4)}`;
-        const n0 = (x: number): string =>
-          x.toLocaleString('en-US', { maximumFractionDigits: 0 });
         /*
-         * A ZERO USD FIGURE IS NEVER PRINTED AS $0. Either the side had no trades --
-         * shown as a dash -- or every row on it was unpriced, or it is partly
-         * unpriced and reads `$n+`. `$0` would be a measurement, and the wrong one.
+         * THESE WERE INLINE HERE AND ARE NOW IMPORTED. A second alert needed the same
+         * rules, and copying them would have been the fifth instance of the
+         * two-implementations trap step 7 records. `usd` keeps its local name so the
+         * block below reads exactly as it did.
          */
-        const usd = (v: number, unpriced: number, trades: number): string => {
-          if (trades === 0) return '—';
-          if (unpriced === trades) return 'unpriced';
-          return unpriced > 0 ? `$${n0(v)}+` : `$${n0(v)}`;
-        };
-        /* Token prices here span many orders of magnitude, so the scale picks itself. */
-        const px = (v: number): string => {
-          if (v >= 1) return `$${v.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
-          if (v >= 0.0001) return `$${v.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')}`;
-          return `$${v.toPrecision(3)}`;
-        };
+        const usd = usdFigure;
 
         /*
          * ORDERED BY DISTINCT BUYING WALLETS, then USD bought. It was total USD
@@ -283,17 +290,9 @@ const adapter: SourceAdapter<{ token: string }> = {
           (b[1].buyers.size - a[1].buyers.size) || (b[1].boughtUsd - a[1].boughtUsd));
 
         const block = ([token, e]: [string, Agg]): string => {
-          /*
-           * A SYMBOL IS A LABEL, NOT AN IDENTITY -- two tokens on this chain both
-           * answer symbol() with "NVDA" -- so the address is always shown, and a
-           * token answering neither name() nor symbol() shows the address rather
-           * than a label somebody invented for it.
-           */
-          const label = e.symbol && e.name ? `**${e.symbol}** — ${e.name}`
-            : e.symbol ? `**${e.symbol}**`
-              : e.name ? `**${e.name}**`
-                : `\`${short(token)}\``;
-          const chart = `https://dexscreener.com/robinhood/${token}`;
+          /* Symbol-is-a-label and the DexScreener URL are shared; see alert-format. */
+          const label = tokenLabel(token, e.symbol, e.name);
+          const chart = chartUrl(token);
           const nb = e.buyers.size; const ns = e.sellers.size;
           const sideLine = (
             wallets: number, trades: number, v: number, unpriced: number,
@@ -309,8 +308,15 @@ const adapter: SourceAdapter<{ token: string }> = {
            * were. Where nothing priced it reads `unpriced` rather than being
            * omitted -- a missing line would read as "no price exists".
            */
+          /*
+           * IMPORTED AS `priceFigure`, NOT `px`. The inline formatter this replaces
+           * was named `px` and SHADOWED the slice-price map declared above under the
+           * same name. Removing the inner declaration made this line resolve to the
+           * map, which the type checker caught; the rename keeps the two apart by
+           * name rather than by scope.
+           */
           const priceLine = e.pricedTokens > 0 && e.pricedUsd > 0
-            ? px(e.pricedUsd / e.pricedTokens)
+            ? priceFigure(e.pricedUsd / e.pricedTokens)
             : 'unpriced';
           return `[${label}](${chart})  \`${short(token)}\`\n`
             + `　bought   ${sideLine(nb, e.boughtTrades, e.boughtUsd, e.boughtUnpriced)}\n`
@@ -398,6 +404,91 @@ const adapter: SourceAdapter<{ token: string }> = {
           description,
           level: 'info',
         }, 'crypto');
+
+        /* ---------------- the SECOND alert: small-cap buys ------------------- */
+        /*
+         * A SEPARATE MESSAGE TO THE SAME CHANNEL ON THE SAME RUN. The alert above is
+         * unchanged and posts first; this one asks a different question of the same
+         * slice. It is built after the first so a failure here cannot cost the first
+         * alert, and it posts nothing when both of its sections are empty.
+         */
+        const tokensSeen = [...new Set(report.rows.map((r) => r.token.toLowerCase()))];
+
+        /*
+         * READ SUPPLY FOR WHAT THIS RUN NEEDS, BOUNDED. A newly-seen token gets a
+         * supply without anyone running the backfill again, and the weekly re-reads
+         * drain a few per cycle. The bound is a per-run cap so a backlog cannot turn
+         * one cycle into a 1,220-token job against a shared ceiling.
+         */
+        const work = await supplyWorkSet(client, chain, supplyTtlDays, supplyPerRun);
+        const supplyRead = work.tokens.length > 0
+          ? await readSupplies(client, rpc, chain, work.tokens)
+          : {
+            attempted: 0, resolved: 0, unresolved: 0, emptyReturn: 0, errored: 0,
+            cuSpent: 0,
+          };
+        ctx.log.info('supply read', {
+          ...supplyRead,
+          work_set_total: work.total,
+          never_read: work.neverRead,
+          stale: work.stale,
+          fresh: work.fresh,
+          per_run_cap: supplyPerRun,
+          ttl_days: supplyTtlDays,
+          note: 'supply_read_at is set on every ATTEMPT, so a contract that does not '
+            + 'answer is not re-asked until its TTL expires',
+        });
+
+        const supplies = await loadSupplies(client, chain, tokensSeen);
+        const mcap = buildMcapAlert({
+          rows: report.rows.map((r) => ({
+            token: r.token, wallet: r.wallet, side: r.side,
+            tokenAmount: Number(r.tokenAmount), usdAmount: r.usdAmount,
+            tokenName: r.tokenName, tokenSymbol: r.tokenSymbol,
+          })),
+          supplies,
+          maxMarketCapUsd: maxMcap,
+          compareMarketCapUsd: compareMcap,
+          fromBlock: from,
+          toBlock: to,
+          publicUrl: ctx.publicUrl,
+        });
+
+        /*
+         * THE $150,000 COMPARISON IS REPORTED ON EVERY RUN, never rendered. It is
+         * how the cut gets moved from evidence instead of being picked a second time.
+         */
+        ctx.log.info('market-cap alert sized', {
+          threshold_usd: maxMcap,
+          qualifying: mcap.qualifying,
+          qualifying_at_compare_threshold: mcap.qualifyingAtCompare,
+          compare_threshold_usd: compareMcap,
+          above_threshold: mcap.aboveThreshold,
+          no_supply: mcap.noSupply,
+          no_price: mcap.noPrice,
+          tokens_with_buys: mcap.tokensWithBuys,
+          buy_rows: mcap.buyRows,
+          buy_wallets: mcap.buyWallets,
+          shown_qualifying: mcap.shownQualifying,
+          shown_unvalued: mcap.shownUnvalued,
+          dropped_qualifying: mcap.droppedQualifying,
+          dropped_unvalued: mcap.droppedUnvalued,
+          characters: mcap.characters,
+          margin: 3600,
+          sink_slice: 4000,
+          sent: mcap.body !== null,
+        });
+        if (mcap.overran) {
+          ctx.log.warn('market-cap alert body exceeds the margin at its floor', {
+            characters: mcap.characters,
+            note: 'the sink slices at 4,000 and the footer would be lost',
+          });
+        }
+        if (mcap.body !== null && mcap.title !== null) {
+          ctx.queueAlert({
+            title: mcap.title, description: mcap.body, level: 'info',
+          }, 'crypto');
+        }
       }
     } finally {
       client.release();
