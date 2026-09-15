@@ -74,6 +74,15 @@ the ratio**, so `buildRows` now fences a row's implied price against its own buc
 findings are in section 8 and the one open item — **metric 5's 1/n_pumps ceiling** — is
 in section 9.
 
+**METRIC 5 CHANGED ON 2026-09-14 AND SCORES ACROSS THAT DATE ARE NOT COMPARABLE.**
+`prePumpShare` is now the MAXIMUM over pump points of each pump's pre-48h buy share,
+where it was the mean. The mean could not exceed **1/n_pumps** — three tokens recorded
+a maximum sitting exactly there and this document read each as a fact about wallets.
+All six windows were re-scored. **Every score quoted in a section 8 findings block was
+computed with the MEAN and is left as that run produced it**; every score in the live
+tables is now the maximum. The definition, the measured effect on all six windows, and
+the check that no other metric has the same shape are in step 13.
+
 **Read the V3-ONLY subsection before loading CASHCAT.** CHUMP is the first token whose
 market is v3, and that subsection exists so the next one does not rediscover it.
 
@@ -2366,6 +2375,114 @@ aggregation**, and the maximum reports it honestly: such a wallet now reads 1.0 
 from the maximum.** The question is whether the 5% separates anyone: CHUMP's split of
 67% at zero against 23% at the ceiling is real separation, and PONS's >75% at zero is
 close to none.
+
+##### WHAT THE CHANGE MOVED, MEASURED ON ALL SIX WINDOWS BEFORE IT WAS WRITTEN
+
+Measured with `npm run prepump-change`, which snapshots the stored scores, then runs
+the real scorer with `write: false` and compares. **The "after" comes from
+`scoreWindow`, not from a recomputation of the metric here** — predicting a definition
+change with a second implementation of the rule being changed is the trap step 7
+records four times, and it would be wrong in exactly the case that matters.
+
+**The metric itself. Every window's maximum moves from exactly 1/n to exactly 1.0, and
+the count sitting on 1/n falls to zero in all six:**
+
+| window | pumps | max before | max after | at 1/n before → after | at 1.0 after | mean before → after |
+|---|---|---|---|---|---|---|
+| CASHCAT-P1 | 3 | 0.333333 | **1.0** | 168 → **0** | 167 | 0.0415 → 0.1238 |
+| CHUMP-P1 | 2 | 0.500000 | **1.0** | 119 → **0** | 116 | 0.1361 → 0.2672 |
+| AI-P1 | 2 | 0.500000 | **1.0** | 43 → **0** | 41 | 0.0133 → 0.0259 |
+| PONS-P1 | 3 | 0.333333 | **1.0** | 657 → **0** | 648 | 0.0268 → 0.0790 |
+| INDEX-P1 | 3 | 0.333333 | **1.0** | 667 → **0** | 664 | 0.0955 → 0.2854 |
+| INDEX-P2 | 3 | 0.333333 | **1.0** | 84 → **0** | 78 | 0.0183 → 0.0527 |
+
+**THE ZERO AND NULL COUNTS DO NOT MOVE IN ANY WINDOW** — CASHCAT 1,544 zeros and 6
+nulls before and after, PONS 11,398 and 88, and so on for all six. That is the
+arithmetic check that the change is a rescaling of the top and not a different
+population: `max(shares) = 0` exactly when `mean(shares) = 0`, and a null stays null.
+
+**The small gap between "at 1/n before" and "at 1.0 after" is a real distinction the
+mean could not draw** — 168 against 167 on CASHCAT, 119 against 116 on CHUMP. A mean of
+exactly 1/n only requires the shares to SUM to 1; those one-to-three wallets per window
+split their buying across two pre-pump windows. **Under the mean they were
+indistinguishable from a wallet that put everything into one pump; under the maximum
+they are not.** That is the metric doing what it was changed to do.
+
+**Ranks move a great deal and the CUT barely moves, which is the important pair:**
+
+| window | wallets whose metric changed | rank changed | by >10 places | cutoff before → after | Δ |
+|---|---|---|---|---|---|
+| CASHCAT-P1 | 695 of 2,245 | 2,225 | 1,816 | 0.314241 → 0.314447 | +0.000207 |
+| CHUMP-P1 | 172 of 523 | 494 | 387 | 0.223885 → 0.237342 | **+0.013457** |
+| AI-P1 | 268 of 3,508 | 3,462 | 1,818 | 0.264115 → 0.264204 | +0.000089 |
+| PONS-P1 | 2,337 of 13,823 | 13,671 | 13,192 | 0.441729 → 0.442986 | +0.001256 |
+| INDEX-P1 | 1,545 of 3,316 | 3,301 | 3,157 | 0.306923 → 0.314048 | +0.007125 |
+| INDEX-P2 | 760 of 4,267 | 4,242 | 4,030 | 0.332679 → 0.339276 | +0.006597 |
+
+**Nearly every wallet's RANK changes while almost none of them changed value**, and
+that is not a contradiction: when 2,337 PONS wallets rise, every wallet below them is
+pushed down a place. **A rank-change count is a poor measure of a scoring change's
+impact.** The cutoff is the figure that decides anything, and it moves in the fourth
+decimal on three windows and the second on CHUMP.
+
+**CHUMP moves most, and it is the token this document predicted would.** Its pumps sit
+at or after the window end so every cohort member's answer came from pump 1 alone,
+halved by a divisor of 2 — the largest systematic understatement of the six.
+
+**THE WATCHLIST: 99 memberships in, 99 out, and the prediction matched the rebuild
+exactly.** Per window the predicted enters/leaves were CASHCAT 8, CHUMP 7, AI 2,
+PONS 49, INDEX-P1 19, INDEX-P2 14, and the actual rebuild produced **the identical
+numbers**, checked against a snapshot of the pre-change list:
+
+```
+memberships   1,388 -> 1,388     (slots are fixed by cohort size, so in == out)
+rows entering      99            rows leaving  99
+DISTINCT WALLETS  1,289 -> 1,281  84 wallets ENTER the list, 92 LEAVE
+wallets on 2+ tokens  70 -> 77
+```
+
+**84 in against 92 out reconciles with 99 in against 99 out because the list is a
+UNION.** A membership entering for a wallet already on the list through another window
+adds no wallet, and a membership leaving a wallet that still holds another window
+removes none. **Only the 84 and the 92 reach the alert** — that is the whole
+consequence of this change to anything downstream.
+
+**Wallets qualifying on two or more tokens rose from 70 to 77**, which by step 17's own
+reasoning is the list improving: that overlap is the one signal it carries that does not
+depend on scores being comparable across windows.
+
+##### NO OTHER METRIC HAS THIS SHAPE — checked against the stored values, not argued
+
+A metric bounded by a count of configured inputs rather than by the behaviour it
+measures. Every metric was checked against its attained range per window:
+
+| metric | attained max across the six windows | count-bounded? |
+|---|---|---|
+| **5 `prePumpShare`** | **1.0 on all six** | **was 1/n_pumps; FIXED** |
+| 6 `buySizeTrend` | 0.8403, 0.8845, 0.8945, 0.9738, 0.9868, 0.9999 | **no** — nowhere near 1/2 or 1/3 |
+| 3 `earliness` | 0.99990 – 0.99999 | no — bounded by the window, and reaches it |
+| 1a/1b/2/4/7 (min-max) | raw values unbounded; normalised 0..1 by cohort | by the COHORT, by design |
+
+**Metric 6 averages over pumps exactly as metric 5 did, and is NOT bounded by 1/n,
+because its per-pump denominators OVERLAP.** Each pump's figure weighs every buy from
+inception to that pump, so a buy counts toward every later pump's term rather than
+being partitioned between them; each term independently reaches 1, and so does their
+mean. **The disjointness, not the averaging, was what created metric 5's ceiling** —
+and that distinction is why "metric 6 averages too" is not a second instance of this
+defect. Its shifting denominator remains recorded in step 13 as the separate property
+it is.
+
+**The min-max five are bounded by the cohort rather than by behaviour, and that IS by
+design and already stated** — step 13 chooses min-max so outliers dominate, and step 17
+says at length that scores are therefore not comparable across windows. Reported here
+because the question was asked, not as a new finding.
+
+**ONE THING FOUND WHILE LOOKING, NOT FIXED IN THIS PASS: metric 6 is nearly degenerate
+on PONS.** Its `buySizeTrend` spans **0.99826 to 0.99990** across 13,734 wallets — a
+range of 0.0016 on a metric carrying 5% of the weight, so it separates essentially
+nobody there. The cause is structural rather than a defect in the aggregation: PONS's
+pumps sit far from its inception, so `closeness` is near 1 for almost every buy. It is
+not the 1/n shape and it is recorded rather than acted on.
 
 ---
 
