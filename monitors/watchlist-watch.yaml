@@ -46,20 +46,40 @@ options:
   # ceiling has room for that and still stops a run whose scope went wrong.
   ceiling: 100000
 
-  # ---- the SECOND alert: small-cap buys -------------------------------------
+  # ---- the SECOND alert: tokens that just launched --------------------------
   #
   # A separate message to the same `crypto` channel on the same run. The first
-  # alert is unchanged and still posts first; this one asks which SMALL tokens
-  # the watchlist is buying.
+  # alert is unchanged and still posts first; this one asks which tokens that
+  # LAUNCHED IN THE LAST HOUR the watchlist wallets bought.
   #
-  # THE THRESHOLD IS A PREFERENCE, NOT A MEASUREMENT, and that is why it is here
-  # rather than in code. The data offered no boundary to derive it from: the five
-  # tokens whose market cap was derivable on 2026-09-14 sat between $16.7M and
-  # $571M, three orders of magnitude above any plausible cut. So it is set and
-  # then TUNED FROM EVIDENCE -- `compare_market_cap_usd` is measured on every run
-  # and reported in the log beside the live figure, never rendered in the alert.
-  max_market_cap_usd: 200000
-  compare_market_cap_usd: 150000
+  # ITS FILTER WAS MARKET CAP UNTIL 2026-09-15 AND WAS DROPPED ON EVIDENCE, not
+  # forgotten -- see step 17. Both terms of that figure are approximations: total
+  # supply is not circulating supply, and the slice-implied price is a
+  # volume-weighted average over one wallet set's trades in ~10,000 blocks that
+  # the document forbids comparing against a stored price bucket. Its own
+  # measurements agreed: the derivable market caps sat between $16.7M and $571M
+  # with no boundary in them, $200,000 and $150,000 selected the same three
+  # tokens, and 439 of 693 tokens had no USD route for it to see at all.
+  # Market cap is still DISPLAYED in the alert. It filters nothing.
+  #
+  # THE WINDOW IS IN MINUTES AND THE BLOCK COUNT IS DERIVED FROM THE MEASURED
+  # BLOCK TIME, never written here as a block count. At 35,622 blocks/hour
+  # (measured, section 3) 60 minutes is 35,622 blocks, and the derived figure is
+  # logged on every run so a change in block time shows up as a changed window
+  # rather than as a silently wrong one.
+  launch_window_minutes: 60
+
+  # THE ONLY VARIABLE TERM IN THIS ALERT'S COST. The base check is one
+  # eth_getCode per novel token (26 CU) and is bounded by the novel-token rate,
+  # which the chain decides -- measured at 437 buy-side novel tokens on
+  # 2026-09-14, the only complete non-seeding day, over 48 runs = 9.1 per run =
+  # 237 CU per run. The BISECT is 16 more calls plus a block read (436 CU) and is
+  # bounded by how many of those are genuinely new, which nothing bounds in
+  # advance. 25 is ~10x the measured per-run rate: it cannot bind on a normal run
+  # and does bind on a pathological one. It is reported in the log whenever it
+  # binds, and the tokens it skipped are left unwritten so the next run re-asks
+  # them rather than recording a guess.
+  age_bisects_per_run: 25
 
   # SUPPLY IS CACHED LIKE DECIMALS AND EXPIRES UNLIKE DECIMALS. A mint or a burn
   # changes totalSupply, so a permanent cache goes stale silently. Read once on

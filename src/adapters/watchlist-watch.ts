@@ -32,7 +32,11 @@ import {
 import {
   SUPPLY_SCHEMA, SUPPLY_TTL_DAYS, loadSupplies, readSupplies, supplyWorkSet,
 } from '../intake/supply.js';
-import { buildMcapAlert } from '../intake/mcap-alert.js';
+import { buildAgeAlert } from '../intake/age-alert.js';
+import {
+  AGE_SCHEMA, BLOCKS_PER_HOUR, ageWorkSet, loadAges, resolveAges, windowBlocks,
+  type AgeAnchor,
+} from '../intake/token-age.js';
 
 interface Pending { stored: number }
 const pending = new Map<string, Pending>();
@@ -59,8 +63,8 @@ const adapter: SourceAdapter<{ token: string }> = {
      */
     const known = new Set([
       'chain', 'config', 'slice_blocks', 'head_lag', 'ceiling',
-      'max_market_cap_usd', 'compare_market_cap_usd',
       'supply_ttl_days', 'supply_reads_per_run',
+      'launch_window_minutes', 'age_bisects_per_run',
     ]);
     const extra = Object.keys(options ?? {}).filter((k) => !known.has(k));
     if (extra.length > 0) {
@@ -71,6 +75,7 @@ const adapter: SourceAdapter<{ token: string }> = {
   async migrate(client) {
     await client.query(WATCHER_SCHEMA);
     await client.query(SUPPLY_SCHEMA);
+    await client.query(AGE_SCHEMA);
   },
 
   async fetch(ctx: AdapterContext): Promise<{ token: string }[]> {
@@ -80,14 +85,20 @@ const adapter: SourceAdapter<{ token: string }> = {
     const lag = Number(ctx.options['head_lag'] ?? 200);
     const ceiling = Number(ctx.options['ceiling'] ?? 100000);
     /*
-     * THE MARKET-CAP ALERT'S OWN CONFIG. The threshold is an operator preference,
-     * like `top_percent`, and the data offered no boundary to measure it against --
-     * the five tokens whose market cap was derivable on 2026-09-14 sat between
-     * $16.7M and $571M. `compare` is measured alongside on every run and reported,
-     * so the cut can be moved from evidence rather than picked again.
+     * THE LAUNCH ALERT'S OWN CONFIG.
+     *
+     * THE WINDOW IS IN MINUTES AND THE BLOCK COUNT IS DERIVED, never written as a
+     * constant: at 35,622 blocks/hour a hard-coded block count would silently stop
+     * meaning an hour the moment block time moved. The derived figure is logged.
+     *
+     * `age_bisects_per_run` bounds the only variable term. The base check is bounded
+     * by the novel-token count, which the chain decides; the bisect is bounded by how
+     * many of those are genuinely new, which nothing bounds in advance. 25 is ~10x
+     * the measured novel-token rate per run (9.1), so it cannot bind on a normal run
+     * and does bind on a pathological one. It is reported whenever it does.
      */
-    const maxMcap = Number(ctx.options['max_market_cap_usd'] ?? 200000);
-    const compareMcap = Number(ctx.options['compare_market_cap_usd'] ?? 150000);
+    const launchWindowMinutes = Number(ctx.options['launch_window_minutes'] ?? 60);
+    const bisectCap = Number(ctx.options['age_bisects_per_run'] ?? 25);
     const supplyTtlDays = Number(ctx.options['supply_ttl_days'] ?? SUPPLY_TTL_DAYS);
     const supplyPerRun = Number(ctx.options['supply_reads_per_run'] ?? 200);
 
@@ -419,12 +430,17 @@ const adapter: SourceAdapter<{ token: string }> = {
           level: 'info',
         }, 'crypto');
 
-        /* ---------------- the SECOND alert: small-cap buys ------------------- */
+        /* ---------------- the SECOND alert: tokens that just launched -------- */
         /*
          * A SEPARATE MESSAGE TO THE SAME CHANNEL ON THE SAME RUN. The alert above is
          * unchanged and posts first; this one asks a different question of the same
-         * slice. It is built after the first so a failure here cannot cost the first
-         * alert, and it posts nothing when both of its sections are empty.
+         * slice -- which tokens that launched in the last hour did the watchlist buy.
+         * It is built after the first so a failure here cannot cost the first alert,
+         * and it posts nothing when nothing launched, which is most runs.
+         *
+         * ITS FILTER WAS MARKET CAP UNTIL 2026-09-15 and was dropped on evidence:
+         * both of that figure's terms are approximations and its own measurements
+         * found no boundary in them. Market cap is still DISPLAYED here. See step 17.
          */
         const tokensSeen = [...new Set(report.rows.map((r) => r.token.toLowerCase()))];
 
@@ -453,54 +469,116 @@ const adapter: SourceAdapter<{ token: string }> = {
             + 'answer is not re-asked until its TTL expires',
         });
 
+        /*
+         * AGE, AND THE WORK SET IS DERIVED AND LOGGED BEFORE THE FIRST REQUEST.
+         *
+         * THE WINDOW IS ANCHORED AT `head`, NOT AT THE SLICE. The slice trails the
+         * head by up to a whole bucket by design -- the boundary rule above -- and
+         * "launched in the last hour" means the last hour NOW, not the last hour as
+         * of a block the cursor happens to have reached. Using `to` would quietly
+         * widen the window by the cursor's lag.
+         *
+         * `hi` IS THE SLICE'S LAST BLOCK, because that is where the token is KNOWN to
+         * exist: it traded there. `head` is only believed to exist.
+         */
+        const winBlocks = windowBlocks(launchWindowMinutes);
+        const windowStartBlock = head - winBlocks;
+        const anchors: AgeAnchor[] = tokensSeen.map((t) => ({
+          token: t, lo: windowStartBlock, hi: to,
+        }));
+        const cachedAges = await loadAges(client, chain, tokensSeen);
+        const ageWork = ageWorkSet(anchors, cachedAges);
+        ctx.log.info('age work set, BEFORE the first request', {
+          launch_window_minutes: launchWindowMinutes,
+          window_blocks: winBlocks,
+          blocks_per_hour: BLOCKS_PER_HOUR,
+          window: `${windowStartBlock}..${head}`,
+          tokens_this_slice: ageWork.total,
+          settled_by_stored_deployment_block: ageWork.knownDeployment,
+          settled_by_stored_existed_at_block: ageWork.knownOld,
+          needing_a_request: ageWork.anchors.length,
+          estimated_base_cu: ageWork.estimatedBaseCu,
+          bisect_cap: bisectCap,
+          ceiling_remaining_cu: rpc.ceilingRemaining,
+          note: 'one eth_getCode at the window start settles each; only positives are '
+            + 'bisected, and only inside that range. window_blocks is DERIVED from the '
+            + 'measured 35,622 blocks/hour, never written as a constant.',
+        });
+        const ageRead = ageWork.anchors.length > 0
+          ? await resolveAges(client, rpc, chain, ageWork.anchors, bisectCap)
+          : {
+            attempted: 0, old: 0, deployed: 0, bisectsSkipped: 0, failed: 0,
+            anomalous: 0, cuSpent: 0, bisectCapBound: false,
+          };
+        ctx.log.info('age resolved', {
+          ...ageRead,
+          dollars: ((ageRead.cuSpent * 0.45) / 1e6).toFixed(5),
+          estimated_base_cu: ageWork.estimatedBaseCu,
+          note: 'a NEGATIVE is permanent -- existed_at_block only ever moves down. A '
+            + 'POSITIVE stores the deployment block so age is recomputed per run '
+            + 'rather than re-read. A failed read is UNKNOWN, never old and never new.',
+        });
+        if (ageRead.bisectCapBound) {
+          ctx.log.warn('age bisect cap bound: some launches were left unresolved', {
+            skipped: ageRead.bisectsSkipped, cap: bisectCap,
+            note: 'no column was written for those tokens, so the next run re-asks them',
+          });
+        }
+        if (ageRead.anomalous > 0) {
+          ctx.log.warn('tokens with no code at the slice end despite trading there', {
+            anomalous: ageRead.anomalous,
+            note: 'the bisect would have invented a deployment block; recorded unknown',
+          });
+        }
+
+        const ages = await loadAges(client, chain, tokensSeen);
         const supplies = await loadSupplies(client, chain, tokensSeen);
-        const mcap = buildMcapAlert({
+        const launch = buildAgeAlert({
           rows: report.rows.map((r) => ({
             token: r.token, wallet: r.wallet, side: r.side,
             tokenAmount: Number(r.tokenAmount), usdAmount: r.usdAmount,
             tokenName: r.tokenName, tokenSymbol: r.tokenSymbol,
           })),
+          ages,
           supplies,
-          maxMarketCapUsd: maxMcap,
-          compareMarketCapUsd: compareMcap,
+          windowStartBlock,
+          launchWindowMinutes,
+          now: new Date(),
           fromBlock: from,
           toBlock: to,
+          unknownAge: ageRead.failed + ageRead.bisectsSkipped + ageRead.anomalous,
           publicUrl: ctx.publicUrl,
         });
 
-        /*
-         * THE $150,000 COMPARISON IS REPORTED ON EVERY RUN, never rendered. It is
-         * how the cut gets moved from evidence instead of being picked a second time.
-         */
-        ctx.log.info('market-cap alert sized', {
-          threshold_usd: maxMcap,
-          qualifying: mcap.qualifying,
-          qualifying_at_compare_threshold: mcap.qualifyingAtCompare,
-          compare_threshold_usd: compareMcap,
-          above_threshold: mcap.aboveThreshold,
-          no_supply: mcap.noSupply,
-          no_price: mcap.noPrice,
-          tokens_with_buys: mcap.tokensWithBuys,
-          buy_rows: mcap.buyRows,
-          buy_wallets: mcap.buyWallets,
-          shown_qualifying: mcap.shownQualifying,
-          shown_unvalued: mcap.shownUnvalued,
-          dropped_qualifying: mcap.droppedQualifying,
-          dropped_unvalued: mcap.droppedUnvalued,
-          characters: mcap.characters,
+        ctx.log.info('launch alert sized', {
+          launch_window_minutes: launchWindowMinutes,
+          window_blocks: winBlocks,
+          launched: launch.launched,
+          older_than_the_window: launch.older,
+          age_unknown: launch.unknown,
+          tokens_with_buys: launch.tokensWithBuys,
+          buy_rows: launch.buyRows,
+          buy_wallets: launch.buyWallets,
+          shown: launch.shown,
+          dropped_by_guard: launch.dropped,
+          characters: launch.characters,
           margin: 3600,
           sink_slice: 4000,
-          sent: mcap.body !== null,
+          sent: launch.body !== null,
+          note: launch.body === null
+            ? 'NOTHING SENT: no token bought this slice deployed inside the window. '
+              + 'That is the expected outcome on most runs, not a fault.'
+            : 'sent',
         });
-        if (mcap.overran) {
-          ctx.log.warn('market-cap alert body exceeds the margin at its floor', {
-            characters: mcap.characters,
+        if (launch.overran) {
+          ctx.log.warn('launch alert body exceeds the margin at its floor', {
+            characters: launch.characters,
             note: 'the sink slices at 4,000 and the footer would be lost',
           });
         }
-        if (mcap.body !== null && mcap.title !== null) {
+        if (launch.body !== null && launch.title !== null) {
           ctx.queueAlert({
-            title: mcap.title, description: mcap.body, level: 'info',
+            title: launch.title, description: launch.body, level: 'info',
           }, 'crypto');
         }
       }

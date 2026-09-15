@@ -39,7 +39,8 @@
     "eth-usd-repair": "node dist/cli/eth-usd-repair.js",
     "watch-probe": "node dist/cli/watch-probe.js",
     "verify-watchlist": "node scripts/verify-watchlist-page.mjs",
-    "pump-points": "node dist/cli/pump-points.js"
+    "pump-points": "node dist/cli/pump-points.js",
+    "token-age": "node dist/cli/token-age.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

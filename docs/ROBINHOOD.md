@@ -3521,7 +3521,18 @@ four-line block plus footer growth, not a measurement.
 and then reporting "…and 18 more" from the cap arithmetic would understate what was
 left out, which is the same failure as a silent trim one step removed.
 
-#### THE SECOND ALERT: buys only, filtered by total-supply market cap — built 2026-09-15
+#### THE SECOND ALERT: buys only, filtered by total-supply market cap — built 2026-09-15, **FILTER REPLACED 2026-09-15**
+
+> **SUPERSEDED, AND KEPT IN FULL BECAUSE IT IS THE EVIDENCE.** The market-cap
+> threshold described below was built, deployed, measured on live slices, and then
+> dropped — see *THE SECOND ALERT BECAME AN AGE FILTER* further down this step. It is
+> not forgotten and it was not a mistake of reasoning; it was a filter whose own
+> measurements argued against it. **Market cap survives as a DISPLAYED field and is
+> never again a filter.** Everything from here to the end of the `totalSupply`
+> subsection still describes live code — the supply read, its cache, its TTL and its
+> `0x`-is-unknown rule are all unchanged and the age alert displays what they store.
+> Only the FILTER moved.
+
 
 **A SECOND MESSAGE TO THE SAME CHANNEL ON THE SAME RUN, not a replacement.** The
 existing alert is unchanged and still posts first. This one answers a different
@@ -3695,6 +3706,169 @@ the two counts differ.
 margin — so the drop path did not run. It remains untested against real data on the
 new alert for the same reason the null-supply branch is: nothing has been big enough.
 
+#### THE SECOND ALERT BECAME AN AGE FILTER — changed 2026-09-15
+
+**The second alert now answers: *which tokens that launched in the last hour did
+watchlist wallets buy?*** The first alert is untouched and still posts first. This is
+still a separate message to the same `crypto` channel on the same 30-minute run.
+
+**WHY MARKET CAP WAS DROPPED, AND IT WAS DROPPED ON EVIDENCE RATHER THAN FORGOTTEN.**
+The threshold was built, deployed and measured before it was replaced, and three
+findings from those measurements argue against it:
+
+- **BOTH ITS TERMS ARE APPROXIMATIONS, and the product of two approximations is not a
+  quantity worth thresholding on.** Total supply is not circulating supply — a burn
+  address or a locked LP position makes them diverge and nothing here measures either.
+  The slice-implied price is a volume-weighted average over ONE wallet set's trades in
+  ~10,000 blocks, which this step already forbids comparing against a
+  `<token>_usd_prices` bucket. A number this document refuses to treat as a price,
+  multiplied by a supply it says is the wrong supply, is not a number to cut a list on.
+- **The data offered no boundary.** The 2026-09-14 measurement found the five tokens
+  whose market cap was then derivable sitting between **$16.7M and $571M** — three
+  orders of magnitude above any plausible cut. `$200,000` and `$150,000` then selected
+  **the same three tokens** on the first live slice, so the comparison built to move
+  the cut from evidence produced no evidence to move it with.
+- **The filter could not see most of its own subject.** On 2026-09-14, **439 of 693
+  tokens had no USD route at any effort**. A filter blind to the majority of the
+  population is doing less work than the section listing what it cannot see.
+
+**DEPLOYMENT TIME HAS NEITHER PROBLEM. IT IS DIRECTLY READABLE FROM THE CHAIN AND IT
+IS EXACT.** `eth_getCode` at a block either returns bytecode or does not; there is no
+median, no fence, no bucket, and no supply assumption. It is the one property of a
+token this system can state without an approximation in it. **Market cap stays as a
+DISPLAYED field wherever it is derivable** — the supply read is already paid for and
+size is worth seeing next to an age — but it decides nothing.
+
+##### AGE IS ONE CALL, NOT A BISECT
+
+**To answer "was this deployed inside the window", one `eth_getCode` settles it.** At
+`head − window_blocks`: **empty there and non-empty now means the contract appeared
+inside the window.** That is 26 CU against the ~676 CU of step 1's full-range bisect,
+a **26x** saving, and it is the whole reason this alert is affordable at 48 runs a day.
+
+**ONLY THE POSITIVES ARE BISECTED, AND ONLY INSIDE THAT RANGE.** A token that already
+existed at the window start needs no deployment block — it is out, and nothing further
+is asked of it. A token that did not exist there gets a binary search over
+`[head − window_blocks, head]` for its actual deployment block, then one
+`eth_getBlockByNumber` for that block's timestamp. **16 calls, not 26**, because the
+range searched is one hour of blocks rather than the chain's whole life:
+
+```
+window_blocks  = 35,622        60 min x 35,622 blocks/hour, MEASURED (section 3),
+                               derived here and never written as a constant
+bisect depth   = ceil(log2(35,622)) = 16 eth_getCode
+per positive   = 16 x 26 + 20 (eth_getBlockByNumber) = 436 CU
+per negative   = 26 CU, once, forever
+```
+
+**`window_blocks` IS DERIVED FROM THE MEASURED BLOCK TIME, NOT PICKED.** The config
+carries `launch_window_minutes`, and the block count comes from section 3's
+35,622 blocks/hour, measured over 935,564 blocks and 94,548 seconds. **The derived
+figure is logged on every run**, so a change in block time shows up as a changed
+window rather than as a silently wrong one.
+
+##### THE CACHE IS ASYMMETRIC, AND THE ASYMMETRY IS STATED IN THE CODE
+
+Age caches beside decimals and supply, on `token_decimals_cache`, and **the two
+directions are not the same kind of fact**:
+
+```
+alter table token_decimals_cache add column if not exists existed_at_block bigint;
+alter table token_decimals_cache add column if not exists deployment_block bigint;
+alter table token_decimals_cache add column if not exists deployment_time  timestamptz;
+alter table token_decimals_cache add column if not exists age_checked_at   timestamptz;
+```
+
+| answer | column written | how long it is true |
+|---|---|---|
+| **NEGATIVE** — code was present at block B | `existed_at_block = B` | **PERMANENTLY.** A token that existed an hour ago will never have launched in the last hour, and every future run's window starts LATER than B, so the answer only gets more true. Never re-asked. |
+| **POSITIVE** — deployed at block D | `deployment_block = D`, `deployment_time` | **The FACT is permanent; the QUALIFICATION expires.** D never changes, so age is recomputed from it each run and the token silently stops qualifying an hour later. Never re-asked either. |
+
+**A POSITIVE GOES STALE WITHIN THE HOUR AND THAT IS WHY IT CARRIES ITS DEPLOYMENT
+BLOCK.** Caching the boolean "is new" would be wrong within 60 minutes and would need
+re-reading every run — 26 CU per token per run forever. Caching the BLOCK makes the
+answer arithmetic: `deployment_block >= head − window_blocks`, recomputed per run, no
+request. **Every token is asked at most once, ever, in either direction.**
+
+**`existed_at_block` IS KEPT AS THE EARLIEST PROVEN BLOCK, not the latest.** A check
+anchored at some earlier block — which the backfill below does — proves a strictly
+stronger negative than one anchored at `head − window`, and overwriting the earlier
+proof with a later one would throw that away. The column only ever moves DOWN.
+
+**`age_checked_at` records when, for the same reason `supply_read_at` does**: staleness
+must be visible rather than assumed. It is set on every ATTEMPT, so a token whose
+`eth_getCode` failed is distinguishable from one never asked.
+
+##### A FAILED READ IS NOT AN ANSWER
+
+**An `eth_getCode` that errors or times out writes NOTHING except `age_checked_at`, and
+the token is treated as UNKNOWN AGE — it does not appear in the alert.** It is never
+recorded as "old" and never as "new". Section 5's standing rule: an error path that
+emits a plausible value is the worst defect shape on this project, and both plausible
+values are available here. "Old" would silently drop a genuine launch; "new" would
+manufacture one. **The count of unknown-age tokens is logged on every run**, so a
+transport failure shows up as a number rather than as a quiet alert.
+
+##### WHAT IT COSTS, PRICED BEFORE IT WAS BUILT
+
+**The work set is the NOVEL tokens, and it was derived from `watchlist_activity`
+rather than carried over from the 474/day the 2026-09-14 measurement recorded.**
+
+```
+first-seen per UTC day        2026-09-13   751 tokens   <- SEEDING DAY, every token novel
+                              2026-09-14   475 tokens   <- the only COMPLETE non-seeding day
+                              2026-09-15    27 tokens   <- partial, 2h10m
+  buy side only               2026-09-14   437 tokens   <- the population this alert asks about
+runs per day                  48           (30-minute schedule, 48 runs confirmed over 24h)
+novel buy-side tokens per run 437 / 48  =  9.1
+```
+
+| | per run | per day | per month |
+|---|---|---|---|
+| base check, 26 CU each | **237 CU** | 11,362 CU | **$0.153** |
+| bisect, at 5 positives/run | 2,180 CU | 104,640 CU | $1.41 |
+| bisect, worst case (every novel token new) | 3,969 CU | 190,532 CU | $2.57 |
+
+**IT DOES NOT EXCEED WHAT THE EXISTING ALERT SPENDS, and the comparison is exact rather
+than an order-of-magnitude wave.** The incremental supply read already in this monitor
+selects **the same population by the same rule** — tokens never read — and pays **the
+same 26 CU per token**, measured at 156 CU for 6 tokens on the 2026-09-15 run. The age
+check is literally one more 26-CU call on the same per-run token set. The slice's own
+`eth_getLogs` sweep, at 60 CU a request across two streams, dominates both.
+
+**THE BISECT IS THE VARIABLE TERM AND IT IS THE ONE THAT IS CAPPED.** The base check is
+bounded by the novel-token count, which the chain decides; the bisect is bounded by how
+many of them are genuinely new, which nothing bounds in advance. `age_bisects_per_run`
+caps it, **the cap is reported whenever it binds**, and the run's whole age phase sits
+under the monitor's existing `ceiling` like every other spend.
+
+##### THE ALERT
+
+**Buys only. Tokens whose deployment block falls inside the window.** One line per
+token: symbol, name, address, DexScreener link, **age in minutes**, distinct buying
+wallets, total USD bought, and market cap where derivable — reading `unpriced` where
+there is no USD route and `no supply` where there is no supply. **Ordered by distinct
+buying wallets descending, then USD bought**, the same ordering and for the same reason
+as the first alert: two wallets buying the same thing is the coordination signal, and a
+USD-first order sorts every unpriceable token off the end.
+
+**AGE IS MINUTES SINCE THE DEPLOYMENT BLOCK'S TIMESTAMP, NEVER SINCE THE WATCHER FIRST
+SAW IT, and that distinction is the reason this alert exists.** The watcher began on
+2026-09-13 and saw 751 tokens that day; **not one of them launched that day** — they
+were simply the first slice's backlog. A first-seen clock would have called all 751 new
+and been wrong 751 times. `watchlist_activity.seen_at` is when this system noticed, and
+conflating it with when the token was born is the specific failure this change exists to
+avoid. **Nothing in the age path reads `seen_at` or `block_time`.**
+
+**NOTHING IS SENT ON AN EMPTY PERIOD, and most runs will send nothing.** A token
+launching and being bought by a watchlist wallet inside one hour is a rare event; a
+quiet run is the alert working, not a fault. `monitor_runs` already distinguishes
+silence from a dead monitor.
+
+**The same measure-and-drop character guard**, 3,600 against the sink's 4,000, through
+the shared `fitBody` in `alert-format.ts` — one implementation, as with every other
+shared rule here. **The footer states the true omitted count**, never cap arithmetic.
+
 #### A DEPLOY FAILED TO BOOT ON THE OPTION ALLOW-LIST, AND THAT IS THE GUARD WORKING
 
 The first deploy of this change **failed**: the monitor YAML gained four options and
@@ -3824,6 +3998,13 @@ investigation. A crash would have been strictly better.
 | `inflated-pnl` floor | −0.001 tokens | reuses the token-amount floor; **measured** that 589 wallets sit above −1e-6 |
 | token-amount floor | 0.001 | **measured** — caught the $980,394 row |
 | USD floor | $0.01 | **measured** — caught 5,301 rows, largest $0.00999987 |
+| `launch_window_minutes` | 60 min = 35,622 blocks | **operator preference**; the BLOCK COUNT is derived from the measured block time, never written as a constant |
+| `age_bisects_per_run` | 25 | **derived from a measurement** — ~10x the 9.1 novel buy-side tokens/run measured on 2026-09-14, so it cannot bind on a normal run |
+| novel buy-side tokens/day | 437 | **measured 2026-09-14**, the only complete non-seeding day; 2026-09-13's 751 is the seeding day and is not a rate |
+| age check, per novel token | 26 CU, once, ever | one `eth_getCode`; the answer is cached permanently in both directions |
+| age bisect, per launch | 436 CU (+26 for the upper-end check) | `ceil(log2(35,622)) = 16` reads plus one block timestamp |
+| `supply_ttl_days` | 7 | **operator preference** — supply moves on mints and burns, not on trades |
+| `supply_reads_per_run` | 200 | **bound, not an estimate** — a typical run needs ~14; the cap lets a backlog drain over a few cycles |
 
 ---
 
