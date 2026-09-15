@@ -83,6 +83,15 @@ computed with the MEAN and is left as that run produced it**; every score in the
 tables is now the maximum. The definition, the measured effect on all six windows, and
 the check that no other metric has the same shape are in step 13.
 
+**BONER IS IN PROGRESS, STOPPED AT THE COHORT REVIEW 2026-09-15.** Steps 1–7 complete
+at **133,106 CU = $0.060** including HIMS; cohort **1,352 wallets** held in
+`token_intake_state` and **nothing written** — tags, rows, windows and scores all 0,
+verified on a fresh connection. **It is the SECOND BRIDGE EVER** (HIMS,
+`0xccee82fe…3d09`, a tokenised equity like NVDA) and **the first sweep since the
+batching fix — 3,202 rows/sec against CASHCAT's 1,248.** Two open items it surfaced are
+in section 9: nothing in the repository writes `tokens.role`, and the cohort phase
+spends without printing a work set.
+
 **Read the V3-ONLY subsection before loading CASHCAT.** CHUMP is the first token whose
 market is v3, and that subsection exists so the next one does not rediscover it.
 
@@ -6201,6 +6210,57 @@ merely expected**, as it was on CASHCAT for the opposite reason: that table cove
 15,115,287–56,693,145 and BONER-P1 runs 41,726,520–50,134,751, so the overlap is real
 — but the table stopped growing when the hourly job was paused and holds only wallets
 that paid into a *PONS* pool. A BONER buyer appears only if they also bought PONS.
+
+#### THE PUMP POINT IS STORED, and metric 5's ceiling is 1.0 here
+
+`npm run pump-points -- intake/boner.yaml --commit`, dry-run first: **inserted 1,
+already present 0**. Verified on a fresh connection —
+`token_events` holds one `pump` row at **2026-08-30 16:00:00+00**, which is
+`2026-08-30T12:00:00-04:00` carrying its offset.
+
+**ONE pump, and it IS the window end.** CHUMP and CASHCAT had the same shape and it
+capped metric 5 at 1/n_pumps under the old mean. **With one pump the ceiling is
+1/1 = 1.0 and the effect that misled three tokens cannot arise here** — and since
+2026-09-14 the metric is the maximum anyway. Recorded as a prediction for step 13, not
+an assumption.
+
+#### HIMS'S SPREAD AGAINST DIRECT TRADES CANNOT BE MEASURED YET, AND SAYING SO IS THE
+#### ANSWER
+
+Step 4 requires it: *two bucketed medians multiplied compound their error — report the
+spread against direct token/USD trades in the same buckets rather than assuming it
+small.* **It is not measurable at the step 7 stop, and the reason is structural rather
+than an omission.**
+
+```
+HIMS in-scope pools        131   (USDG 110, native ETH 13, WETH 8)
+HIMS swaps SWEPT             0   -- intake/hims.yaml carries sweep ceiling 0, deliberately
+HIMS bridge series           0 buckets
+HIMS swaps, LOWER BOUND  5,005 across 18 pools, 35,581,659..42,694,912, from v4_swaps_all
+```
+
+**The lower bound carries the usual coverage limit and it bites hard here**: the table
+ends at 42,695,454 and BONER-P1 runs to 50,134,751, so those 5,005 swaps see **none of
+the window past 42.7M** and touch 18 of HIMS's 127 in-scope v4 pools.
+
+**Why the spread needs more than BONER's own data.** The comparison is
+`BONER -> HIMS -> USD` against `BONER -> USD` in the same buckets. BONER's side of both
+is already swept — it has 3 HIMS pools and 156 USDG pools in scope. **The missing term
+is HIMS/USD, which can only come from HIMS's OWN pools against pricing assets**, and
+deriving it from BONER's numbers would be circular: it would compute HIMS/USD *from*
+the BONER/USDG price it is supposed to validate.
+
+**What it costs to complete**, sized from the blocks actually to be read —
+20,950,062 to head is 42.3M blocks at the 100,000 cap:
+
+```
+swap streams only (v3 + v4 x 1 chunk of 127 pools)   ~846 requests   ~50,800 CU  ~$0.023
+all three streams as the runner sweeps them         ~1,269 requests  ~76,100 CU  ~$0.034
+```
+
+**NVDA is the precedent that says swaps alone suffice: it holds 2,742,472 swaps and
+ZERO transfers**, and its bridge series derives fine. **A bridge needs ticks, not
+attribution.**
 
 ---
 
