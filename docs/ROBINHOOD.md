@@ -3179,6 +3179,150 @@ an exception to it. The market's own pools are enumerated and cached
 (`eth_usd_pools`), so a slice needs one v4 filter plus one v3 filter over its own
 20,000 blocks: **two requests, ~120 CU, against the ~550 the run already spends.**
 
+#### MEASURED 2026-09-14: is a market-cap-filtered buy alert buildable on this data?
+
+**Asked as a measurement pass, nothing built.** `watchlist_activity` at the time held
+**15,993 rows over 1,225 tokens and 547 wallets**, blocks 61,554,892–63,213,144,
+2026-09-13 01:09:37Z to 2026-09-14 23:55:15Z. Section 0's "303 rows, 103 tokens" is
+the figure from the day it was built and is two days stale — **current counts live in
+section 0 and are re-read, never quoted from a findings block.**
+
+**COVERAGE, over the 10,562 BUY rows (1,078 distinct tokens):**
+
+| counter asset | buy rows | tokens | priced | unpriced |
+|---|---|---|---|---|
+| other token | 3,331 | 439 | **0** | 3,331 |
+| native ETH | 3,240 | 427 | 3,189 | 51 |
+| USDG | 2,352 | 213 | **2,352** | **0** |
+| WETH | 1,639 | 175 | 1,628 | 11 |
+| | **10,562** | | **7,169** | **3,393** |
+
+Both sides reconcile exactly — 3,189 + 2,352 + 1,628 = 7,169 and
+3,331 + 51 + 11 = 3,393 — so no row is unaccounted for.
+
+**The null reasons, and the two that returned nothing are stated rather than omitted:**
+
+```
+counter asset is not a recognised pricing asset   3,331 rows / 439 tokens   98.2%
+no ETH/USD bucket                                    62 rows /  30 tokens    1.8%
+a buy row whose pool is not in chain_pool_cache       RETURNED NO ROWS
+a USDG-COUNTER buy row left unpriced                  RETURNED NO ROWS
+```
+
+**USDG priced 2,352 of 2,352, which is the stablecoin rule holding exactly** — a
+dollar resolves to 1 without consulting any series, so there is no mechanism by which
+one can go null.
+
+**THE 62 "no ETH/USD bucket" ROWS ARE ALL PRE-FIX, AND THAT CONFIRMS THE FIX RATHER
+THAN CONTRADICTING IT.** They sit in blocks 61,564,885–61,585,150, 01:26–02:00 on
+2026-09-13 — inside the first two slices recorded above, before the slice derivation
+shipped. **None has recurred in the 1.66M blocks since.** This subsection nearly
+recorded it as a live 62-row defect; the block range is what settled it, and an
+"expected zero" that is non-zero must be dated before it is believed either way.
+
+**A CHECK OF MINE CONTRADICTED ANOTHER AND THE CRUDER ONE WAS WRONG.** A late query
+asking "is either currency USDG" found 250 unpriced rows where the per-counter
+classification found none. All 250 are rows where **USDG is the TOKEN BEING BOUGHT**,
+against counters like PONS, AI and FLYBRAIN — correctly unpriced under
+"counter is not a pricing asset". Testing membership of the PAIR is not testing the
+COUNTER, and section 7's rule applies: when a query disagrees with itself, suspect the
+query.
+
+**SUPPLY IS THE BINDING CONSTRAINT, AND IT IS ALMOST ENTIRELY ABSENT.**
+
+```
+distinct tokens in watchlist_activity            1,225
+  with a stored totalSupply                          5   <- PONS, INDEX, AI, CASHCAT, NVDA
+  NOVEL                                          1,220
+tokens on the BUY side                           1,078
+```
+
+**`tokens` has no `total_supply` column** — step 12 records this and it is still true.
+The only stored supply anywhere is `token_intake_state`'s identity report, which exists
+for the six loaded tokens; CHUMP is the sixth and has no watchlist activity.
+
+**Priced per bucket:** the market cap is derivable for **5 of 693** tokens bought on
+2026-09-14. 441 are priced but have no supply, and 247 have neither.
+
+**THE FIVE DERIVABLE MARKET CAPS ARE THREE ORDERS OF MAGNITUDE ABOVE BOTH THRESHOLDS**,
+so at today's coverage $200,000 and $150,000 are the SAME filter — they partition the
+visible set identically, because the smallest visible cap is 83x the larger threshold:
+
+| token | supply | implied price | implied market cap (2026-09-14) |
+|---|---|---|---|
+| PONS | 1,000,000,000 | $0.5715 | **$571,540,107** |
+| AI | 991,382,832.598 | $0.2425 | **$240,372,331** |
+| CASHCAT | 1,000,000,000 | $0.1544 | **$154,385,172** |
+| INDEX | 1,000,000,000 | $0.0313 | **$31,282,984** |
+| NVDA | 78,589.647 | $212.07 | **$16,666,711** |
+
+**THE SLICE-IMPLIED PRICE IS SOUND AS A LEVEL, AND THAT IS MEASURED RATHER THAN
+ASSUMED — but only where it can be checked.** Against each token's own independently
+derived series over the same block range:
+
+| token | slice-implied | stored-series median | apart |
+|---|---|---|---|
+| PONS | $0.55362 | $0.56192 | **1.5%** |
+| CASHCAT | $0.15496 | $0.16159 | 4.1% |
+| AI | $0.24513 | $0.26508 | 7.5% |
+| INDEX | $0.03022 | $0.02774 | **8.9%** |
+
+All four sit inside the ~10% band section 1's tolerance treats as not changing a
+decision, and PONS's per-row ratio median (0.55472) sits on its aggregate (0.55362),
+so no degenerate row dominates. **The check is only available for the four tokens that
+HAVE a series — the deepest on the chain. For the other 1,220 there is no independent
+cross-check at any price.**
+
+**WHAT THE FILTER WOULD HAVE SURFACED, and it is the wrong five.** The tokens whose
+market cap is computable are exactly the loaded, already-tracked ones. Every token the
+alert exists to find is in the blind set — measured on 2026-09-14, top by distinct
+buying wallets:
+
+```
+BLIND, priced but no supply     ZZZ 24 wallets $54,112   CRCL 24  IPO 22  DELTA 21
+                                MEME 16 $41,927   BONER 12 $53,321  (BONER is queued)
+EXCLUDED, no price at all       JUDE 15 wallets 58.9M tokens   RSI 14   OPEN 11
+                                DIVI 10   BobCoin 9   RHSE 9
+```
+
+**24 distinct wallets buying one token in a day is the coordination signal step 17
+says the alert exists to catch**, and the market-cap filter cannot see a single one of
+them today.
+
+**COST OF THE SUPPLY READ, priced before spending and NOT spent:**
+
+```
+1,220 novel tokens x 26 CU (eth_call totalSupply)   31,720 CU   $0.0143  one-off
+~474 newly-seen tokens per day x 26 CU              12,324 CU   $0.0055/day
+                                                                ~$0.17/month ongoing
+```
+
+**Readability is evidenced but not proven: 1,225 of 1,225 tokens already answered
+`decimals()`**, the same ERC-20 call shape, and 1,210 answered `symbol()`. That is
+strong evidence and not a guarantee, so step 1's rule governs the result — **a `0x`
+return is unknown, never zero**, and a token whose supply cannot be read has no market
+cap rather than a market cap of nothing.
+
+**SUPPLY IS NOT CACHEABLE ON THE SAME TERMS AS DECIMALS, AND THIS IS THE ONE DESIGN
+POINT THAT IS NOT OBVIOUS.** `token_decimals_cache` is permanent because decimals are
+immutable and a pool is a pool for good. **Total supply is neither** — a mint or a burn
+changes it, and a permanently cached supply would go stale silently, which is this
+document's most-recorded failure shape. A supply cache needs a re-read cadence and a
+`supply_read` settled-negative flag (the flag for the same reason `meta_read` exists:
+without it, a token that genuinely does not answer is re-asked for ever).
+
+**WHAT IS NOT KNOWABLE AT ANY EFFORT, stated rather than worked around:**
+
+- **Total supply is not circulating supply.** A burn address holding a large balance,
+  or a locked LP position, makes the two diverge, and nothing here measures either.
+  Every figure above is TOTAL-supply market cap and must be labelled as one.
+- **A slice-implied price is not a market price.** It is a volume-weighted average over
+  one wallet set's trades in a window, from the rows the alert already aggregates — the
+  distinction step 17 already draws for the nearest-preceding-bucket lookup.
+- **A token with no USD route has no market cap at any price.** The 439 tokens whose
+  counter is another memecoin are not underpriced, they are unpriceable, and no supply
+  read changes that. They are 3,331 of 10,562 buy rows.
+
 #### The watchlist tab — `/watchlist`
 
 The alert is capped at 20 tokens; **this page is where the rest lives**, one row per
