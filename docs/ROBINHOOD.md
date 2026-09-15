@@ -5999,6 +5999,54 @@ streams — **1,254 requests, 75,240 CU, $0.034** — against CHUMP's 42,660 and
 240. **The waste scales with how LATE a token launched**, and BONER is the latest
 loaded here, which is the rule's own prediction confirmed at a third point.
 
+#### THE SWEEP: THE BATCHING FIX MEASURED AT LAST — 3,202 rows/sec, 2.57x CASHCAT
+
+**Section 7 said "BONER is the first token that will measure it, and the figure to
+record then is rows/second against CASHCAT's 1,248." This is that figure.**
+
+```
+duration        627,069 ms = 10.45 min
+cost             55,450 CU  =  924 eth_getLogs x 60 + 1 eth_blockNumber x 10, EXACTLY
+logs             v3 66,764   v4 391,009   transfer 1,549,971   TOTAL 2,007,744
+coverage         all three streams 21,534,845 / 21,534,845 blocks, 0 gaps, 0 overlaps
+blocks skipped   41,726,520 below the deployment block -- the fix, in the run's own log
+```
+
+| | CHUMP | CASHCAT | **BONER** |
+|---|---|---|---|
+| rows written | 687,982 | 14,957,528 | **2,007,744** |
+| wall-clock | 13.1 min | 199.8 min | **10.45 min** |
+| **rows/second** | 875 | **1,248** | **3,202** |
+| rows/request | 371 | 4,113 | 2,173 |
+
+**2.57x CASHCAT's throughput, and the comparison is honest but not clean.** CASHCAT
+wrote 7.4x more rows, and a bigger job has more opportunity to amortise — so this is
+not a controlled before-and-after on the same data, exactly as section 7 warned when it
+called the improvement EXPECTED rather than measured. **What can be said: the first
+sweep after the fix moved rows 2.57x faster than the last one before it, and nothing
+in `pg_stat_activity` showed the backend parked in `ClientRead` between sub-second
+inserts this time.** A true measurement still needs one token swept both ways, which
+nothing justifies paying for.
+
+**THE CU ESTIMATE LANDED INSIDE ITS RANGE AND THE REQUEST COUNT LANDED ON THE DENSEST
+SAMPLE.** I sized 645–918 requests and 39,000–55,000 CU from the density probe; the run
+took **924 requests and 55,450 CU** — 0.7% above the top of the range. The per-stream
+figure is the tell: **308 requests per stream against the 306 the densest sample
+predicted.** Sizing a sweep from the DENSEST probed sample, not the mean, is what made
+this land — the mean would have said 215 per stream and been 30% low.
+
+**The v4 stream used ONE chunk.** 238 in-scope v4 pools against the 500-id limit, so
+the topic array never split and the request count was not multiplied. CASHCAT's 583
+pools needed 2 chunks and paid for it; this is the same rule not biting.
+
+**A PROGRESS TABLE THAT STAYS EMPTY IS THE KNOWN DEFECT, NOT A STALLED RUN.** Five
+consecutive polls of `token_sweep_progress` over nine minutes returned **RETURNED NO
+ROWS** while the sweep was running normally, because the runner wraps the whole phase
+in one transaction and nothing commits until it ends — the still-open item in section 9,
+which CHUMP demonstrated with eight empty polls followed by 412,997. **The log file and
+`ps` are the progress signals through the runner; the progress table is not**, and
+knowing that is what kept this from being escalated at the 3x mark.
+
 ---
 
 ## 9. Rules here the code does not implement
