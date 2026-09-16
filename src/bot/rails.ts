@@ -14,7 +14,7 @@
  * "probably fine" -- it is the same failure ROBINHOOD.md records for a balance reader
  * that mapped an RPC error to a plausible 0.0.
  */
-import { NON_TERMINAL, isHalted } from './state.js';
+import { HELD, NON_TERMINAL, isHalted } from './state.js';
 import { RAILS } from './config.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -22,10 +22,13 @@ export interface RailState {
   halted: boolean;
   haltReason: string;
   openPositions: number;
-  /** Cost basis of every OPEN position, summed. The first term of `deployed`. */
+  /**
+   * Cost basis of every position the wallet may still be HOLDING, summed — the `HELD`
+   * set, which is wider than `openPositions` counts. The first term of `deployed`.
+   */
   openCostBasisUsd: number;
   /**
-   * OPEN positions carrying a NULL `position_usd`. `sum()` skips them silently, so
+   * HELD positions carrying a NULL `position_usd`. `sum()` skips them silently, so
    * without this count the cap would under-report exposure and read as a clean pass —
    * the failure shape ROBINHOOD.md records for a `balanceOf` reader that turned 490
    * HTTP 429s into plausible zero balances. Non-zero means `deployed` is UNKNOWN.
@@ -95,11 +98,17 @@ export async function readRailState(
          where chain = $1 and mode = $2
            and created_at >= date_trunc('day', now()))::text as pnl,
        (select coalesce(sum(position_usd), 0) from bot_trades
-         where chain = $1 and mode = $2 and status = any($3))::text as basis,
+         where chain = $1 and mode = $2 and status = any($4))::text as basis,
        (select count(*) from bot_trades
-         where chain = $1 and mode = $2 and status = any($3)
+         where chain = $1 and mode = $2 and status = any($4)
            and position_usd is null)::text as nobasis`,
-    [chain, mode, NON_TERMINAL]);
+    /*
+     * THE CAP'S TWO FIGURES USE $4 = `HELD`, WHICH IS WIDER THAN $3 = `NON_TERMINAL`.
+     * A position the exit ladder failed to sell is still money in a token; it is simply
+     * outside the set boot reconciliation sweeps. Using one set for both questions would
+     * let stuck positions read as $0 deployed. See state.ts.
+     */
+    [chain, mode, NON_TERMINAL, HELD]);
   const row = r.rows[0];
   if (!row) {
     throw new Error('rail state query returned no row; refusing to trade against an '

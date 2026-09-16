@@ -158,6 +158,23 @@ async function main(): Promise<void> {
       + '(deployed is UNKNOWN)', 'BLOCK');
     await wipe(c);
 
+    /*
+     * A POSITION THE EXIT LADDER COULD NOT SELL IS STILL OUR MONEY, AND IT IS OUTSIDE
+     * `NON_TERMINAL`. These two cases are the regression guard for a hole found by
+     * re-auditing this change: `needs_exit` and `exit_exhausted` are what the loop
+     * leaves behind when a ladder exhausts, and neither is swept by MAX_CONCURRENT.
+     *
+     * THE TELL IS THAT `openPositions` READS 0 WHILE THE CAP BLOCKS. If the cap used
+     * `NON_TERMINAL` like MAX_CONCURRENT does, $91 of unsellable tokens would read as
+     * $0 deployed and every one of these would ALLOW.
+     */
+    for (const status of ['needs_exit', 'exit_exhausted']) {
+      await seed(c, 4, status, null, status === 'needs_exit' ? 'ia' : 'ib', (room + 1) / 4);
+      await run(`MAX_DEPLOYED_USD counts '${status}' positions: $${room + 1} of tokens `
+        + 'the ladder could not sell, with MAX_CONCURRENT seeing 0 open', 'BLOCK');
+      await wipe(c);
+    }
+
     /* --- MAX_DAILY_LOSS_USD ----------------------------------------------- */
     await seed(c, 1, 'closed', -(RAILS.MAX_DAILY_LOSS_USD - 1), 'ba');
     await run(`MAX_DAILY_LOSS_USD at -$${RAILS.MAX_DAILY_LOSS_USD - 1}`, 'ALLOW');

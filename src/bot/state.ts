@@ -99,6 +99,27 @@ create table if not exists bot_exit_attempts (
 export const NON_TERMINAL = ['intent', 'entry_sent', 'holding', 'exit_sent'];
 
 /**
+ * STATUSES IN WHICH THE WALLET MAY STILL BE HOLDING THE TOKEN, AND THEREFORE STILL HAS
+ * CAPITAL DEPLOYED. THIS IS WIDER THAN `NON_TERMINAL` AND THE DIFFERENCE MATTERS.
+ *
+ * `NON_TERMINAL` answers "what must boot reconciliation resolve". `HELD` answers a
+ * different question — "what is our money still in" — and a position the exit ladder
+ * FAILED to sell is the clearest possible yes to the second while sitting outside the
+ * first. That is the worst kind of deployed capital, not the least: it is money in a
+ * token nothing has been able to sell.
+ *
+ * `exit_exhausted` IS IN THIS SET BECAUSE SEVEN SUCH ROWS EXIST. It was replaced by
+ * `needs_exit` on 2026-09-16 precisely because it is in no sweep's set, but the rows
+ * written before that fix were never migrated, so they sit in a status nothing looks at.
+ * Leaving it out of the capital cap would let $70 of stuck positions read as $0 deployed.
+ *
+ * MAX_CONCURRENT STILL USES THE NARROWER `NON_TERMINAL`, deliberately and pending an
+ * operator decision — widening a rail that has been exercised is a change to what that
+ * rail means. LAUNCHBOT.md section 7 carries it as open.
+ */
+export const HELD = [...NON_TERMINAL, 'needs_exit', 'exit_exhausted'];
+
+/**
  * THE KILL SWITCH IS A ROW, RE-READ ON A FRESH CONNECTION BEFORE EVERY TRADE.
  *
  * A flag in memory dies with the container and cannot be set from outside it. A row can
