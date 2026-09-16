@@ -107,9 +107,11 @@ async function main(): Promise<void> {
          and s.amount0 <> 0 and s.amount1 <> 0`);
     await c.query('create index on sw(pool_id, off, log_index); analyze sw');
     await show('2. early-window swaps carrying a usable price', `
-      select count(*)::bigint rows, count(distinct pool_id)::int pools,
-             (select count(*) from lau)::int launch_set,
-             (select count(*) from lau l where not exists(select 1 from sw where sw.pool_id=l.pool_id))::int
+      select (select count(*) from sw)::bigint as rows,
+             (select count(distinct pool_id) from sw)::int as pools,
+             (select count(*) from lau)::int as launch_set,
+             (select count(*) from lau l where not exists(
+                select 1 from sw where sw.pool_id=l.pool_id))::int
                as launches_with_NO_PRICEABLE_SWAP`);
     await show('2b. degenerate swaps excluded for a zero side', `
       select count(*)::bigint zero_side_swaps from v4_swaps_all s join lau l on l.pool_id=s.pool_id
