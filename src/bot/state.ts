@@ -60,6 +60,15 @@ create table if not exists bot_control (
   reason   text,
   updated_at timestamptz not null default now()
 );
+
+-- EVERY NEW COLUMN NEEDS ITS OWN ALTER. A 'create table if not exists' is a NO-OP on an
+-- existing table, so a column added to the literal above reaches a fresh database and
+-- never reaches this one. That is rule one of ROBINHOOD.md section 7, and it has
+-- already cost this project a run where every insert threw on a missing 'side'.
+alter table bot_trades add column if not exists exit_sim_status text;
+alter table bot_trades add column if not exists exit_sim_note   text;
+alter table bot_trades add column if not exists exit_sim_from   text;
+alter table bot_trades add column if not exists px_entry        numeric;
 `;
 
 /** Statuses a boot reconciliation must resolve. Anything else is terminal. */

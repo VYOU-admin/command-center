@@ -34,6 +34,38 @@ export const LAUNCHPADS = [
 /** Fee tiers, RECORDED but never depended on: collinear with the launchpad today. */
 export const FEE_TIERS_OBSERVED = [500, 10000] as const;
 
+/**
+ * THE FEE SANITY CHECK. An ALLOW-LIST, not a magnitude bound, and the data is the
+ * reason it is not a bound.
+ *
+ * MEASURED 2026-09-16 on 1,070 rule-qualifying launches whose Initialize target is
+ * one of `LAUNCHPADS`, in blocks 63,216,393..64,216,393. The launchpad attribution
+ * cost 752 `eth_getTransactionByHash` reads -- 11,280 CU, $0.00508. "Exit available"
+ * is at least one swap in the pool between +150 and +450 blocks of the first swap,
+ * which is the window this bot would have to sell into.
+ *
+ *   allow-list {100,500,10000}   n=574  53.6% of pop   exit 88.3%   median +0.144
+ *   bound fee <= 10000           n=696  65.0% of pop   exit 76.7%   median +0.100
+ *
+ * THE BOUND IS WORSE THAN THE ALLOW-LIST, which is the finding. The 122 extra pools
+ * a `<= 10000` bound admits are dominated by two arithmetic runs from a single
+ * launchpad -- 9111,9121,...,9841 and 10881,10891,...,11201, each stepping by 10,
+ * one pool per tier, and ZERO of the 33 in the second run had an exit available.
+ * A factory that walks the fee integer cannot be separated by magnitude, because it
+ * deliberately sits just under whatever round number a bound would pick. Membership
+ * of the three tiers real launchpads actually use is what separates them.
+ *
+ * WHY 100 IS IN THE LIST despite not appearing in `FEE_TIERS_OBSERVED`: it is the
+ * third real tier, n=58, exit 86.2%, median +0.150 -- indistinguishable from 500 and
+ * 10000 and clearly unlike the tail. It was absent from the earlier figure only
+ * because `v4_pool_creator` was itself fee-filtered; see LAUNCHBOT.md section 7.
+ *
+ * THIS IS A SANITY CHECK, NOT THE RULE. The launchpad remains the primary filter.
+ * This exists to reject the fee=803369 pools that launchpad `0x58daec...` also
+ * emits, all three of which reverted in dry run 1.
+ */
+export const ALLOWED_FEES: readonly number[] = [100, 500, 10000];
+
 export const RAILS = {
   /** Operator-approved 2026-09-16. */
   MAX_POSITION_USD: 10,

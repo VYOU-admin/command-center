@@ -49,7 +49,10 @@
     "v4-creators": "node dist/cli/v4-creators.js",
     "route-probe": "node dist/cli/route-probe.js",
     "approval-probe": "node dist/cli/approval-probe.js",
-    "launchbot": "node dist/cli/launchbot.js"
+    "launchbot": "node dist/cli/launchbot.js",
+    "rail-drill": "node dist/cli/rail-drill.js",
+    "reconcile-drill": "node dist/cli/reconcile-drill.js",
+    "price-backfill": "node dist/cli/price-backfill.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

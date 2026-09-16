@@ -5,14 +5,22 @@
  * bound protects it. ROBINHOOD.md records five occasions where two implementations of
  * one rule drifted, most recently with the weaker copy in the running path.
  *
- * THE LAUNCHPAD IS THE PRIMARY FILTER AND THE FEE TIER IS NOT A FILTER AT ALL.
+ * THE LAUNCHPAD IS THE PRIMARY FILTER. THE FEE TIER IS A SANITY CHECK ONLY.
  * They are collinear today -- fee=10000 is essentially always one launchpad and fee=500
  * essentially always direct creation -- but the launchpad is what decayed: its share of
  * rule pools fell 73.3% to 28.8% across the test windows while its median return fell
  * +0.296 to +0.056. A fee-only filter breaks silently the moment a launchpad changes
  * its default. The tier is recorded on every trade so the collinearity can be watched.
+ *
+ * As of 2026-09-16 the tier also carries a narrow allow-list, added because the same
+ * launchpad that emits the productive tiers ALSO emits pools at fee=803369, and all
+ * three of those in dry run 1 reverted. That check rejects a known-bad tail; it does
+ * not select launches, and removing the launchpad filter in favour of it would be the
+ * silent break described above.
  */
-import { GAP_MAX_BLOCKS, GAP_MIN_BLOCKS, LAUNCHPADS, RAILS, SLIPPAGE_BPS } from './config.js';
+import {
+  ALLOWED_FEES, GAP_MAX_BLOCKS, GAP_MIN_BLOCKS, LAUNCHPADS, RAILS, SLIPPAGE_BPS,
+} from './config.js';
 
 export interface LaunchCandidate {
   poolId: string;
@@ -40,6 +48,15 @@ export function qualifies(c: LaunchCandidate): Verdict {
   const pad = (c.launchpad ?? '').toLowerCase();
   if (!LAUNCHPADS.some((l) => l.toLowerCase() === pad)) {
     reasons.push(`launchpad ${c.launchpad ?? 'unknown'} not in the list`);
+  }
+  /*
+   * THE FEE SANITY CHECK, secondary to the launchpad and never a substitute for it.
+   * An allow-list rather than a bound, because the tail that has to be rejected is a
+   * factory walking the fee integer in steps of 10 just under any round threshold.
+   * Provenance and the measured alternative are in config.ts on ALLOWED_FEES.
+   */
+  if (!ALLOWED_FEES.includes(c.fee)) {
+    reasons.push(`fee ${c.fee} is not one of ${ALLOWED_FEES.join(', ')}`);
   }
   return { qualifies: reasons.length === 0, reasons };
 }

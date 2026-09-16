@@ -26,6 +26,8 @@ import {
 import { buildPermit2Approve, buildSwap, buildTokenApprove } from '../bot/calldata.js';
 import { expectedOut, minOut, positionWei, qualifies } from '../bot/rule.js';
 import { BOT_SCHEMA, halt, isHalted } from '../bot/state.js';
+import { checkRails } from '../bot/rails.js';
+import { id } from 'ethers';
 import { ReadOnlyRpc } from '../bot/rpc.js';
 import { reconcileOnBoot } from '../bot/reconcile.js';
 
@@ -84,12 +86,17 @@ async function main(): Promise<void> {
     init: ReturnType<typeof decodeInitialize>; launchpad: string | null;
     token: string; counter: string; zeroIsPricing: boolean;
   }>();
+  /* Computed, never typed from memory -- a hand-copied selector is a fabricated constant. */
+  const BALANCE_OF_SEL = id('balanceOf(address)').slice(0, 10);
+
   const stats = {
     ticks: 0, initializes: 0, candidates: 0, qualified: 0,
     simulated: 0, simClean: 0, simReverted: 0, skippedRail: 0,
+    exitClean: 0, exitReverted: 0, exitNotAttempted: 0,
   };
   const reverts: string[] = [];
   let consecutiveReverts = 0;
+  const railBlocks: string[] = [];
 
   while (Date.now() < until) {
     stats.ticks += 1;
@@ -139,7 +146,8 @@ async function main(): Promise<void> {
           address: POOL_MANAGER, topics: [TOPICS_SWAP],
           fromBlock: `0x${(head - (cursorSpan || 1)).toString(16)}`,
           toBlock: `0x${head.toString(16)}`,
-        }])) as Array<{ topics: string[]; blockNumber: string; data: string }>;
+        }])) as Array<{ topics: string[]; blockNumber: string; data: string;
+          transactionHash: string }>;
         for (const sw of swaps) {
           const pid = (sw.topics[1] ?? '').toLowerCase();
           const p = pending.get(pid);
@@ -158,11 +166,35 @@ async function main(): Promise<void> {
           }
           stats.qualified += 1;
 
-          const today = await c.query<{ n: string }>(
-            `select count(*)::text n from bot_trades where chain=$1 and mode=$2
-               and created_at > now() - interval '24 hours'`, [CHAIN, MODE]);
-          if (Number(today.rows[0]!.n) >= RAILS.MAX_TRADES_PER_DAY) {
-            stats.skippedRail += 1; continue;
+          /*
+           * EVERY RAIL, IN ONE PLACE, IMMEDIATELY BEFORE COMMITTING TO THE TRADE.
+           * This used to check MAX_TRADES_PER_DAY alone, inline; MAX_CONCURRENT and
+           * MAX_DAILY_LOSS_USD were documented in config.ts and enforced nowhere, so
+           * they were not rails at all. bot/rails.ts is now the only thing that
+           * decides, and it reads its figures from Postgres so a container
+           * replacement cannot reset the day.
+           */
+          const rail = await checkRails(c, CHAIN, MODE);
+          if (!rail.allowed) {
+            stats.skippedRail += 1;
+            if (railBlocks.length < 12) railBlocks.push(rail.blocked.join('; '));
+            log.warn('RAIL BLOCKED A TRADE', { pool: pid, blocked: rail.blocked, state: rail.state });
+            /*
+             * TWO RAILS STOP THE DAY RATHER THAN SKIP ONE LAUNCH. A run of reverts and
+             * a breached daily loss are both statements that something is wrong with
+             * the strategy or the chain, not with this particular pool -- continuing to
+             * the next launch would re-run the same mistake within seconds. The
+             * remaining rails (concurrency, daily count) are ordinary capacity limits
+             * and correctly skip.
+             */
+            const fatal = rail.blocked.find((b) => b.startsWith('MAX_CONSECUTIVE_REVERTS')
+              || b.startsWith('MAX_DAILY_LOSS_USD'));
+            if (fatal) {
+              await halt(c, CHAIN, fatal);
+              log.error('HALTING', { reason: fatal, state: rail.state });
+              break;
+            }
+            continue;
           }
           const ethUsd = await c.query<{ e: string }>(
             `select eth_usd::text e from native_usd_prices order by block_number desc limit 1`);
@@ -210,18 +242,69 @@ async function main(): Promise<void> {
             simNote = (err as Error).message.slice(0, 200);
             stats.simReverted += 1; consecutiveReverts += 1;
             if (reverts.length < 12) reverts.push(`${pid.slice(0, 14)}: ${simNote}`);
-            if (consecutiveReverts >= RAILS.MAX_CONSECUTIVE_REVERTS) {
-              await halt(c, CHAIN, `${consecutiveReverts} consecutive simulation reverts`);
-              log.error('HALTING on consecutive reverts', { consecutiveReverts });
-            }
           }
+
+          /*
+           * THE EXIT LEG, SIMULATED -- AND THE HONEST LIMIT OF IT STATED IN THE ROW.
+           *
+           * At entry time the tokens are not held, so `eth_call` of the sell from our
+           * own address reverts for a reason that says nothing about the pool: we have
+           * no balance. Simulating it that way would produce a 100% revert rate that
+           * looks like a broken exit and is really an empty wallet.
+           *
+           * So the sell is simulated FROM AN ADDRESS THAT ACTUALLY HOLDS THE TOKEN --
+           * the sender of the pool's own first swap, whose balance is read before use.
+           * That proves the pool accepts a sell of this size, that the calldata is
+           * well-formed, and that no hook blocks selling. It does NOT prove our wallet's
+           * approval state, which is a separate leg measured separately.
+           *
+           * EVERY OUTCOME IS ITS OWN VALUE, and "could not be attempted" is never
+           * folded in with "reverted". A partial check reported as a full one is the
+           * failure mode this whole document exists to prevent.
+           */
+          let exitStatus = 'not_attempted'; let exitNote = ''; let exitFrom: string | null = null;
+          try {
+            const txr = (await rpc.call('eth_getTransactionByHash', [sw.transactionHash])) as
+              { from?: string } | null;
+            const holder = txr?.from ? txr.from.toLowerCase() : null;
+            if (!holder) { exitStatus = 'no_holder_found'; exitNote = 'first-swap tx unreadable'; }
+            else {
+              exitFrom = holder;
+              const balData = BALANCE_OF_SEL + '0'.repeat(24) + holder.slice(2);
+              const balRaw = await rpc.call('eth_call', [{ to: p.token, data: balData }, 'latest']);
+              const bal = BigInt(String(balRaw));
+              if (bal === 0n) {
+                exitStatus = 'holder_zero_balance';
+                exitNote = 'first-swap sender holds none of the token now';
+              } else {
+                const sellAmt = bal < quoted ? bal : quoted;
+                const sellPlan = buildSwap({ ...plan, zeroForOne: !p.zeroIsPricing,
+                  amountIn: sellAmt, amountOutMinimum: 1n });
+                try {
+                  const rr = await rpc.call('eth_call', [{
+                    from: holder, to: sellPlan.to, value: '0x0', data: sellPlan.data,
+                  }, 'latest']);
+                  exitStatus = 'clean'; exitNote = `returned ${String(rr).slice(0, 18)}`;
+                  stats.exitClean += 1;
+                } catch (e2) {
+                  exitStatus = 'reverted'; exitNote = (e2 as Error).message.slice(0, 200);
+                  stats.exitReverted += 1;
+                }
+              }
+            }
+          } catch (e3) {
+            exitStatus = 'probe_failed'; exitNote = (e3 as Error).message.slice(0, 200);
+          }
+          if (exitStatus !== 'clean' && exitStatus !== 'reverted') stats.exitNotAttempted += 1;
 
           await c.query(
             `insert into bot_trades (chain,mode,pool_id,token,counter,launchpad,fee,
                tick_spacing,hooks,status,init_block,first_swap_block,age_blocks_at_entry,
                age_seconds_at_entry,position_wei,position_usd,quoted_out,min_out,
-               entry_price,entry_calldata,exit_calldata,fill_status,note)
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+               entry_price,entry_calldata,exit_calldata,fill_status,note,
+               exit_sim_status,exit_sim_note,exit_sim_from,px_entry)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
+                     $24,$25,$26,$27)
              on conflict (chain,mode,pool_id) do nothing`,
             [CHAIN, MODE, pid, p.token, p.counter, p.launchpad, p.init.fee,
               p.init.tickSpacing, p.init.hooks, simOk ? 'simulated' : 'sim_reverted',
@@ -229,7 +312,8 @@ async function main(): Promise<void> {
               firstSwapBlock - p.init.blockNumber,
               (firstSwapBlock - p.init.blockNumber) / BLOCKS_PER_SECOND,
               size.toString(), RAILS.MAX_POSITION_USD, quoted.toString(), bound.toString(),
-              rate, buy.data, sell.data, 'dry-run', simNote]);
+              rate, buy.data, sell.data, 'dry-run', simNote,
+              exitStatus, exitNote, exitFrom, rate]);
 
           log.info('WOULD TRADE', {
             pool: pid, token: p.token, launchpad: p.launchpad, fee: p.init.fee,
@@ -254,6 +338,7 @@ async function main(): Promise<void> {
     mode: MODE, minutes, ...stats, cu_spent: rpc.cuSpent,
     usd: ((rpc.cuSpent * 0.45) / 1e6).toFixed(5),
     revert_samples: reverts,
+    rail_blocks: railBlocks,
     backfill_offsets_s: BACKFILL_OFFSETS_S,
     blocks_per_second: BLOCKS_PER_SECOND,
     entry_delay_blocks: ENTRY_DELAY_BLOCKS, exit_delay_blocks: EXIT_DELAY_BLOCKS,
