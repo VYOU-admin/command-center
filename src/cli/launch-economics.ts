@@ -97,8 +97,8 @@ async function main(): Promise<void> {
              case when r.tside=0 then abs(s.amount1)/abs(s.amount0)
                                  else abs(s.amount0)/abs(s.amount1) end price,
              /*
-              * THE COUNTER SIDE, AND THE FIRST VERSION HAD IT INVERTED. `tside` is the
-              * TOKEN's side index -- currency0 being a pricing asset means the token is
+              * THE COUNTER SIDE, AND THE FIRST VERSION HAD IT INVERTED. tside is the
+              * TOKEN side index -- currency0 being a pricing asset means the token is
               * side 1 -- so the counter is amount1 when tside=0 and amount0 when
               * tside=1, which is the opposite of the price expression above it. Taking
               * the token side as the counter valued trades at a median of $201 BILLION,
