@@ -192,7 +192,7 @@ async function main(): Promise<void> {
     exitClean: 0, exitReverted: 0, exitNotAttempted: 0,
     quoteRefused: 0, quoteReadFailed: 0,
     quoteBasis: {} as Record<string, number>,
-    exitsDue: 0, ladderFired: 0, ladderExhausted: 0,
+    exitsDue: 0, ladderFired: 0, ladderExhausted: 0, rowsNotStored: 0,
     ladderRungs: {} as Record<string, number>,
   };
   const exitFails: string[] = [];
@@ -523,7 +523,49 @@ async function main(): Promise<void> {
 
           const exitDue = firstSwapBlock + ENTRY_DELAY_BLOCKS + EXIT_DELAY_BLOCKS;
 
-          void quoteBasis; void impactPct; void feePct;
+          /*
+           * THE ROW IS WRITTEN BEFORE ANYTHING IS REPORTED.
+           *
+           * This insert was DELETED by an edit that replaced the old exit-simulation
+           * block, and the loop then ran for nine minutes logging `WOULD TRADE` over an
+           * empty table — four trades reported, zero rows stored, and no error anywhere
+           * because nothing threw. It is the same shape as the write that reported
+           * "3,200 rows stored" over an empty table in ROBINHOOD.md step 12, and it was
+           * caught the same way: by querying on a separate connection instead of
+           * believing the log.
+           *
+           * A CLEAN BUY OPENS A POSITION. `holding` plus an `exit_due_block` is what the
+           * per-tick exit sweep looks for; a reverted buy never opened one and is
+           * terminal. `rowCount` is checked, because an insert that stores nothing is
+           * indistinguishable from one that worked unless somebody looks.
+           */
+          const ins = await c.query(
+            `insert into bot_trades (chain,mode,pool_id,token,counter,launchpad,fee,
+               tick_spacing,hooks,status,init_block,first_swap_block,age_blocks_at_entry,
+               age_seconds_at_entry,position_wei,position_usd,quoted_out,min_out,
+               entry_price,entry_calldata,exit_calldata,fill_status,note,
+               exit_sim_status,exit_sim_from,px_entry,exit_due_block,quote_basis)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+                     $20,$21,$22,$23,$24,$25,$26,$27,$28)
+             on conflict (chain,mode,pool_id) do nothing`,
+            [CHAIN, MODE, pid, p.token, p.counter, p.launchpad, p.init.fee,
+              p.init.tickSpacing, p.init.hooks,
+              simOk ? 'holding' : 'sim_reverted',
+              p.init.blockNumber, firstSwapBlock,
+              firstSwapBlock - p.init.blockNumber,
+              (firstSwapBlock - p.init.blockNumber) / BLOCKS_PER_SECOND,
+              size.toString(), RAILS.MAX_POSITION_USD, quoted.toString(), bound.toString(),
+              rate, buy.data, sell.data, 'dry-run', simNote,
+              simOk ? 'pending' : 'entry_reverted', exitFrom, px,
+              simOk ? exitDue : null, quoteBasis]);
+          if ((ins.rowCount ?? 0) === 0) {
+            stats.rowsNotStored += 1;
+            log.warn('INSERT STORED NOTHING', {
+              pool: pid, mode: MODE,
+              note: 'on conflict fired or the row was rejected; reported rather than '
+                + 'counted as a trade',
+            });
+          }
 
           log.info('WOULD TRADE', {
             quote_basis: quoteBasis, fee_pct: feePct.toFixed(4),
@@ -544,6 +586,34 @@ async function main(): Promise<void> {
       log.error('tick failed', errorFields(err));
     } finally { c.release(); }
     await sleep(DETECT_INTERVAL_MS);
+  }
+
+  /*
+   * THE RUN IS RECONCILED AGAINST THE DATABASE ON A FRESH CONNECTION BEFORE IT REPORTS.
+   *
+   * A previous build of this loop logged four `WOULD TRADE` lines over an EMPTY table
+   * for nine minutes, because an edit had deleted the insert and nothing threw. The
+   * log is not evidence; the rows are. ROBINHOOD.md's worst recorded failure is a write
+   * that reported 3,200 rows stored against an empty table, and it was caught by exactly
+   * this check and by nothing else.
+   */
+  {
+    const fresh = await pool.connect();
+    try {
+      const v = await fresh.query<{ n: string }>(
+        `select count(*)::text n from bot_trades where chain = $1 and mode = $2`,
+        [CHAIN, MODE]);
+      const stored = Number(v.rows[0]!.n);
+      log.info('VERIFIED ON A FRESH CONNECTION', {
+        simulated_this_run: stats.simulated, rows_in_this_mode: stored,
+        rows_not_stored: stats.rowsNotStored,
+      });
+      if (stats.simulated > 0 && stored === 0) {
+        throw new Error(`the run simulated ${stats.simulated} trades and the table holds `
+          + `ZERO rows for mode ${MODE}. The log is not evidence; this run stored `
+          + 'nothing and must not be reported as a dry run.');
+      }
+    } finally { fresh.release(); }
   }
 
   log.info('launchbot dry run complete', {

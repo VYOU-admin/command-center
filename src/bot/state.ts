@@ -74,6 +74,7 @@ alter table bot_trades add column if not exists exit_filled_on    integer;
 alter table bot_trades add column if not exists exit_bound_bps    integer;
 alter table bot_trades add column if not exists exit_requote_out  numeric;
 alter table bot_trades add column if not exists exit_due_block    bigint;
+alter table bot_trades add column if not exists quote_basis       text;
 
 -- EVERY EXIT ATTEMPT, RECORDED BEFORE THE NEXT ONE BEGINS.
 -- bot/exit.ts persists each rung as it is tried, so a container replaced mid-ladder
