@@ -51,11 +51,13 @@ create table if not exists v4_swap_tx (
 );
 create index if not exists v4_swap_tx_to_idx on v4_swap_tx (chain, tx_to);
 /*
- * ALTER, NOT JUST CREATE. Section 7's first rule: "a `create table if not exists` is a
- * no-op on an existing table. It does not reconcile a changed shape, and it reports
- * success either way." Adding `side` to the CREATE did nothing on the table the buy run
- * had already made, every insert then referenced a column that did not exist, and 315
- * transactions were read and discarded before that surfaced.
+ * ALTER, NOT JUST CREATE. Section 7's first rule: a create-table-if-not-exists is a
+ * no-op on an existing table -- it does not reconcile a changed shape and it reports
+ * success either way. Adding the side column to the CREATE did nothing on the table
+ * the buy run had already made, every insert then referenced a column that did not
+ * exist, and 315 transactions were read and discarded before that surfaced.
+ * (This comment sits inside a template literal, so it carries no backticks: they
+ * terminate it. That is the second time this pass.)
  */
 alter table v4_swap_tx add column if not exists side text;
 `;
