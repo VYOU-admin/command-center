@@ -124,11 +124,13 @@ async function main(): Promise<void> {
        * thing under test is the bound. Anything else would confound the two. */
       const r = await c.query<{
         pool_id: string; token: string; counter: string; fee: number;
-        tick_spacing: number; hooks: string; exit_sim_from: string;
+        tick_spacing: number; hooks: string; exit_sim_from: string; px_entry: string;
       }>(
-        `select pool_id, token, counter, fee, tick_spacing, hooks, exit_sim_from
+        `select pool_id, token, counter, fee, tick_spacing, hooks, exit_sim_from,
+                px_entry::text
            from bot_trades
           where chain='robinhood' and exit_sim_status='clean' and exit_sim_from is not null
+            and px_entry > 0
           order by created_at desc limit 1`);
       if (r.rowCount === 0) {
         log.warn('NO CLEAN-EXIT FIXTURE AVAILABLE', {
@@ -137,35 +139,41 @@ async function main(): Promise<void> {
       } else {
         const p = r.rows[0]!;
         const holder = p.exit_sim_from;
-        /* The pool's most recent trade gives the price a sell would actually get. */
-        const head = Number(BigInt(String((await rawCall(url, 'eth_blockNumber', [])).result)));
-        const logs = (await rawCall(url, 'eth_getLogs', [{
-          address: POOL_MANAGER, topics: [TOPICS.swapV4, p.pool_id],
-          fromBlock: `0x${(head - 200000).toString(16)}`, toBlock: 'latest',
-        }])).result as Array<{ data: string }> | undefined;
-        if (!logs || logs.length === 0) {
-          log.warn('NO RECENT SWAP ON THE FIXTURE POOL', {
-            note: 'RETURNED NO ROWS — live half NOT RUN' });
-        } else {
-          const amts = swapAmounts(logs[logs.length - 1]!.data);
-          const tokenIsC0 = p.token.toLowerCase() < p.counter.toLowerCase();
-          const px = amts ? tokenPrice(amts, tokenIsC0) : 0;
-          const balRaw = await rawCall(url, 'eth_call', [{
-            to: p.token,
-            data: id('balanceOf(address)').slice(0, 10) + '0'.repeat(24) + holder.slice(2),
-          }, 'latest']);
-          const bal = BigInt(String(balRaw.result ?? '0x0'));
-          const sellAmt = bal / 100n > 0n ? bal / 100n : bal;
-          const honest = BigInt(Math.floor(Number(sellAmt) * px));
+        /*
+         * THE PRICE COMES FROM THE TRADE'S OWN STORED px_entry, not from a fresh swap.
+         * The first version looked for a swap in the last 200,000 blocks and the
+         * fixture pool -- a dead launch, which is what most of these are -- had none,
+         * so the live half silently did not run and reported itself as NOT RUN. That is
+         * honest but useless: a retry path that has never been exercised is not a retry
+         * path. px_entry is stored in the pricing-per-token convention of bot/price.ts,
+         * which is the same convention this drill needs.
+         */
+        const px = Number(p.px_entry);
+        const tokenIsC0 = p.token.toLowerCase() < p.counter.toLowerCase();
+        const balRaw = await rawCall(url, 'eth_call', [{
+          to: p.token,
+          data: id('balanceOf(address)').slice(0, 10) + '0'.repeat(24) + holder.slice(2),
+        }, 'latest']);
+        const bal = BigInt(String(balRaw.result ?? '0x0'));
+        if (bal === 0n) {
+          throw new Error(`the fixture holder now holds 0 of ${p.token}; refusing to run `
+            + 'a live retry test whose premise is false');
+        }
+        const sellAmt = bal / 100n > 0n ? bal / 100n : bal;
+        const honest = BigInt(Math.floor(Number(sellAmt) * px));
+        if (honest <= 0n) {
+          throw new Error(`the honest expected output rounds to ${honest}; the fixture `
+            + 'cannot exercise a bound');
+        }
 
-          log.info('LIVE FIXTURE', {
-            pool: p.pool_id.slice(0, 20), holder, fee: p.fee,
-            holder_balance: bal.toString(), selling: sellAmt.toString(),
-            honest_expected_out: honest.toString(),
-            quote_optimism_applied: MEASURED_QUOTE_OPTIMISM,
-            note: 'the quote is inflated by the MEASURED median optimism of our own '
-              + 'quote, so the early rungs fail for the reason the ladder exists',
-          });
+        log.info('LIVE FIXTURE', {
+          pool: p.pool_id.slice(0, 20), holder, fee: p.fee,
+          holder_balance: bal.toString(), selling: sellAmt.toString(),
+          price_per_token: px, honest_expected_out: honest.toString(),
+          quote_optimism_applied: MEASURED_QUOTE_OPTIMISM,
+          note: 'the quote is inflated by the MEASURED median optimism of our own quote, '
+            + 'so the early rungs fail for the reason the ladder exists',
+        });
 
           const liveRec: ExitAttempt[] = [];
           const liveDeps = {
@@ -216,7 +224,6 @@ async function main(): Promise<void> {
             attempts: liveRec.map((a) =>
               `#${a.attempt} @${a.boundBps}bps ${a.ok ? 'FILLED' : 'failed'} — ${a.detail.slice(0, 80)}`),
           });
-        }
       }
     } finally { c.release(); }
     await app.pool.end();
