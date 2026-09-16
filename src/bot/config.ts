@@ -13,9 +13,21 @@ export const POOL_MANAGER = '0x8366a39cc670b4001a1121b8f6a443a643e40951';
 export const PERMIT2 = '0x000000000022d473030f116ddee9f6b43ac78ba3';
 export const NATIVE_ETH = '0x0000000000000000000000000000000000000000';
 
-/** Launchpads the rule fires on. PRIMARY FILTER -- see LAUNCHBOT.md section 3. */
+/**
+ * Launchpads the rule fires on. PRIMARY FILTER -- see LAUNCHBOT.md section 3.
+ *
+ * READ FROM `v4_pool_creator`, NOT TRANSCRIBED. The first build carried
+ * `0x58daec3116aa2cc3c60f7c1bdf9c895f7d1d0e35`, whose leading twelve characters came
+ * from a truncated `0x58daec3116aa...` in this project's own notes and whose remaining
+ * twenty-eight were INVENTED. It matched nothing, so every launch was rejected with
+ * "launchpad not in the list" and the bot would have traded none of them -- the
+ * fabricated-constant failure ROBINHOOD.md records for a topic hash, repeated with an
+ * address. A truncation in a document is not an identifier.
+ */
 export const LAUNCHPADS = [
-  '0x58daec3116aa2cc3c60f7c1bdf9c895f7d1d0e35',
+  /** 1,580 of the rule pools measured. */
+  '0x58daec3116aae6d93017baaea7749052e8a04fa7',
+  /** 726 -- direct creation against the PoolManager itself. */
   POOL_MANAGER,
 ] as const;
 
