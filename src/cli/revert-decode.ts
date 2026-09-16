@@ -75,8 +75,8 @@ function decodeRevert(data: unknown): string {
   }
   if (data.startsWith(V4_TOO_LITTLE)) {
     try {
-      const [minOut, got] = abi.decode(['uint256', 'uint256'], `0x${data.slice(10)}`) as
-        [bigint, bigint];
+      const [minOut, got] = abi.decode(['uint256', 'uint256'],
+        `0x${data.slice(10)}`) as unknown as [bigint, bigint];
       const shortfall = minOut > 0n
         ? (Number(minOut - got) / Number(minOut) * 100).toFixed(3) : 'n/a';
       return `V4TooLittleReceived: our bound ${minOut} > actual ${got}`
@@ -161,7 +161,7 @@ async function main(): Promise<void> {
         && atBlock.error.data.startsWith(V4_TOO_LITTLE)) {
         try {
           const [minOut, got] = abi.decode(['uint256', 'uint256'],
-            `0x${atBlock.error.data.slice(10)}`) as [bigint, bigint];
+            `0x${atBlock.error.data.slice(10)}`) as unknown as [bigint, bigint];
           /* The ratio a bound would have needed to clear. 1.0 = exactly met. */
           if (minOut > 0n) needed.push(Number(minOut) / Number(got));
         } catch { /* an undecodable payload contributes nothing, and is not invented */ }
