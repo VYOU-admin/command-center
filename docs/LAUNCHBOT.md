@@ -629,3 +629,29 @@ live gain are different quantities; adding them gives a number true of nothing.
 - **Boot reconciliation has never been exercised against a real open position**, only
   against zero rows. Its behaviour on a genuinely stuck position is specified and
   untested.
+
+### The fee bound could not be derived from `v4_pool_creator`, because that table's scope is fee-filtered
+
+Recorded 2026-09-16, while deriving the fee sanity check.
+
+`src/cli/v4-creators.ts` builds its work set with `and i.fee in (500,10000)`
+inside the pool selection. Every row in `v4_pool_creator` is therefore a pool at
+one of those two tiers *by construction*. Asking that table "what fee tiers does
+launchpad `0x58daec…` produce on rule-qualifying launches" returns "500 and
+10000, 100% of 2,306 pools" — which is the filter reading itself back, not a
+measurement. It is the same shape as an aggregate that confirms the hypothesis
+it was built from, and it was caught only because the live dry run at head
+produced pools at fee 100 and 803369 from that same launchpad, which the table
+said could not exist.
+
+The filter was correct for the question that tool was originally written for
+(the tier is a fingerprint of the launchpad — compare like with like across the
+two productive tiers). It is wrong for this question. The fee scope becomes a
+`--fees` flag, defaulting to every tier, and the chosen scope is logged with the
+work set so a future reader cannot mistake a narrowed population for the whole
+one.
+
+**The general rule this is an instance of:** a population assembled by a filter
+cannot then be used to measure the distribution of the thing that filter keyed
+on. Before quoting a distribution from a stored table, read the query that
+populated it.

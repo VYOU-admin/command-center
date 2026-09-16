@@ -56,6 +56,21 @@ async function main(): Promise<void> {
     const i = args.indexOf(f); return i >= 0 ? Number(args[i + 1] ?? d) : d;
   };
   const commit = args.includes('--commit');
+  /*
+   * THE FEE SCOPE IS EXPLICIT AND LOGGED. This selection used to be hard-wired to
+   * `fee in (500,10000)`, which made `v4_pool_creator` a fee-filtered table and
+   * therefore useless for measuring what fee tiers a launchpad emits -- the answer
+   * came back as the filter. Default is EVERY tier; narrow it deliberately or not
+   * at all. See LAUNCHBOT.md section 7.
+   */
+  const feesArg = str('--fees', '');
+  const feeList = feesArg.split(',').map((x) => Number(x.trim()))
+    .filter((x) => Number.isFinite(x));
+  if (feesArg && feeList.length === 0) {
+    throw new Error(`--fees ${feesArg} parsed to no numeric tier; refusing to run with `
+      + 'a filter that would match nothing.');
+  }
+  const feeClause = feeList.length ? `and i.fee in (${feeList.join(',')})` : '';
   const sample = num('--sample', 0);
   const windows = str('--windows', '').split(',').filter(Boolean)
     .map((w) => { const [a, b] = w.split(':'); return { from: Number(a), to: Number(b) }; });
@@ -82,7 +97,7 @@ async function main(): Promise<void> {
               on f.pool_id = i.pool_id
            where i.block_number between ${w.from} and ${lauTo}
              and ((i.currency0 = any($1)) <> (i.currency1 = any($1)))
-             and i.fee in (500,10000) and (f.fb - i.block_number) between 11 and 600
+             ${feeClause} and (f.fb - i.block_number) between 11 and 600
         ) p where ${sample > 0 ? `p.rn <= ${sample}` : 'true'}
         on conflict (pool_id) do nothing`, [PRICING]);
     }
@@ -100,6 +115,7 @@ async function main(): Promise<void> {
     log.info('CREATOR WORK SET, derived BEFORE the first request', {
       windows: windows.map((w) => `${w.from}..${w.to}`),
       sample_per_window: sample || 'all',
+      fee_scope: feeList.length ? feeList : 'ALL TIERS',
       per_window: ws.rows,
       distinct_transactions_to_read: n,
       estimate: { cu: estCu, usd: ((estCu * USD_PER_MCU) / 1e6).toFixed(5) },
