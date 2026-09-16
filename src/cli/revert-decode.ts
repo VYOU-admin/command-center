@@ -40,6 +40,17 @@ const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
 const abi = AbiCoder.defaultAbiCoder();
 const ERROR_STRING = id('Error(string)').slice(0, 10);
 const PANIC = id('Panic(uint256)').slice(0, 10);
+/*
+ * IDENTIFIED BY COMPUTING keccak OF CANDIDATE SIGNATURES, never by lookup or guess.
+ * ROBINHOOD.md: a fabricated topic hash has shipped on this project once, and matched
+ * zero logs while reading as a clean sweep.
+ *
+ * V4TooLittleReceived carries (minAmountOutReceived, amountReceived) — it is the v4
+ * router telling us OUR OWN BOUND rejected the trade, and the two words say by how
+ * much. That turns "the bound is too tight" from an opinion into a ratio.
+ */
+const V4_TOO_LITTLE = id('V4TooLittleReceived(uint256,uint256)').slice(0, 10);
+const DEADLINE_PASSED = id('TransactionDeadlinePassed()').slice(0, 10);
 
 interface RpcOut { result?: unknown; error?: { code?: number; message?: string; data?: unknown } }
 
@@ -62,6 +73,17 @@ function decodeRevert(data: unknown): string {
       return `Error(string): ${String(abi.decode(['string'], `0x${data.slice(10)}`)[0])}`;
     } catch { return `Error(string) but undecodable: ${data.slice(0, 40)}`; }
   }
+  if (data.startsWith(V4_TOO_LITTLE)) {
+    try {
+      const [minOut, got] = abi.decode(['uint256', 'uint256'], `0x${data.slice(10)}`) as
+        [bigint, bigint];
+      const shortfall = minOut > 0n
+        ? (Number(minOut - got) / Number(minOut) * 100).toFixed(3) : 'n/a';
+      return `V4TooLittleReceived: our bound ${minOut} > actual ${got}`
+        + ` — short by ${shortfall}% of the bound`;
+    } catch { return 'V4TooLittleReceived but undecodable'; }
+  }
+  if (data.startsWith(DEADLINE_PASSED)) return 'TransactionDeadlinePassed()';
   if (data.startsWith(PANIC)) {
     try {
       return `Panic(uint256): 0x${BigInt(String(abi.decode(['uint256'], `0x${data.slice(10)}`)[0])).toString(16)}`;
@@ -105,6 +127,7 @@ async function main(): Promise<void> {
     }
 
     const findings: Array<Record<string, unknown>> = [];
+    const needed: number[] = [];
     const tally: Record<string, number> = {};
     const from = '0x000000000000000000000000000000000000dEaD';
 
@@ -129,7 +152,20 @@ async function main(): Promise<void> {
         at_head: reasonHead,
         historical_msg: atBlock.error?.message?.slice(0, 120) ?? null,
       };
-      tally[reasonHist] = (tally[reasonHist] ?? 0) + 1;
+      /* Bucket by CAUSE, not by the numbers inside it, or every row is its own cause. */
+      const cause = reasonHist.startsWith('V4TooLittleReceived')
+        ? 'V4TooLittleReceived (our own slippage bound)'
+        : reasonHist;
+      tally[cause] = (tally[cause] ?? 0) + 1;
+      if (atBlock.error && typeof atBlock.error.data === 'string'
+        && atBlock.error.data.startsWith(V4_TOO_LITTLE)) {
+        try {
+          const [minOut, got] = abi.decode(['uint256', 'uint256'],
+            `0x${atBlock.error.data.slice(10)}`) as [bigint, bigint];
+          /* The ratio a bound would have needed to clear. 1.0 = exactly met. */
+          if (minOut > 0n) needed.push(Number(minOut) / Number(got));
+        } catch { /* an undecodable payload contributes nothing, and is not invented */ }
+      }
 
       /* PASS 2 — only where the historical revert carried no reason. */
       if (atBlock.error && !(typeof atBlock.error.data === 'string'
@@ -175,6 +211,33 @@ async function main(): Promise<void> {
       by_cause: Object.entries(tally).sort((a, b) => b[1] - a[1])
         .map(([k, v]) => `${v}x  ${k}`),
     });
+    /*
+     * WHAT BOUND WOULD HAVE CLEARED. minOut/actual is how many times too large our
+     * bound was; the implied one-leg slippage needed is 1 - actual/minOut.
+     */
+    if (needed.length > 0) {
+      const srt = [...needed].sort((a, b) => a - b);
+      const q = (p: number): number => srt[Math.min(srt.length - 1,
+        Math.floor((srt.length - 1) * p))]!;
+      log.info('WHAT THE BOUND WOULD HAVE HAD TO BE', {
+        n: srt.length,
+        note: 'ratio = our minOut / what the pool would actually have paid. The implied '
+          + 'ONE-LEG slippage that would have cleared it is (1 - 1/ratio).',
+        min_ratio: srt[0]!.toFixed(4),
+        p25: q(0.25).toFixed(4), median: q(0.5).toFixed(4),
+        p75: q(0.75).toFixed(4), p90: q(0.9).toFixed(4),
+        max_ratio: srt[srt.length - 1]!.toFixed(4),
+        implied_one_leg_slippage_needed_pct: {
+          median: ((1 - 1 / q(0.5)) * 100).toFixed(2),
+          p90: ((1 - 1 / q(0.9)) * 100).toFixed(2),
+          max: ((1 - 1 / srt[srt.length - 1]!) * 100).toFixed(2),
+        },
+      });
+    } else {
+      log.info('NO V4TooLittleReceived PAYLOADS DECODED', {
+        note: 'RETURNED NO ROWS — stated, not omitted',
+      });
+    }
     log.info('PER-TRADE DETAIL', { findings });
   } finally { c.release(); }
   await app.pool.end();
