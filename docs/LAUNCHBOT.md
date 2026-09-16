@@ -1143,6 +1143,159 @@ with the corpus holdout and the recent holdout on the ordering. **It is also clo
 MAGNITUDE to the corpus era than to the recent windows, which is unexplained** and is
 not read as evidence for either.
 
+### THE EXIT HORIZON CHANGED: +30 s → +90 s — 2026-09-16, operator-approved
+
+| | |
+|---|---|
+| **was** | `EXIT_DELAY_BLOCKS = 300` — exit at **+30 s** after entry |
+| **is** | `EXIT_DELAY_BLOCKS = 900` — exit at **+90 s** after entry |
+| **decided** | 2026-09-16, by the operator, on the holdout evidence below |
+| **decided by** | a measurement, NOT a tuned constant — see what that means below |
+
+**THE EVIDENCE.** `exit-horizon` swept ten horizons out to +600 s across all four swept
+windows, on the `md5(pool_id)` split `launch-search.ts` fixed before any hypothesis was
+formed. Per window and per half, no-fill and no-exit scored zero over EVERY rule launch:
+
+| window | half | +30 s | +90 s | +180 s |
+|---|---|---|---|---|
+| MIDPOINT | search / holdout | 0.000 / 0.001 | 0.022 / 0.008 | 0.002 / 0.000 |
+| CALM | search / holdout | 0.164 / 0.202 | **0.268 / 0.323** | 0.092 / 0.339 |
+| SELLOFF | search / holdout | 0.104 / 0.089 | 0.204 / 0.199 | **0.296 / 0.372** |
+
+**+90 s beats +30 s in 6 of 6 window×half combinations. +180 s beats it in only 4 of 6**,
+failing in MIDPOINT on both halves and CALM on the search half.
+
+**WHY THIS IS A DECISION ON EVIDENCE AND NOT A TUNED CONSTANT**, stated so a future
+reader can check rather than trust:
+
+- The split was **committed before any hypothesis existed** and is the same one an
+  earlier, unrelated search used. It was not chosen to make this result come out.
+- The grid ran **identical code on both halves**; the holdout reproduced the search half
+  cell for cell, every horizon within ~0.005.
+- **The failures are recorded beside the survivor** — +450 s and +600 s are exactly
+  0.00000 everywhere, +300 s survives only on corpus-era pools, and MIDPOINT is flat at
+  every horizon.
+- The value taken is **the conservative end of the band**, not the best cell. The best
+  pooled cell is +180 s at +0.676; it was not taken.
+
+**THE BAND'S UPPER END IS UNRESOLVED AT n≈700 AND MUST NOT BE READ AS SETTLED.** On the
+three recent windows alone the search half peaks at +90 s and the holdout half at
++180 s. Two independent halves of one dataset disagree about where inside 90–180 s the
+optimum sits; at that sample size the disagreement IS the measurement's noise floor.
+**+90 s is the point that survives everywhere. +180 s may well be better and is not
+established.**
+
+What would move it: a window nobody has looked at, or `nightly-check` reaching its
+140-trade minimum on the bot's own trades. That check alerts and cannot write the value.
+
+### THE QUOTE: THE MISSING TERM WAS THE POOL'S OWN FEE, AND THE FIX DOES NOT FIX THE REVERTS
+
+The retry ladder treats the symptom. This is the attempt at the cause, and **the honest
+result is that it does not materially reduce the reverts** — reported here rather than
+shipped as a success.
+
+#### Ground truth, and why it is exact
+
+`V4TooLittleReceived(uint256,uint256)` carries `(minAmountOutReceived, amountReceived)`.
+Setting `amountOutMinimum` to an unreachable value therefore turns the router into an
+oracle for its OWN output at our exact size and block, at 26 CU, with no assumption
+anywhere. **Nothing else available on this chain answers "what would $10 actually have
+got".** 40 trades, one `eth_getLogs` and one `eth_call` each, **3,440 CU = $0.00155**.
+
+#### What the first attempt got wrong, measured rather than argued
+
+The price-impact term was built first, on the reasoning that linear extrapolation was
+what the reverts proved wrong. The reasoning was right and **the term was the wrong one**:
+
+```
+measured IMPACT      median 0.17%   p90 0.37%   max 47.41%
+measured OVER-QUOTE  median 2.50%   p90 16.0%   97.4% of trades over-quoted
+```
+
+Impact is an order of magnitude too small to explain the shortfall. Worse, requiring
+enough observations to measure it **refused 26 of 40 trades** — a cure worse than the
+disease, and that refusal was withdrawn on the measurement.
+
+#### The missing term was the fee, and it is exact
+
+The pool's declared `fee` is taken off every swap before any curve arithmetic and is
+stated in the pool key already carried on every row. On a 1% tier the last realised
+price implies 1% more output than any trader can get, **every time, deterministically**.
+
+The quote is now `linear × (1 − fee) × (1 − impact)`, in `src/bot/quote.ts`.
+
+**IT BEHAVES EXACTLY AS ARITHMETIC SAYS IT SHOULD, which is how we know it is not
+double-counting:**
+
+| fee tier | n | over-quote before | after the fee term |
+|---|---|---|---|
+| 100 (0.01%) | 3 | 1.0210 | 1.0210 |
+| 500 (0.05%) | 18 | 1.0310 | 1.0300 |
+| 10000 (1%) | 15 | 1.0250 | **1.0130** |
+| 803369 (80.3%) | 3 | 14.127 | **2.778** |
+
+The 1% tier moved by 1.2 points and **no tier fell below 1.0**. A tier dropping under
+1.0 would have meant the fee was already inside the realised price and was being taken
+twice; none did.
+
+#### THE HONEST RESULT: IT DOES NOT MATERIALLY REDUCE THE REVERTS
+
+| | old quote | corrected quote |
+|---|---|---|
+| recorded reverts that would clear | **4 of 11** | **4 of 11** |
+| over-quote, median | 1.025 | 1.021 |
+| over-quote, share above 1.0 | 97.4% | 82.1% |
+| trades refused outright | 0 | **0** |
+
+**Four of eleven, both ways. The fix does not move the number it was built to move**,
+and that is the finding rather than a disappointment to be explained away.
+
+#### WHAT IT DOES DO, AND IT IS WORTH HAVING
+
+- **It removes a term that was simply wrong.** A 1% fee IS taken; quoting as though it
+  were not is an error whether or not it causes a revert.
+- **It cuts the SIZE of the miss by 4.5x.** The shortfall on trades that still fail went
+  from a p75 of 6,070 bps to **1,343 bps**. The failures are the same trades; they now
+  fail by far less, which is what makes a retry ladder able to rescue them at all.
+- **It catches the pool where our own size is the problem** — one measured a 47.4%
+  impact, and a quote that ignores that is not merely imprecise.
+
+#### THE RESIDUAL, WHICH IS NOW BOUNDED AND NOT IDENTIFIED
+
+**A ~2–3% over-quote remains on every real tier, independent of the fee** — 2.1% at
+tier 100, 3.0% at 500, 1.3% at 10000 — and neither the fee nor the measured 0.17%
+impact explains it. **Our slippage bound is 300 bps and sits exactly on top of that
+residual**, which is the revert mechanism stated precisely: the bound is not too tight
+in general, it is calibrated to the median of an error whose distribution straddles it.
+
+Candidates not yet separated: our own impact being larger than a consecutive-swap
+estimator can see at n≈3 observations; price movement between the last observed swap and
+execution. **It is recorded as bounded and unidentified rather than guessed at.**
+
+#### ONE IMPLEMENTATION, AND THE OLD ONE IS DELETED
+
+The quote lives in **`src/bot/quote.ts`** and is called by the entry path, the exit path,
+the retry ladder and the dry run. `rule.expectedOut` is **deleted**, not left dead: an
+unused second implementation is one import away from being the live one, and this
+project has recorded that failure six times — most recently a price convention
+implemented twice as reciprocals, reporting a median return of −1.0000.
+
+#### THE LADDER IS RE-DERIVED, BECAUSE ITS RUNGS WERE CALIBRATED AGAINST THE DEFECT
+
+`EXIT_RETRY.BOUND_BPS` was `[300, 400, 1835, 6070]` — the shortfall quantiles under the
+OLD quote. Re-measured under the corrected quote over the 14 of 39 trades whose bound
+still misses:
+
+```
+p25 449 bps   median 608 bps   p75 1,343 bps   p90 6,067 bps   max 8,445 bps
+```
+
+The ladder is now **`[300, 449, 608, 1343]`**. It still stops at the p75, and that rule
+is now sharper rather than weaker: the p75 of 13.4% sits just BELOW the recent-era
+median gross return of +16%, where the old p75 of 60.7% was four times above it. **The
+last rung is for the first time an economically coherent rescue rather than a pure
+damage limit.**
+
 ## 7. Rules here the code does not implement
 
 The four items that stood here on 2026-09-16 are all closed, and section 6 records how.
