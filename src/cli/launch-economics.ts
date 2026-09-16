@@ -96,7 +96,17 @@ async function main(): Promise<void> {
              s.tx_hash,
              case when r.tside=0 then abs(s.amount1)/abs(s.amount0)
                                  else abs(s.amount0)/abs(s.amount1) end price,
-             case when r.tside=0 then abs(s.amount0) else abs(s.amount1) end cnt_raw,
+             /*
+              * THE COUNTER SIDE, AND THE FIRST VERSION HAD IT INVERTED. `tside` is the
+              * TOKEN's side index -- currency0 being a pricing asset means the token is
+              * side 1 -- so the counter is amount1 when tside=0 and amount0 when
+              * tside=1, which is the opposite of the price expression above it. Taking
+              * the token side as the counter valued trades at a median of $201 BILLION,
+              * drove impact-per-dollar to zero, and reported round-trip slippage as
+              * 0.00000 at every size. A cost of exactly nothing is a plausible value on
+              * an error path, which section 5 calls the worst defect shape here.
+              */
+             case when r.tside=0 then abs(s.amount1) else abs(s.amount0) end cnt_raw,
              r.counter, r.fee,
              row_number() over (partition by s.pool_id order by s.block_number, s.log_index) rn
         from v4_swaps_all s join rule r on r.pool_id = s.pool_id
@@ -204,7 +214,10 @@ async function main(): Promise<void> {
 
     for (const size of [10, 50, 100]) {
       await show(`W6. NET of LP fee + BOTH slippage legs, $${size} -- gas still excluded`, `
-        select count(*)::int n,
+        select count(*)::int n_costable,
+               (select count(*) from rule)::int rule_pools,
+               (select count(*) from legs where ipu_in is null or ipu_out is null)::int
+                 pools_NOT_COSTABLE_excluded_here,
                round(percentile_cont(0.25) within group (order by
                  rr - 2*(fee/1000000.0) - (l.ipu_in+l.ipu_out)*${size})::numeric,5)::text p25,
                round(percentile_cont(0.50) within group (order by
