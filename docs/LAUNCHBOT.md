@@ -186,7 +186,7 @@ design.**
 
 | routing target | sells | share | buys | verdict |
 |---|---|---|---|---|
-| `0x8876789976de…` **Universal Router** | 132 | **41.9%** | 66 | **both legs** |
+| `0x8876789976de…` **Universal Router** | 181 | **46.1%** | 17 | **both legs** |
 | `0x5a1d33c4b150…` | 73 | 23.2% | 83 | both legs |
 | `0x1cbaf24d53fe…` | **0** | — | 108 | **BUY ONLY** |
 | `0xf5576dee97a4…` | 34 | 10.8% | 59 | both legs |
@@ -194,6 +194,15 @@ design.**
 **The most-used BUY route cannot sell at all.** A bot built on `0x1cbaf24d…` would have
 to exit through a different contract, doubling the integration surface. **The Universal
 Router does both** and is the only path here with a verifiable interface.
+
+**CORRECTION, 2026-09-16.** The buy/sell split above was first reported as 66 buys and
+132 sells for the Universal Router. That was wrong: the original 446-row probe predated
+the `--side` flag and took the first entry-moment swap in EITHER direction, and the
+repair then labelled all 446 as buys. Recomputing direction from the sign of the token
+side reclassified **78 of them as sells**. The corrected counts are **368 buys and 393
+sells overall**, and the Universal Router is **17 buys against 181 sells** — heavily a
+SELL venue here, not the balanced picture first reported. Seventeen observed buys is
+still enough to decode and simulate the buy path, which is done below.
 
 314 of 315 sells attach no native value, as expected: the token goes in, not ETH.
 
@@ -275,10 +284,122 @@ arguments are all STATIC, and any 320-byte body decodes as ten static words and
 re-encodes identically — the round trip is close to tautological there. It confirms the
 layout is ten static words; it confirms nothing about the function.
 
-**WHAT REMAINS UNRESOLVED ON THE UNIVERSAL ROUTER PATH:** the `commands` byte is `0x10`
-in every sample and the single `inputs` element is an opaque blob whose internal layout
-is not verified here. Encoding a NEW trade requires constructing that blob. **That is the
-remaining gap and it is the next thing to close, before any code.**
+### THE `inputs` BLOB — decoded, constructed and simulated, 2026-09-16
+
+**The blob is no longer opaque.** `inputs[0]` is itself `abi.encode(bytes actions,
+bytes[] params)` — round-trip MATCH on every sample. Three action sequences appear,
+each one byte per action:
+
+| direction | actions | params sizes | n |
+|---|---|---|---|
+| sell | `0x060c0f` | 352 / 64 / 64 | 175 |
+| buy | `0x060c0e` | 384 / 64 / 96 | 9 |
+| buy | `0x060c0f` | 384 / 64 / 64 | 5 |
+| sell | `0x060c0f` | 384 / 64 / 64 | 3 |
+| sell | `0x060c0e` | 384 / 64 / 96 | 3 |
+| buy | `0x060b0e` | 352 / 96 / 96 | 1 |
+
+**THE LAYOUT DOES DIFFER BY CASE AND IS STATED PER CASE**, not described once and
+assumed. `params[0]` comes in two widths and the difference is a single extra word:
+
+```
+352 bytes: ((currency0,currency1,fee,tickSpacing,hooks), zeroForOne, amountIn,
+            amountOutMinimum, hookData)
+384 bytes: ((currency0,currency1,fee,tickSpacing,hooks), zeroForOne, amountIn,
+            amountOutMinimum, <extra word>, hookData)
+params[1]  (inputCurrency, amountIn)                  -- 64 bytes
+params[2]  (outputCurrency, minOut)                   -- 64-byte form
+           (outputCurrency, recipient, minOut)        -- 96-byte form
+```
+
+**Every field verified against a value known independently of the blob:**
+
+| field | evidence |
+|---|---|
+| the five PoolKey fields | equal `v4_pool_init` for that pool — **175/175, 9/9, 5/5, 3/3, 3/3** |
+| `amountIn` | equals the realised `|amount|` in that transaction's Swap log — **100%** |
+| `zeroForOne` | equals the trade direction — **100%** |
+| `hookData` | empty — **100%** |
+| the extra 384-word | **always zero**, every sample |
+| `params[1]` currency | equals the INPUT currency — verified per shape |
+| `params[2]` currency | equals the OUTPUT currency; the 96-byte form's second field equals `tx.from` |
+
+**`amountOutMinimum` is 0 in 9 of 9 native-ETH buys** but set in 172 of 175 sells — the
+buyers observed here take no slippage protection at all and the sellers do. **The bot
+sets its own on both legs; this is recorded as what others do, not as a default to copy.**
+
+### THE CONSTRUCT TEST — 190 of 198 byte-for-byte
+
+Built the whole blob from POOL DATA AND POLICY ALONE — currencies, fee, tickSpacing and
+hooks from `v4_pool_init`, direction from the trade, size from the amount, recipient from
+the sender — and compared against what was actually sent.
+
+```
+MATCH 190   NO MATCH 8   of 198 Universal Router transactions
+```
+
+**All 8 failures are one thing**: those callers put `uint256` max in `params[1]` as a
+settle-everything sentinel instead of the exact amount. **That is a caller's policy
+choice, not a field that could not be constructed.**
+
+**Fields that had to be read from the observed transaction, and what each one is:**
+
+| field | why it was read | can the bot construct it? |
+|---|---|---|
+| `amountOutMinimum` | the trader's slippage bound | **YES — the bot sets its own** |
+| `minOut` in `params[2]` | same | **YES** |
+| the action-sequence byte | which take-form the caller used | **YES — the bot picks one** |
+
+**Nothing essential had to be read.** Every remaining field is pool data, a derived
+direction, a size the bot chooses, its own address, or a bound it sets.
+
+### SIMULATED AT THE HISTORICAL BLOCK — 6 of 6 returned, 0 reverts
+
+`eth_call` of the CONSTRUCTED calldata against the Universal Router at `block - 1`, with
+the original sender and value (26 CU each, 6 calls, $0.00007):
+
+```
+returned 6   reverted 0   other error 0
+```
+
+**Two of the six were cases where the constructed calldata deliberately DIFFERS from the
+observed** — the sentinel cases above — and they returned too, so the exact-amount
+construction is independently valid rather than merely reproducing what was sent.
+**`eth_call` at a historical block works on this endpoint**, which is `ROBINHOOD.md`'s
+"every step that needs historical state needs Alchemy" holding for state as well as code.
+
+### THE APPROVAL LEG — two patterns, both measured
+
+40 sells, one `eth_getLogs` each (2,400 CU, $0.00108). Topic and selector both COMPUTED:
+`Approval(address,address,uint256)` = `0x8c5be1e5…`, `approve(address,uint256)` =
+`0x095ea7b3`.
+
+```
+sells with a prior approval  40 of 40        without  0
+  46 approvals  to a ROUTER directly, for a FINITE amount
+  19 approvals  to Permit2 (0x000000000022d473030f116ddee9f6b43ac78ba3), uint256 MAX
+```
+
+**Unlimited is NOT the norm overall — it is the norm for Permit2 and not for direct
+routers.** Sellers going straight to a router approve a finite amount; the Permit2 users
+approve unlimited once, which is what Permit2 exists for.
+
+**ONE THING IS STILL OPEN AND IT IS NARROW.** The decoded Universal Router calls carry
+`commands = 0x10` only — a single action, with no permit command in the batch. So the
+token must already be spendable by whatever pulls it, and for the Permit2 route that
+normally needs a SECOND grant (token → Permit2, then Permit2 → router) which would emit
+its event on the Permit2 contract, not on the token, and was therefore outside this
+sweep. **Whether the Universal Router path costs one setup transaction or two is not
+established.** At $0.0075 per approval the difference is ~0.075% of a $10 position
+either way, so it changes no decision — but it is a real unknown and it is not guessed.
+It closes by sweeping Permit2's own events for these sellers, or by using a router that
+takes a direct allowance.
+
+### WHAT IS CONSTRUCTIBLE END TO END, IN ONE LINE
+
+**Both swap legs are fully constructible and simulate clean; the ERC-20 approval is a
+standard verified call; the only unestablished item is whether the Permit2 route needs a
+second setup transaction.**
 
 ### `w3` — carried as a known unknown, with its values enumerated
 
