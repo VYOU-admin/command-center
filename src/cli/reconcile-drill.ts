@@ -38,6 +38,8 @@ const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
 const BALANCE_OF = id('balanceOf(address)').slice(0, 10);
 /** Not a contract. `eth_call` to it returns `0x`, which must never become a zero. */
 const NOT_A_CONTRACT = '0x00000000000000000000000000000000deadbeef';
+/** A real address that holds nothing. Its zero balance is CONFIRMED, not assumed. */
+const EMPTY_WALLET = '0x0000000000000000000000000000000000000001';
 
 async function wipe(c: PoolClient): Promise<void> {
   await c.query('delete from bot_trades where chain = $1', [CHAIN]);
@@ -68,10 +70,20 @@ async function main(): Promise<void> {
     await c.query(BOT_SCHEMA);
 
     /*
-     * THE WALLET IS THE v4 PoolManager, which is a read-only stand-in with a real
-     * balance sheet: it custodies every v4 pool's tokens, so `balanceOf` against it is
-     * non-zero for a live token and zero for a dead one. No key exists and none is
-     * needed -- reconciliation only ever READS a balance.
+     * TWO WALLETS, BECAUSE ONE CANNOT PRODUCE BOTH FIXTURES.
+     *
+     * The held case uses the v4 PoolManager, a read-only stand-in with a real balance
+     * sheet: it custodies every v4 pool's tokens, so balanceOf against it is non-zero
+     * for any live token. The first version of this drill tried to find a token the
+     * PoolManager holds NONE of and refused to run when it could not -- correctly, and
+     * for a reason worth keeping: the PoolManager holds a balance of every token that
+     * ever had a v4 pool, so no such token exists. The zero case is therefore a
+     * different WALLET rather than a different token, and reconciliation is run twice.
+     *
+     * `reconcileOnBoot` takes one wallet per call, which is exactly right -- a bot has
+     * one wallet. Two boots is what the two situations actually look like.
+     *
+     * No key exists and none is needed: reconciliation only ever READS a balance.
      */
     const wallet = POOL_MANAGER;
     const cand = await c.query<{ token: string }>(
@@ -94,23 +106,32 @@ async function main(): Promise<void> {
       c.release(); await app.pool.end(); process.exit(0);
     }
 
-    let held: string | null = null; let empty: string | null = null;
+    let held: string | null = null;
     for (const row of cand.rows) {
-      if (held && empty) break;
+      if (held) break;
       if (!/^0x[0-9a-f]{40}$/i.test(row.token)) continue;
       try {
         const data = BALANCE_OF + '0'.repeat(24) + wallet.slice(2).toLowerCase();
         const res = await rpc.call('eth_call', [{ to: row.token, data }, 'latest']);
-        const bal = BigInt(String(res));
-        if (bal > 0n && !held) held = row.token;
-        if (bal === 0n && !empty) empty = row.token;
+        if (BigInt(String(res)) > 0n) held = row.token;
       } catch { /* an unreadable candidate is simply not used as a fixture */ }
     }
-    if (!held || !empty) {
-      throw new Error(`probe found held=${held ?? 'NONE'} empty=${empty ?? 'NONE'}; `
-        + 'refusing to seed cases whose balances were not actually measured');
+    if (!held) {
+      throw new Error('probe found no token the PoolManager holds; refusing to seed a '
+        + 'case whose balance was not actually measured');
     }
-    log.info('FIXTURES MEASURED ON CHAIN', { held_token: held, zero_token: empty });
+    /* Confirmed by the same read path the bot uses, not assumed to be empty. */
+    const emptyData = BALANCE_OF + '0'.repeat(24) + EMPTY_WALLET.slice(2);
+    const emptyBal = BigInt(String(await rpc.call('eth_call',
+      [{ to: held, data: emptyData }, 'latest'])));
+    if (emptyBal !== 0n) {
+      throw new Error(`the zero-balance fixture wallet holds ${emptyBal} of ${held}; `
+        + 'refusing to run a case whose premise is false');
+    }
+    log.info('FIXTURES MEASURED ON CHAIN', {
+      held_token: held, holder_wallet: wallet, zero_balance_wallet: EMPTY_WALLET,
+      zero_balance_confirmed: emptyBal.toString(),
+    });
 
     const check = async (name: string, expect: string, tradeId: string): Promise<void> => {
       const r = await c.query<{ status: string; note: string | null }>(
@@ -120,16 +141,21 @@ async function main(): Promise<void> {
       log.info(`RECONCILE CASE: ${name}`, { expect, got, note: r.rows[0]?.note ?? null });
     };
 
-    /* --- cases 1-3, all adjudicated in one boot ---------------------------- */
+    /* --- case 1: the buy landed and never sold ----------------------------- */
     await wipe(c);
     const idHolding = await seedRow(c, '0xd1', held, 'holding', '0xentry');
-    const idIntent = await seedRow(c, '0xd2', empty, 'intent', null);
-    const idGhost = await seedRow(c, '0xd3', empty, 'holding', '0xentry');
     const r1 = await reconcileOnBoot(c, rpc, CHAIN, wallet, MODE);
-    log.info('boot reconciliation returned', { ...r1 });
+    log.info('boot A returned', { ...r1 });
     await check('1. buy landed, never sold (balance > 0)', 'needs_exit', idHolding);
+
+    /* --- cases 2 and 3: the chain says we hold nothing ---------------------- */
+    await wipe(c);
+    const idIntent = await seedRow(c, '0xd2', held, 'intent', null);
+    const idGhost = await seedRow(c, '0xd3', held, 'holding', '0xentry');
+    const r1b = await reconcileOnBoot(c, rpc, CHAIN, EMPTY_WALLET, MODE);
+    log.info('boot B returned', { ...r1b });
     await check('2. intent that never broadcast (balance = 0)', 'closed_unfilled', idIntent);
-    await check("3. row says 'holding', chain says zero", 'closed_unfilled', idGhost);
+    await check('3. row says holding, chain says zero', 'closed_unfilled', idGhost);
 
     /* --- case 4: open rows, no wallet -------------------------------------- */
     await wipe(c);
