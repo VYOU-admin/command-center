@@ -135,16 +135,30 @@ export const IMPACT_MIN_OBSERVATIONS = 3;
  * quantile and no more, so the schedule is the data rather than a doubling:
  *
  *     attempt 1   300 bps   the configured bound (p90 round-trip slippage + drift)
- *     attempt 2   400 bps   the measured p25 shortfall, 3.90%, rounded up
- *     attempt 3 1,835 bps   the measured MEDIAN shortfall — half of all observed
- *                           rejections clear here
- *     attempt 4 6,070 bps   the measured p75 shortfall — the last rung worth climbing
+ *     attempt 2   449 bps   the p25 shortfall
+ *     attempt 3   608 bps   the MEDIAN shortfall — half of all remaining misses clear
+ *     attempt 4 1,343 bps   the p75 shortfall — the last rung worth climbing
  *
- * **IT STOPS AT THE p75 DELIBERATELY.** The p90 is 92.7%, which is indistinguishable
- * from giving the tokens away, and the measured median gross return at the horizons
- * this bot trades is +16% (recent era) to +56% (corpus era) — so a bound past the p75
- * guarantees a loss larger than the position's whole expected gain. A rung that can
- * only ever turn a small loss into a total one is not a rescue.
+ * **RE-DERIVED 2026-09-16 AFTER THE QUOTE WAS CORRECTED.** The rungs were originally
+ * [300, 400, 1835, 6070], the quantiles of the shortfall under the OLD quote — which
+ * had no fee term. A rung calibrated against a quote that has since been corrected is
+ * a rung calibrated against a defect, so `quote-check` re-measured the same quantiles
+ * under the corrected quote, over exactly the trades whose corrected bound still
+ * misses (n=14 of 39):
+ *
+ *     p25 449 bps   median 608 bps   p75 1,343 bps   p90 6,067 bps   max 8,445 bps
+ *
+ * The ladder is 4.5x tighter at its top rung, which is the correction showing through:
+ * the trades that still fail now fail by far less, and a rescue no longer has to accept
+ * a 60% haircut to land.
+ *
+ * **IT STOPS AT THE p75 DELIBERATELY, and the corrected figures make that stopping
+ * rule sharper rather than weaker.** The p90 is now 6,067 bps — a 60.7% haircut —
+ * against a measured median gross return of +16% (recent era) to +56% (corpus era), so
+ * a rung past the p75 still guarantees a loss larger than the position's whole expected
+ * gain. The p75 itself, 13.4%, now sits just BELOW the recent-era median gross return
+ * rather than four times above it, so the last rung is for the first time an economically
+ * coherent one rather than a pure damage limit.
  *
  * **n IS 11.** That is a thin base for a four-rung ladder and it is stated rather than
  * buried; these values are a first schedule to be re-derived from logged live exits,
@@ -159,7 +173,7 @@ export const EXIT_RETRY = {
   MAX_ATTEMPTS: 4,
   INTERVAL_MS: 5000,
   /** One bound per attempt. Length MUST equal MAX_ATTEMPTS; asserted at load. */
-  BOUND_BPS: [300, 400, 1835, 6070],
+  BOUND_BPS: [300, 449, 608, 1343],
 } as const;
 
 if (EXIT_RETRY.BOUND_BPS.length !== EXIT_RETRY.MAX_ATTEMPTS) {

@@ -85,10 +85,15 @@ export function minOut(expectedOut: bigint): bigint {
   return out > 0n ? out : 1n;
 }
 
-/** Expected output from the pool's last traded price. A quote, never a guarantee. */
-export function expectedOut(amountIn: bigint, lastPriceOutPerIn: number): bigint {
-  if (!Number.isFinite(lastPriceOutPerIn) || lastPriceOutPerIn <= 0) {
-    throw new Error('no usable last price for this pool; refusing to quote');
-  }
-  return BigInt(Math.floor(Number(amountIn) * lastPriceOutPerIn));
-}
+/*
+ * `expectedOut` WAS HERE AND IS DELETED, NOT LEFT DEAD.
+ *
+ * It returned `amountIn x lastPrice` with no fee and no impact term, and
+ * `revert-decode` established it as the cause of 11 of 12 dry-run reverts. The quote
+ * now lives in `bot/quote.ts` and is the only one.
+ *
+ * Leaving the old function unreferenced would put two implementations of one rule in
+ * the tree, which is the failure this project has recorded six times — most recently a
+ * price convention implemented twice as reciprocals, reporting a median return of
+ * -1.0000. An unused second implementation is one import away from being the live one.
+ */

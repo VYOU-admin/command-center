@@ -24,7 +24,9 @@ import {
   EXIT_DELAY_BLOCKS, NATIVE_ETH, POOL_MANAGER, RAILS, SLIPPAGE_BPS,
 } from '../bot/config.js';
 import { buildPermit2Approve, buildSwap, buildTokenApprove } from '../bot/calldata.js';
-import { expectedOut, minOut, positionWei, qualifies } from '../bot/rule.js';
+import { minOut, positionWei, qualifies } from '../bot/rule.js';
+import { quote } from '../bot/quote.js';
+import type { PoolTick } from '../bot/quote.js';
 import { BOT_SCHEMA, halt, isHalted } from '../bot/state.js';
 import { checkRails } from '../bot/rails.js';
 import { id } from 'ethers';
@@ -94,7 +96,10 @@ async function main(): Promise<void> {
     ticks: 0, initializes: 0, candidates: 0, qualified: 0,
     simulated: 0, simClean: 0, simReverted: 0, skippedRail: 0,
     exitClean: 0, exitReverted: 0, exitNotAttempted: 0,
+    quoteRefused: 0, quoteReadFailed: 0,
+    quoteBasis: {} as Record<string, number>,
   };
+  const refusals: string[] = [];
   const reverts: string[] = [];
   let consecutiveReverts = 0;
   const railBlocks: string[] = [];
@@ -214,8 +219,60 @@ async function main(): Promise<void> {
           const tokenIsCurrency0 = !p.zeroIsPricing;
           const rate = quoteRate(amts, tokenIsCurrency0);
           const px = tokenPrice(amts, tokenIsCurrency0);
+
+          /*
+           * THE QUOTE COMES FROM bot/quote.ts, WHICH NEEDS THE POOL'S OWN SWAPS.
+           * One filtered eth_getLogs per qualifying candidate, 60 CU: the v4 Swap event
+           * indexes the pool id as topic 1, so this returns exactly this pool's trades
+           * and nothing else. It is everything the bot can observe at the instant it
+           * must decide — nothing after the entry block is read.
+           */
+          let ticks: PoolTick[] = [];
+          try {
+            const pl = (await rpc.call('eth_getLogs', [{
+              address: POOL_MANAGER, topics: [EVENT_TOPICS.swapV4, pid],
+              fromBlock: `0x${firstSwapBlock.toString(16)}`,
+              toBlock: `0x${head.toString(16)}`,
+            }])) as Array<{ blockNumber: string; logIndex: string; data: string }>;
+            ticks = pl.map((l) => {
+              const a = swapAmounts(l.data);
+              if (!a) return null;
+              const tp = tokenPrice(a, tokenIsCurrency0);
+              /* NOTIONAL IS THE PRICING-ASSET SIDE, both directions. */
+              const abs = (x: bigint): bigint => (x < 0n ? -x : x);
+              const notional = Number(tokenIsCurrency0 ? abs(a.amount1) : abs(a.amount0));
+              if (!(tp > 0) || !(notional > 0)) return null;
+              return {
+                block: Number(BigInt(l.blockNumber)),
+                logIndex: Number(BigInt(l.logIndex)), price: tp, notional,
+              };
+            }).filter((x): x is PoolTick => x !== null);
+          } catch (e) {
+            /* A failed read is NOT an empty tick list — that would silently become a
+             * fee-only quote. Counted and skipped. */
+            stats.quoteReadFailed += 1;
+            log.warn('pool tick read failed; SKIPPING rather than quoting blind', {
+              pool: pid, error: (e as Error).message.slice(0, 120),
+            });
+            continue;
+          }
+
           let quoted: bigint; let bound: bigint;
-          try { quoted = expectedOut(size, rate); bound = minOut(quoted); } catch { continue; }
+          let quoteBasis = 'unknown'; let impactPct = 0; let feePct = 0;
+          try {
+            const q = quote({
+              amountIn: size, rateOutPerIn: rate, side: 'buy',
+              fee: p.init.fee, ticks,
+            });
+            quoted = q.expectedOut; bound = minOut(quoted);
+            quoteBasis = q.basis; impactPct = q.impactFraction * 100;
+            feePct = q.feeFraction * 100;
+            stats.quoteBasis[q.basis] = (stats.quoteBasis[q.basis] ?? 0) + 1;
+          } catch (e) {
+            stats.quoteRefused += 1;
+            if (refusals.length < 8) refusals.push((e as Error).message.slice(0, 110));
+            continue;
+          }
 
           const plan = {
             pool: { currency0: p.init.currency0, currency1: p.init.currency1,
@@ -316,8 +373,11 @@ async function main(): Promise<void> {
               size.toString(), RAILS.MAX_POSITION_USD, quoted.toString(), bound.toString(),
               rate, buy.data, sell.data, 'dry-run', simNote,
               exitStatus, exitNote, exitFrom, px]);
+          void quoteBasis; void impactPct; void feePct;
 
           log.info('WOULD TRADE', {
+            quote_basis: quoteBasis, fee_pct: feePct.toFixed(4),
+            impact_pct: impactPct.toFixed(3), ticks_observed: ticks.length,
             pool: pid, token: p.token, launchpad: p.launchpad, fee: p.init.fee,
             gap_blocks: firstSwapBlock - p.init.blockNumber,
             gap_seconds: (firstSwapBlock - p.init.blockNumber) / BLOCKS_PER_SECOND,
@@ -341,6 +401,7 @@ async function main(): Promise<void> {
     usd: ((rpc.cuSpent * 0.45) / 1e6).toFixed(5),
     revert_samples: reverts,
     rail_blocks: railBlocks,
+    quote_refusals: refusals,
     backfill_offsets_s: BACKFILL_OFFSETS_S,
     blocks_per_second: BLOCKS_PER_SECOND,
     entry_delay_blocks: ENTRY_DELAY_BLOCKS, exit_delay_blocks: EXIT_DELAY_BLOCKS,
