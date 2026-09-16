@@ -1587,75 +1587,164 @@ going to the transport directly, which is the tell that should have been read ea
 `RpcError` now carries `data`. The boot-exit output above — `bound=… actual=0` — is that
 fix, and an unreachable branch became a reachable one.
 
+### FOURTH DRY RUN — 2026-09-16, 95 minutes, the first with a real exit lifecycle
+
+The first run where a position is OPENED at entry and CLOSED later at its own horizon,
+with the bound re-quoted at exit time and the ladder in the live path.
+
+```
+ticks 1,109   initializes 553   candidates 443   qualified 32
+simulated 32  simClean 19   simReverted 13       skippedRail 0
+exitsDue 19   exitClean 10  exitReverted 7       exitNotAttempted 2
+ladderFired 8  ladderExhausted 7   ladderRungs {1: 9, 2: 1}
+quoteRefused 0  quoteReadFailed 0  rowsNotStored 0  quoteBasis {fee-only: 32}
+158,235 CU = $0.07121        exit_delay_blocks 900
+VERIFIED ON A FRESH CONNECTION: simulated 32, rows stored 32
+```
+
+#### THE EXIT REVERT RATE, FRESH QUOTE AGAINST THE STALE-QUOTE BASELINE
+
+| | stale quote (entry-time bound) | **fresh quote (re-quoted at exit)** |
+|---|---|---|
+| clean | 2 | **10** |
+| reverted | 5 | **7** |
+| clean share | 28.6% | **58.8%** |
+
+**n=7 ON THE BASELINE IS FAR TOO SMALL TO CONCLUDE FROM, and that is not a formality.**
+The baseline is the 7 run-2 fixtures that held both approvals, out of 14 reverts — the
+rest were the borrowed wallet having granted none. Two clean against five reverted is
+seven observations. A doubling of the clean share against a denominator of seven is
+consistent with the fix working and equally consistent with noise, and nothing in this
+run distinguishes them.
+
+What can be said without a denominator argument: **the exit is no longer bounded by a
+price that no longer exists**, which was true by construction before and is not now.
+
+#### THE LADDER FIRED FROM INSIDE THE LOOP, AND RESCUED EXACTLY ONE EXIT
+
+Read from `bot_exit_attempts` rather than from the counter:
+
+| rung | bound | exits it cleared |
+|---|---|---|
+| 1 | 300 bps | 9 |
+| **2** | **449 bps** | **1** |
+| 3 | 608 bps | 0 |
+| 4 | 1,343 bps | 0 |
+
+**39 attempts across 17 trades, 10 of them successful, 5 with a decoded
+`V4TooLittleReceived` payload.** The ladder fired 8 times — seven exhausted and **one
+rescued at rung 2** — so on this run it converted one exit that the configured bound
+missed into a fill, and could not save the other seven.
+
+**Seven exhausted is the number to carry forward, not the one rescue.** The drill and
+the boot fixture both found the same thing: where the pool pays nothing, no rung helps.
+
+#### THE ENTRY REVERT RATE WENT UP, AND IT IS NOT THE TIER MIX
+
+| run | horizon | quote | exit | n | reverted | rate |
+|---|---|---|---|---|---|---|
+| 1 | +30 s | linear | at entry | 24 | 7 | 29.2% |
+| 2 | +30 s | linear | at entry | 16 | 5 | 31.3% |
+| 3 | +90 s | fee+impact | at entry | 34 | 11 | 32.4% |
+| **4** | **+90 s** | **fee+impact** | **re-quoted at +90 s** | **32** | **13** | **40.6%** |
+
+**Nothing in this pass touched the ENTRY path**, so the rise is not caused by the exit
+work. It is also not a tier-composition effect — the rate is flat across tiers this run:
+fee 500 at 38.9% (7 of 18), fee 10000 at 38.5% (5 of 13), fee 100 at 100% (1 of 1).
+
+On n=32 against n=34 the difference between 32.4% and 40.6% is within what these runs
+have already shown between each other, and the residual over-quote that causes these
+reverts is still bounded and unidentified. **It is recorded as unexplained rather than
+attributed to this pass's changes.**
+
+#### `needs_exit` ROWS CREATED AND RESOLVED
+
+```
+run 5's own boot            found 0   exited 0     (a fresh mode has no history)
+seeded fixture              created 1  resolved 1  (closed_unsellable, pool pays 0)
+in-loop exhausted exits     7 -> now marked needs_exit for the NEXT boot to retry
+```
+
+**The seven exhausted exits exposed a real defect in this pass's own work.** They were
+first written as `exit_exhausted`, which is **not in `NON_TERMINAL`** — so the next boot
+would never have looked at them again, and a position the ladder failed to sell would
+have been quietly forgotten by the one routine written to find exactly that. They are
+now `needs_exit`, which is the state the boot sweep exists for, and a position the ladder
+could not clear now is precisely one to retry when the pool has moved.
+
+#### THE WALLET ON THIS RUN
+
+`BOT_WALLET_ADDRESS` was unset, so the run logged **NO WALLET CONFIGURED** and proceeded
+— which a dry run may do because it holds nothing and broadcasts nothing. The balance
+was **UNREAD rather than assumed**. The gate itself was exercised separately and in both
+directions; see category A above.
+
+#### THE IMPACT TERM DID NOT FIRE ONCE
+
+`quoteBasis {fee-only: 32}` — zero of 32 quotes had the four consecutive swaps the
+impact median needs, against 2 of 34 last run. **Across 66 live trades the impact term
+has now fired twice.** The exact fee term carries the entire correction in practice.
+
 ## 7. Rules here the code does not implement
 
-**CLOSED SINCE THE LAST PASS:** the exit horizon (changed to +90 s on holdout evidence),
-the quote's missing term (the fee, now applied; the impact term added and measured), the
-retry ladder's stale calibration (re-derived), and `MAX_TRADES_PER_DAY` truncating a test
-run (a dry-run-only run label). Section 6 records each.
-
-**WHAT IS OPEN NOW. This list is the pre-live gate and is grouped by what it would cost
-to be wrong.**
+**CATEGORY A IS CLOSED EXCEPT FOR ONE ITEM THAT NEEDS THE OPERATOR.** Section 6 records
+each with the evidence.
 
 ### A. Would lose money on the first live trade
 
-- **NO CODE PATH SELLS A `needs_exit` ROW.** Boot reconciliation correctly identifies a
-  position whose buy landed and whose sell did not, marks it, and then nothing acts. In
-  dry run that is right; live it is the single most dangerous gap in this document,
-  because a container replacement mid-trade is the state this project has already
-  produced twice and it is exactly what leaves an unsellable bag.
-- **The exit retry is implemented, drilled, and NOT WIRED INTO THE LOOP.** `bot/exit.ts`
-  passes 12 of 12 including a real revert against a live pool; `launchbot.ts` still
-  simulates one exit attempt and never calls it. The ladder exists and is not used.
-- **NO WALLET EXISTS.** No address is configured, no balance has been read from the
-  chain by any code here, and the $24 the operator states is unverified. Every rail that
-  depends on a balance is therefore untested against a real one.
-- **The exit's `minOut` is computed from the ENTRY quote.** Nothing re-quotes the pool
-  at +90 s. On a pool whose median move over that window is +37%, the sell's bound is
-  derived from a price that is 90 seconds stale — and the entry quote is itself the one
-  measured to over-quote by 2–3%.
+- ~~No code path sells a `needs_exit` row~~ — **CLOSED.** `clearNeedsExit` runs at boot
+  before arming; a position it cannot clear halts and raises. Proved in the real boot
+  path against a seeded, measured fixture.
+- ~~The retry ladder is not wired into the loop~~ — **CLOSED.** It fired 8 times in run
+  5 and rescued one exit at rung 2.
+- ~~The exit's `minOut` comes from the entry quote~~ — **CLOSED.** Every attempt
+  re-quotes from the pool's state at exit time, through the one executor the boot path
+  also uses.
+- **STILL OPEN — THE WALLET IS AN ADDRESS NOBODY HAS SUPPLIED.** The mechanism is built
+  and exercised: `BOT_WALLET_ADDRESS` is read, the balance comes from the chain, and the
+  bot refuses to arm below `MAX_CONCURRENT × MAX_POSITION_USD` = $50 (proved: exit code
+  3, loop never started). **What does not exist is the address.** Until one is supplied
+  the operator's balance is unread, and at the stated ~$24 against a $50 requirement
+  **the bot as configured would refuse to arm.** That is an operator decision — supply
+  an address, or change what the rails may risk.
 
 ### B. Unmeasured, so no figure here is a profit figure
 
-- **A 2–3% RESIDUAL OVER-QUOTE IS BOUNDED AND NOT IDENTIFIED.** The fee explains part,
-  the measured impact explains 0.17%, and 2–3% remains on every real tier. Our 300 bps
-  bound sits exactly on top of it, which is the revert mechanism. Until the residual is
-  identified the revert rate cannot be moved deliberately.
-- **`gas_usd` is null on every row.** The round trip is costed in section 6 from
-  external measurements, not from this bot's own trades, and no row carries what it
-  actually paid.
-- **`fill_status` is always the literal `dry-run`.** Nothing models whether our entry
-  would have won against competing buyers in the same block. Every return assumes a fill
-  a live bot must beat somebody to.
-- **The exit leg's success rate is unmeasured.** 26 of 34 reverted in run 3, but that
-  figure is dominated by the borrowed fixture's approvals rather than by the pool. The
-  only figure that is about the pool is 2 clean against 5 reverted, n=7.
-- **The 1% fee tier reverted 5 of 10 and exited clean 0 of 10 in run 3.** A tier-level
-  split the allow-list does not make, at n=10. Watch it; do not act on it.
+- **A 2–3% RESIDUAL OVER-QUOTE IS BOUNDED AND NOT IDENTIFIED**, and it is still the
+  revert mechanism: our 300 bps bound sits on top of it. The entry revert rate has now
+  run 29.2 / 31.3 / 32.4 / **40.6%** across four runs with no identified cause for the
+  spread.
+- **The exit's success rate is measured on 17 attempts**, 10 clean. Better than the
+  stale-quote baseline's 2 of 7, and both samples are too small to separate the fix from
+  noise.
+- **`gas_usd` is null on every row.** The round trip is costed from external
+  measurements, never from this bot's own trades.
+- **`fill_status` is always the literal `dry-run`.** Nothing models winning the fill
+  against competing buyers in the same block.
+- **Every exit is still simulated from a BORROWED holder.** In dry run we hold nothing,
+  so a clean exit proves the pool accepts the sell and not that our approvals would
+  permit it. Two setup transactions are measured in section 2; neither has been executed.
 
 ### C. Paths that exist and have never executed
 
-- **`quoteRefused` and `quoteReadFailed` are both 0 across every run.** The quote's two
-  refusal branches — too few observations, impact at or above 100% — have never fired
-  against live data.
-- **The impact term fires on 6% of trades** (`fee-only 32, fee+impact 2`). At entry a
-  pool almost never has four consecutive swaps, so the term that took the most work is
-  nearly inert in practice.
-- **The nightly check has never sent an alert.** Its thresholds have now been exercised
-  in opposite directions — a material 0.336 margin on an insufficient 71-trade sample —
-  but the delivery path itself is unexercised.
-- **`MAX_CONCURRENT` and `MAX_DAILY_LOSS_USD` have never bound in a live run**, only in
-  the drill. Dry run holds no position and realises no loss, so neither can.
+- **The impact term has fired twice in 66 live trades.** Effectively inert.
+- **`quoteRefused` and `quoteReadFailed` are 0 across every run.** Both refusal branches
+  are unexercised against live data.
+- **The nightly check has never delivered an alert.** Its thresholds have been exercised
+  in opposite directions; the delivery path has not.
+- **`MAX_CONCURRENT` and `MAX_DAILY_LOSS_USD` have never bound outside the drill.** Dry
+  run realises no loss, and `MAX_CONCURRENT` has not been reached because positions close
+  within ~105 s of opening.
+- **No transaction has ever been signed or broadcast.** There is no signing path, and
+  every figure in this document is a simulation.
 
 ### D. Structural, and stated so they are not rediscovered
 
-- **`bot_horizon_prices` accumulates and nothing prunes it.** Ten rows per trade, and no
-  removal path, which `ROBINHOOD.md` requires of every derived table.
-- **The +450 s peak on the bot's own 71 trades contradicts the offline holdout**, where
+- **`bot_horizon_prices` and `bot_exit_attempts` accumulate and nothing prunes them.**
+- **The +450 s peak on the bot's own trades contradicts the offline holdout**, where
   +450 s is exactly 0.00000 in every window and both halves. Unresolved.
 - **The stored `hooks` values are one byte short** on rows written before that decoder
-  was fixed, inherited from `ROBINHOOD.md`. Deterministic, so grouping is unaffected, but
-  two hooks differing only in their first byte would collide.
+  was fixed. Deterministic, so grouping is unaffected.
 
 ### The fee bound could not be derived from `v4_pool_creator`, because that table's scope is fee-filtered
 
