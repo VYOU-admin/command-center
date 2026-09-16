@@ -301,11 +301,22 @@ async function main(): Promise<void> {
            */
           stats.exitReverted += 1; stats.ladderFired += 1; stats.ladderExhausted += 1;
           if (exitFails.length < 8) exitFails.push((e as Error).message.slice(0, 140));
+          /*
+           * AN EXHAUSTED EXIT BECOMES `needs_exit`, NOT A TERMINAL STATUS.
+           *
+           * The first build set `exit_exhausted` here, which is not in `NON_TERMINAL` —
+           * so the next boot would never look at it again and a position we failed to
+           * sell would be quietly forgotten by the one routine written to find exactly
+           * that. `needs_exit` is the state the boot sweep exists for, and a position
+           * the ladder could not clear now is precisely one that should be retried when
+           * the pool has moved.
+           */
           await c.query(
-            `update bot_trades set status='exit_exhausted', exit_sim_status='reverted',
+            `update bot_trades set status='needs_exit', exit_sim_status='reverted',
                     exit_sim_note=$2, exit_attempts=$3, exit_block=$4, updated_at=now()
               where id=$1`,
-            [d.id, (e as Error).message.slice(0, 200), EXIT_RETRY.MAX_ATTEMPTS, head]);
+            [d.id, `ladder exhausted in-loop: ${(e as Error).message.slice(0, 180)}`,
+              EXIT_RETRY.MAX_ATTEMPTS, head]);
         }
       }
 
