@@ -36,6 +36,7 @@ const USD_PER_MCU = 0.45;
 export const ROUTE_SCHEMA = `
 create table if not exists v4_swap_tx (
   chain     text not null,
+  side      text,
   tx_hash   text not null,
   pool_id   text,
   win       text,
@@ -61,6 +62,15 @@ async function main(): Promise<void> {
   };
   const commit = args.includes('--commit');
   const sample = num('--sample', 300);
+  /*
+   * --side. Settled empirically against `tx.value`, which is unambiguous about who
+   * paid: across 143 native-ETH buys the token side is POSITIVE in 142 and
+   * `tx.value = |amount0|` in 125. That is the SWAPPER perspective ROBINHOOD.md
+   * states -- the swapper received the token -- so a SELL is the token side NEGATIVE.
+   */
+  const side = str('--side', 'buy');
+  if (side !== 'buy' && side !== 'sell') throw new Error('--side must be buy or sell');
+  const tokenSign = side === 'buy' ? '>' : '<';
   const windows = str('--windows', '').split(',').filter(Boolean)
     .map((w) => { const [a, b] = w.split(':'); return { from: Number(a), to: Number(b) }; });
   if (windows.length === 0) throw new Error('usage: --windows from:to,from:to');
@@ -90,6 +100,7 @@ async function main(): Promise<void> {
           select distinct on (s.pool_id) s.tx_hash, s.pool_id
             from v4_swaps_all s join rule r on r.pool_id = s.pool_id
            where s.block_number > r.fb + 150 and s.block_number <= r.fb + 450
+             and (case when r.tside=0 then s.amount0 else s.amount1 end) ${tokenSign} 0
            order by s.pool_id, s.block_number, s.log_index)
         select tx_hash, pool_id, '${w.from}' from entry
          order by tx_hash limit ${sample}
@@ -107,7 +118,10 @@ async function main(): Promise<void> {
       transactions_to_read: n,
       estimate: { cu: estCu, usd: ((estCu * USD_PER_MCU) / 1e6).toFixed(5) },
       commit,
-      note: 'entry-moment swaps on rule-qualifying pools -- the trade the bot would make',
+      side,
+      note: side === 'buy'
+        ? 'entry-moment BUYS on rule-qualifying pools -- the trade the bot would make'
+        : 'SELLS on rule-qualifying pools -- the exit leg, which was never measured',
     });
     if (n === 0) {
       log.info('NOTHING TO READ -- stated, never treated as a clean pass');
@@ -137,12 +151,12 @@ async function main(): Promise<void> {
         const input = tx.input;
         await c.query(
           `insert into v4_swap_tx
-             (chain,tx_hash,pool_id,win,tx_to,tx_from,value_wei,selector,input_len,input)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             (chain,side,tx_hash,pool_id,win,tx_to,tx_from,value_wei,selector,input_len,input)
+           values ($11,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
            on conflict (chain,tx_hash) do nothing`,
           [chain, r.tx_hash, r.pool_id, r.win, tx.to ? tx.to.toLowerCase() : null,
             tx.from.toLowerCase(), BigInt(tx.value ?? '0x0').toString(),
-            input.slice(0, 10), input.length, input],
+            input.slice(0, 10), input.length, input, side],
         );
         stored += 1;
       } catch (err) {
