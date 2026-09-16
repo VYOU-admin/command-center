@@ -59,6 +59,23 @@ const BLOCKS_PER_SECOND = 10;
 /** Out to +600 s, as required. Seconds after the ENTRY moment. */
 const HORIZONS_S = [15, 30, 45, 60, 90, 120, 180, 300, 450, 600] as const;
 const MAX_HORIZON_BLOCKS = Math.max(...HORIZONS_S) * BLOCKS_PER_SECOND;
+/*
+ * SLACK BEYOND THE LONGEST HORIZON, SO THE LONGEST HORIZON CAN ACTUALLY FILL.
+ *
+ * The first run of this grid loaded ticks only to +600 s and then asked the +600 s
+ * horizon for a trade strictly AFTER +600 s. There is none by construction, so the cell
+ * reported `exit_found: 0` and a median of exactly 0.00000 — a boundary presented as a
+ * market result. `ROBINHOOD.md` records the identical shape in `surv_1h`, which read
+ * 0.02% everywhere because its swap window was capped and it "measured a boundary
+ * rather than survival".
+ *
+ * 3,000 blocks = 300 s. NOT picked: the median exit fill lands 1.1–3.7 s past its mark
+ * across every horizon measured in that first run, so this is roughly 80x the observed
+ * median delay. Exits that still do not fill inside it are counted and reported rather
+ * than being silently scored as no-exit.
+ */
+const FILL_SLACK_BLOCKS = 3000;
+const TICK_HORIZON_BLOCKS = MAX_HORIZON_BLOCKS + FILL_SLACK_BLOCKS;
 
 /** The four swept windows. `v4_swaps_all` covers all of them. */
 const WINDOWS: Array<[string, number, number]> = [
@@ -99,7 +116,7 @@ async function main(): Promise<void> {
     const perWindow: Array<Record<string, unknown>> = [];
     for (const [label, from, to] of windows) {
       /* Every launch must carry its FULL longest horizon inside the swept range. */
-      const usableTo = to - ENTRY_DELAY_BLOCKS - MAX_HORIZON_BLOCKS;
+      const usableTo = to - ENTRY_DELAY_BLOCKS - TICK_HORIZON_BLOCKS;
       const all = await c.query<{ n: string }>(
         `select count(*)::text n from v4_pool_init i
           join lateral (select min(block_number) fb from v4_swaps_all s
@@ -137,7 +154,8 @@ async function main(): Promise<void> {
         kept_in_this_half_and_fully_observable: ins.rowCount,
         usable_to: usableTo,
         censored_note: `launches with first_swap > ${usableTo} are EXCLUDED: their `
-          + `+${Math.max(...HORIZONS_S)}s exit falls outside the swept range`,
+          + `+${Math.max(...HORIZONS_S)}s exit plus ${FILL_SLACK_BLOCKS / BLOCKS_PER_SECOND}s `
+          + 'of fill slack falls outside the swept range',
       });
     }
     await c.query('analyze launches');
@@ -148,6 +166,7 @@ async function main(): Promise<void> {
       split: 'md5(pool_id) first hex char; 0-7 search, 8-f holdout (bot/holdout.ts)',
       horizons_s: HORIZONS_S,
       entry_delay_blocks: ENTRY_DELAY_BLOCKS,
+      fill_slack_s: FILL_SLACK_BLOCKS / BLOCKS_PER_SECOND,
       fee_allow_list: ALLOWED_FEES,
       gap_blocks: [GAP_MIN_BLOCKS, GAP_MAX_BLOCKS],
       per_window: perWindow,
@@ -173,7 +192,7 @@ async function main(): Promise<void> {
         from launches l
         join v4_swaps_all s on s.pool_id = l.pool_id
        where s.block_number > l.entry_block
-         and s.block_number <= l.entry_block + ${MAX_HORIZON_BLOCKS}
+         and s.block_number <= l.entry_block + ${TICK_HORIZON_BLOCKS}
          and s.amount0 <> 0 and s.amount1 <> 0`);
     await c.query('create index on ticks (pool_id, off, log_index); analyze ticks');
 
@@ -200,7 +219,7 @@ async function main(): Promise<void> {
        * have sold on the next trade. The ceiling is the observable range, which every
        * launch is guaranteed to carry by the censoring rule above.
        */
-      const mark2 = MAX_HORIZON_BLOCKS;
+      const mark2 = TICK_HORIZON_BLOCKS;
       const r = await c.query<{
         exits: string; med_uncond: string | null; med_cond: string | null;
         pos: string; p25: string | null; p75: string | null; worst: string | null;
