@@ -123,8 +123,7 @@ if (all.rendered > 0) {
   } else ok('a malformed filter is ignored, not applied');
 }
 
-console.log(failures === 0 ? '\nverify-trades-page: PASS' : `\nverify-trades-page: ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+
 
 
 /* ---- the exit-leg and backfill columns ---------------------------------- */
@@ -154,3 +153,6 @@ if (all.priceCellsZero === 0) ok('no numeric cell renders a bare zero');
 else fail(`${all.priceCellsZero} numeric cells render 0, which must be a dash if unobserved`);
 
 console.log(`  (em dashes on the page: ${all.nulls})`);
+
+console.log(failures === 0 ? '\nverify-trades-page: PASS' : `\nverify-trades-page: ${failures} FAILURE(S)`);
+process.exit(failures === 0 ? 0 : 1);

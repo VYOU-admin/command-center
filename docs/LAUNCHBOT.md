@@ -792,6 +792,105 @@ The honest reading of the +30s column is narrower and more useful: across those 
 launches there was no cell where exiting at +30s lost money, which is weak evidence that
 the exit is *safe*, and no evidence at all that it is *optimal*.
 
+### SECOND DRY RUN — 2026-09-16, 70 minutes, live launches
+
+Started 10:53Z under the fee allow-list, the five real rails and the exit simulation.
+
+```
+ticks 819   initializes 239   candidates 204   qualified 35
+simulated 16   simClean 11   simReverted 5     skippedRail 19
+exitClean 2    exitReverted 14  exitNotAttempted 0
+110,848 CU   $0.04988
+```
+
+**THE FEE BOUND DID NOT MOVE THE REVERT RATE, and that is the headline.**
+
+| run | n | reverted | revert rate |
+|---|---|---|---|
+| 1 — no fee bound | 24 | 7 | 29.2% |
+| 2 — allow-list active | 16 | 5 | **31.3%** |
+
+The prediction in section 6 was 19.0%: remove the three 803369-tier pools, which were
+0-for-3, and the rest should hold. It did not happen. The allow-list worked exactly as
+designed — **zero** pools outside {100, 500, 10000} were traded, confirmed by query —
+and the reverts simply moved to the allowed tiers: 2 of 9 at fee 500, 2 of 5 at 10000,
+1 of 2 at 100. On n=16 against n=24 the difference is noise in both directions.
+
+The honest conclusion: **the 803369 tier was not the cause of the revert rate, only a
+visible correlate of it.** Removing it removed three bad pools and told us nothing about
+the other four reverts, which were always the interesting ones. A filter that removes
+the cases you already understood does not improve the number you were trying to explain.
+
+**A RAIL FIRED IN PRODUCTION, UNPLANNED.** `MAX_TRADES_PER_DAY: 40 >= 40` blocked 19
+launches from 11:39Z onward. Run 1's 24 rows and run 2's 16 both fall on 2026-09-16, so
+the day's budget was genuinely spent. This is correct behaviour and the first time a
+rail stopped real work rather than a drill — but it means run 2 is a **truncated
+sample**: it observed 70 minutes of launches and was only permitted to act on the first
+46 of them. Its 31.3% is over 16 trades, not over the hour.
+
+### THE EXIT LEG REVERTED 14 OF 16 — and 9 of those are the fixture, not the pool
+
+Every one arrived as a bare `execution reverted` with no reason string. An 87.5% failure
+rate with no cause attached is not a measurement, so `npm run exit-diagnose` read both
+approvals the sell path requires (section 2) for each borrowed holder — 32 calls, 832
+CU, $0.00037:
+
+| exit outcome | ERC-20 → Permit2 | Permit2 → router | n |
+|---|---|---|---|
+| reverted | **zero** | **zero** | 9 |
+| reverted | nonzero | nonzero | 5 |
+| clean | nonzero | nonzero | 2 |
+
+**9 of the 14 reverts are the borrowed wallet having granted no approvals**, which is
+exactly what the design anticipated: the fixture is the first swap's sender, who has no
+reason to have approved a router path they did not use. Those nine say nothing about
+whether our exit would work.
+
+That leaves the only defensible figure: **of the 7 fixtures that did hold both
+approvals, 2 exits simulated clean and 5 reverted.** n=7 is far too small to conclude
+from, and it is reported here as the number that is actually about the pool rather than
+about the fixture. It is markedly worse than the entry leg's 68.8% clean, and it is the
+single most important open question in this document — the exit is the leg that has
+never been demonstrated end to end, and this is the first evidence that it is harder
+than the entry rather than easier.
+
+**What this run changed about the method, not just the numbers:** the headline 87.5%
+was wrong to state on its own, and the only reason it was not stated is that the design
+named the confound before the measurement was taken. Writing down what a check does not
+prove, at the time the check is written, is what made a two-minute diagnosis possible
+instead of a wrong finding.
+
+### THE EXIT GRID, BOTH RUNS, ON THE CORRECTED ENTRY PRICE
+
+40 rows, 36–38 priced depending on horizon:
+
+| horizon | n priced | n null | median return | % positive | worst |
+|---|---|---|---|---|---|
+| **+30s (implemented)** | 36 | 4 | +0.223 | 100.0% | +0.073 |
+| +60s | 37 | 3 | +0.317 | 97.3% | −0.519 |
+| +120s | 38 | 2 | +0.478 | 97.4% | −0.519 |
+| +300s | 38 | 2 | +0.715 | 94.7% | −0.519 |
+
+Run 2 alone, all 16 priced with no nulls — the allow-list is why, since the 803369 pools
+that produced run 1's nulls had no swaps at all:
+
+| horizon | median | % positive | worst |
+|---|---|---|---|
+| +30s | +0.240 | 100.0% | +0.073 |
+| +60s | +0.335 | 100.0% | +0.059 |
+| +120s | +0.396 | 100.0% | +0.063 |
+| +300s | +0.540 | 93.8% | −0.022 |
+
+**The monotone shape replicated in run 2 independently of run 1.** That is worth more
+than either run alone, and it is still not a holdout: both runs are the same afternoon
+on the same chain, and a regime that favours holding would produce this in both. The
+exit delay has not been changed. Two consistent samples are a reason to design the test,
+not to skip it.
+
+Note also that the +30s column has a **positive worst case in both runs** — across 36
+launches there was no cell where exiting at +30s lost money. That is weak evidence the
+exit is safe and no evidence at all that it is optimal, which remains the honest reading.
+
 ## 7. Rules here the code does not implement
 
 The four items that stood here on 2026-09-16 are all closed, and section 6 records how.
@@ -817,6 +916,14 @@ What follows is what is open now.
   it.** No code path sells a `needs_exit` row. In dry run that is correct; before a live
   mode it is the most dangerous gap in this document, because it is the state a
   container replacement actually produces.
+- **The exit leg has never been simulated from a wallet with our own approvals.** The
+  only figure that is about the pool rather than the fixture is 2 clean against 5
+  reverted, n=7. Until a wallet exists that holds a token and both approvals, the exit's
+  success rate is unmeasured, and no return in section 6 should be read as achievable.
+- **`MAX_TRADES_PER_DAY` counts calendar days in the database's timezone**, so two runs
+  in one afternoon share a budget. That is correct for a risk limit and wrong for a test
+  harness; the second dry run was truncated to 16 trades by it. A drill mode that runs
+  against a separate `mode` value would avoid this without weakening the rail.
 
 ### The fee bound could not be derived from `v4_pool_creator`, because that table's scope is fee-filtered
 
