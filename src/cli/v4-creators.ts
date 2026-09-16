@@ -140,8 +140,23 @@ async function main(): Promise<void> {
     const ceiling = Math.max(10000, Math.ceil(estCu * 1.5));
     const rpc = new RpcClient(RPC_URL.replace('{key}', key), 120000, ceiling);
 
+    /*
+     * THE READ SET IS THE ESTIMATED SET, not a superset of it. This selected every
+     * distinct tx_hash while the estimate counted only the UNRESOLVED ones, so a
+     * re-run priced 752 transactions and then tried to read 1,294 -- the ceiling
+     * stopped it at 16,920 CU with nothing stored. The exclusion below is the same
+     * `not exists` the estimate uses, so the two cannot drift apart again.
+     */
     const rows = await c.query<{ tx_hash: string }>(
-      `select distinct tx_hash from want where tx_hash is not null`);
+      `select distinct w.tx_hash from want w
+        where w.tx_hash is not null
+          and not exists (select 1 from v4_pool_creator k
+                           where k.chain=$1 and k.pool_id=w.pool_id and k.creator is not null)`,
+      [chain]);
+    if (rows.rowCount !== n) {
+      throw new Error(`read set is ${rows.rowCount} transactions but the estimate priced `
+        + `${n}. Refusing to spend against a figure that was not the one reported.`);
+    }
     const byTx = new Map<string, { from: string; to: string | null }>();
     let failed = 0; let done = 0;
     for (const r of rows.rows) {
