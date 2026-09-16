@@ -73,8 +73,20 @@ export interface InitRow {
   blockNumber: number; logIndex: number; txHash: string;
 }
 
-/** A 32-byte topic holding a left-padded address. */
+/** A 32-byte TOPIC ('0x' + 64 hex) holding a left-padded address. */
 const addrFromTopic = (t: string): string => `0x${t.slice(26)}`;
+
+/**
+ * A 32-byte DATA WORD (64 hex, NO '0x') holding a left-padded address.
+ *
+ * SEPARATE FROM `addrFromTopic` BECAUSE THE OFFSETS DIFFER BY THE '0x', and using the
+ * topic helper on a data word drops the address's HIGH BYTE. That shipped: `hooks` was
+ * stored 40 characters instead of 42 for all 306,560 rows, so a comparison against the
+ * real zero address matched nothing and reported every pool as hooked. The currencies
+ * were unaffected -- they come from topics. Correcting the stored values needs a
+ * re-sweep; the extraction is fixed here so it cannot recur.
+ */
+const addrFromWord = (w: string): string => `0x${w.slice(24)}`;
 
 /** Two's-complement int24 out of a 32-byte word. */
 function int24(word: string): number {
@@ -108,7 +120,7 @@ export function decodeInitialize(log: {
     currency1: addrFromTopic(t[3]!).toLowerCase(),
     fee: Number(BigInt(`0x${w(0)}`)),
     tickSpacing: int24(w(1)),
-    hooks: addrFromTopic(w(2)).toLowerCase(),
+    hooks: addrFromWord(w(2)).toLowerCase(),
     sqrtPriceX96: BigInt(`0x${w(3)}`).toString(),
     initTick: int24(w(4)),
     blockNumber: Number(BigInt(log.blockNumber)),
