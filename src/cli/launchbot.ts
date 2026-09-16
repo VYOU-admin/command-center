@@ -34,7 +34,33 @@ import { quoteRate, swapAmounts, tokenPrice } from '../bot/price.js';
 import { ReadOnlyRpc } from '../bot/rpc.js';
 import { reconcileOnBoot } from '../bot/reconcile.js';
 
-const MODE = 'dry-run';
+/*
+ * THE MODE IS ALWAYS A DRY-RUN MODE, AND A RUN LABEL ONLY SUFFIXES IT.
+ *
+ * `MAX_TRADES_PER_DAY` counts per (chain, mode) per calendar day, which is right for a
+ * risk limit and wrong for a test harness: dry run 2 was truncated to 16 trades because
+ * dry run 1 had already spent the day's budget, and LAUNCHBOT.md section 7 records the
+ * remedy as "a drill mode that runs against a separate mode value". This is that.
+ *
+ * **THE LABEL CANNOT PRODUCE A NON-DRY-RUN MODE.** It is a SUFFIX on the literal
+ * 'dry-run', not a replacement for it, so no argument can make this process write a row
+ * that reads as live. The rail is not weakened — it is still enforced in full within
+ * whatever mode is running; it simply gives a test run its own budget rather than
+ * making two runs share one.
+ *
+ * `/trades` already groups totals per mode and never sums across them, so a labelled
+ * run cannot be added to any other run's figures.
+ */
+const RUN_LABEL = ((): string => {
+  const i = process.argv.indexOf('--run-label');
+  if (i < 0) return '';
+  const raw = String(process.argv[i + 1] ?? '');
+  if (!/^[a-z0-9-]{1,24}$/.test(raw)) {
+    throw new Error(`--run-label must match [a-z0-9-]{1,24}, got "${raw}"`);
+  }
+  return raw;
+})();
+const MODE = RUN_LABEL ? `dry-run-${RUN_LABEL}` : 'dry-run';
 const CHAIN = 'robinhood';
 const PRICING = [
   '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
