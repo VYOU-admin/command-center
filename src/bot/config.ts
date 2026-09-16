@@ -71,6 +71,33 @@ export const RAILS = {
   MAX_POSITION_USD: 10,
   /** $50 of $100 at risk, leaving headroom for a stuck exit. */
   MAX_CONCURRENT: 5,
+  /**
+   * THE HARD CAPITAL CAP. LAUNCHBOT.md section 4.
+   *
+   * THE BALANCE IS NOT A BUDGET. The arming gate asks whether the wallet can cover
+   * `MAX_CONCURRENT x MAX_POSITION_USD` = $50, and that question has no upper side —
+   * a wallet holding $5,000 passes it with a factor of a hundred to spare. Nothing
+   * else in this bot bounded the total; the "$100 capital approved" in LAUNCHBOT.md
+   * section 0 was a sentence in a document, enforced by no code. This is the
+   * enforcement.
+   *
+   * IT IS NOT A RISK CALCULATION. This is the operator's PERSONAL wallet, not an
+   * account funded for the bot, and the bot is entitled to a stated amount of it and
+   * no more — whatever the wallet happens to hold on any given day. A limit derived
+   * from the balance would rise every time the operator was paid, which is backwards:
+   * a bot's mandate must not grow because its owner's savings did.
+   *
+   * WHAT IT BOUNDS: the cost basis of every OPEN position plus the day's realised
+   * LOSSES. A trade is admitted only when `deployed + MAX_POSITION_USD <= this`.
+   * See `rails.ts` for why it is forward-looking, why losses count, why profit
+   * creates no headroom, and why an unknown basis blocks.
+   *
+   * IT CANNOT BIND UNDER THE RAILS ABOVE, AND THAT IS DELIBERATE. MAX_CONCURRENT 5 x
+   * $10 = $50 open plus MAX_DAILY_LOSS_USD $15 caps `deployed` at $65. This is a
+   * BACKSTOP against those being raised, not a constraint that fires today — which is
+   * exactly why `rail-drill` trips it on purpose rather than waiting for it.
+   */
+  MAX_DEPLOYED_USD: 100,
   /** ~8% of the 485/day available in the SELLOFF window. A bounded first exposure. */
   MAX_TRADES_PER_DAY: 40,
   /** 15% of the $100 capital. Halts for the day. */

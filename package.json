@@ -59,7 +59,8 @@
     "exit-retry-drill": "node dist/cli/exit-retry-drill.js",
     "nightly-check": "node dist/cli/nightly-check.js",
     "quote-check": "node dist/cli/quote-check.js",
-    "seed-stuck": "node dist/cli/seed-stuck.js"
+    "seed-stuck": "node dist/cli/seed-stuck.js",
+    "wallet-probe": "node dist/cli/wallet-probe.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

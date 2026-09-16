@@ -41,6 +41,19 @@ export interface WalletState {
   requiredUsd: number;
   canArm: boolean;
   reason: string;
+  /**
+   * THE HARD CAPITAL CAP, REPORTED BESIDE THE GATE AND GATING NOTHING.
+   *
+   * `MAX_DEPLOYED_USD` bounds what the bot may ever DEPLOY; the arming gate asks the
+   * separate question of whether the wallet can cover what the rails can put at risk at
+   * once. Neither is derived from the other and the cap must not become a second arming
+   * threshold -- a wallet holding $60 may legitimately arm and trade, because
+   * MAX_CONCURRENT and MAX_DAILY_LOSS_USD bound `deployed` at $65 long before the cap
+   * is approached. `coversCap` exists so both answers are visible in one place rather
+   * than one of them being inferred.
+   */
+  capUsd: number;
+  coversCap: boolean;
 }
 
 /**
@@ -92,6 +105,8 @@ export async function readWalletState(
   const canArm = balanceUsd >= need;
   return {
     address, balanceWei, balanceEth, ethUsd, balanceUsd, requiredUsd: need, canArm,
+    capUsd: RAILS.MAX_DEPLOYED_USD,
+    coversCap: balanceUsd >= RAILS.MAX_DEPLOYED_USD,
     reason: canArm
       ? `balance $${balanceUsd.toFixed(2)} covers MAX_CONCURRENT ${RAILS.MAX_CONCURRENT}`
         + ` x $${RAILS.MAX_POSITION_USD} = $${need}`

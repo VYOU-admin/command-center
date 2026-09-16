@@ -493,6 +493,7 @@ database value is editable by anything with a connection.
 |---|---|---|
 | max position | $10 | operator, 2026-09-16 |
 | max concurrent | 5 | $50 of $100 at risk, leaving headroom for a stuck exit |
+| **max deployed** | **$100** | **the hard capital cap — the wallet is personal and the bot is not entitled to all of it. See below.** |
 | max trades/day | 40 | ~8% of the 485/day available in the SELLOFF window |
 | max daily loss | $15 | 15% of capital |
 | consecutive simulation reverts | 3 | a broken calldata shape must stop at once |
@@ -500,6 +501,62 @@ database value is editable by anything with a connection.
 
 **A kill-switch READ FAILURE halts.** An unreachable database is not permission to keep
 trading.
+
+### THE HARD CAPITAL CAP — `MAX_DEPLOYED_USD = 100`, added 2026-09-16
+
+**THE BALANCE IS NOT A BUDGET, AND UNTIL NOW NOTHING IN THE BOT SAID SO.** The arming
+gate asks one question — *can this wallet cover what the rails can put at risk at once* —
+and `MAX_CONCURRENT × MAX_POSITION_USD = $50` is the whole of it. That question has no
+upper side. **A wallet holding $5,000 passes it with a factor of a hundred to spare**,
+and nothing else in the bot bounded the total; the "$100 capital approved" in section 0
+was a sentence in a document, enforced by no code. This rail is the enforcement.
+
+**THE REASONING, WHICH IS NOT A RISK CALCULATION.** This is the operator's personal
+wallet, not an account funded for the bot. The bot is entitled to a stated amount of it
+and to no more, whatever the wallet happens to hold on any given day. A limit derived
+from the balance would rise every time the operator was paid, which is precisely
+backwards — a bot's mandate must not grow because its owner's savings did.
+
+> **THE QUANTITY IT BOUNDS.** `deployed = the cost basis of every open position + the
+> day's realised LOSSES`. A trade is admitted only when
+> `deployed + MAX_POSITION_USD <= MAX_DEPLOYED_USD`.
+
+Five properties, each of which is a decision rather than an implementation detail:
+
+- **IT IS FORWARD-LOOKING, AND HAS TO BE.** Testing `deployed >= 100` after the fact
+  would admit the trade that takes it to $110. The rail asks whether the trade *about to
+  be placed* would breach the cap, and the prospective size is exactly
+  `MAX_POSITION_USD` because `positionWei()` sizes every position at it.
+- **REALISED LOSSES COUNT, WHICH IS WHAT MAKES IT A CAPITAL CAP RATHER THAN A
+  CONCURRENCY LIMIT IN DOLLARS.** A bot that loses $10 and reopens has the same open
+  basis and less money. Counting the day's losses makes the cap a bound on what the day
+  can COST, not on what happens to be open at an instant.
+- **PROFIT DOES NOT CREATE HEADROOM.** The loss term is `max(0, −pnl)`, so a profitable
+  day leaves the cap exactly where it was. A gain in the bot's ledger is not a mandate to
+  risk more of the operator's wallet, and the symmetric form would quietly turn one good
+  morning into a larger afternoon.
+- **AN OPEN POSITION WITH NO RECORDED COST BASIS MAKES `deployed` UNKNOWN, AND UNKNOWN
+  BLOCKS.** `sum(position_usd)` over rows where one is null silently contributes zero,
+  which is this project's most-recorded failure shape — the `balanceOf` reader that
+  turned 490 HTTP 429s into plausible zero balances. The rail counts those rows
+  separately and refuses rather than under-reporting exposure.
+- **IT IS READ FROM POSTGRES, NEVER COUNTED IN MEMORY**, for the reason every other rail
+  is: a container replacement must not let the bot forget what it already has at risk.
+
+**IT CANNOT BIND UNDER TODAY'S OTHER RAILS, AND THAT IS STATED RATHER THAN LEFT TO BE
+DISCOVERED.** `MAX_CONCURRENT 5 × $10 = $50` of open basis plus `MAX_DAILY_LOSS_USD $15`
+caps `deployed` at **$65**, comfortably below $100, so on the live path one of those two
+fires first every time. **The cap is a backstop against the other rails being raised**,
+not a constraint that fires today — and that is exactly why it must be tripped
+deliberately rather than waited for. A rail whose threshold is unreachable is the easiest
+kind to get wrong and the hardest to notice.
+
+**THE ARMING GATE IS UNCHANGED AND STAYS THE $50 QUESTION.** The bot still reads the
+balance and still refuses below `MAX_CONCURRENT × MAX_POSITION_USD`, because arming
+without enough to cover what the rails permit means a rail meant to bound exposure is
+instead bounded by running out of money. **The balance decides whether the bot may start;
+the cap decides how much it may ever deploy.** The two are reported side by side and
+neither is derived from the other.
 
 **ONE IMPLEMENTATION OF EVERY RULE**, called by the dry-run path and by any future live
 path. A dry run over different code proves nothing about the live path.

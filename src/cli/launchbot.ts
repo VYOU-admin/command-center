@@ -28,7 +28,7 @@ import { minOut, positionWei, qualifies } from '../bot/rule.js';
 import { quote } from '../bot/quote.js';
 import type { PoolTick } from '../bot/quote.js';
 import { BOT_SCHEMA, halt, isHalted } from '../bot/state.js';
-import { checkRails } from '../bot/rails.js';
+import { checkRails, deployedCapIsTerminal, deployedUsd } from '../bot/rails.js';
 import { id } from 'ethers';
 import { quoteRate, swapAmounts, tokenPrice } from '../bot/price.js';
 import { ReadOnlyRpc } from '../bot/rpc.js';
@@ -130,6 +130,9 @@ async function main(): Promise<void> {
           balance_usd: Number(walletState.balanceUsd.toFixed(2)),
           required_usd: walletState.requiredUsd,
           can_arm: walletState.canArm,
+          /* The cap is reported beside the gate and decides nothing here. */
+          max_deployed_usd: walletState.capUsd,
+          covers_cap: walletState.coversCap,
           reason: walletState.reason,
         });
         if (!walletState.canArm) {
@@ -391,7 +394,11 @@ async function main(): Promise<void> {
           if (!rail.allowed) {
             stats.skippedRail += 1;
             if (railBlocks.length < 12) railBlocks.push(rail.blocked.join('; '));
-            log.warn('RAIL BLOCKED A TRADE', { pool: pid, blocked: rail.blocked, state: rail.state });
+            log.warn('RAIL BLOCKED A TRADE', {
+              pool: pid, blocked: rail.blocked, state: rail.state,
+              deployed_usd: Number(deployedUsd(rail.state).toFixed(2)),
+              max_deployed_usd: RAILS.MAX_DEPLOYED_USD,
+            });
             /*
              * TWO RAILS STOP THE DAY RATHER THAN SKIP ONE LAUNCH. A run of reverts and
              * a breached daily loss are both statements that something is wrong with
@@ -401,7 +408,15 @@ async function main(): Promise<void> {
              * and correctly skip.
              */
             const fatal = rail.blocked.find((b) => b.startsWith('MAX_CONSECUTIVE_REVERTS')
-              || b.startsWith('MAX_DAILY_LOSS_USD'));
+              || b.startsWith('MAX_DAILY_LOSS_USD')
+              /*
+               * THE CAPITAL CAP STOPS THE DAY ONLY WHEN IT CANNOT CLEAR. Open basis
+               * falls as positions close, so that case is an ordinary capacity limit
+               * and skips; realised losses never fall within a day, and an unknown
+               * basis is a defect rather than a capacity condition, so both halt.
+               * `deployedCapIsTerminal` is the one place that distinction lives.
+               */
+              || (b.startsWith('MAX_DEPLOYED_USD') && deployedCapIsTerminal(rail.state)));
             if (fatal) {
               await halt(c, CHAIN, fatal);
               log.error('HALTING', { reason: fatal, state: rail.state });

@@ -22,9 +22,37 @@ export interface RailState {
   halted: boolean;
   haltReason: string;
   openPositions: number;
+  /** Cost basis of every OPEN position, summed. The first term of `deployed`. */
+  openCostBasisUsd: number;
+  /**
+   * OPEN positions carrying a NULL `position_usd`. `sum()` skips them silently, so
+   * without this count the cap would under-report exposure and read as a clean pass —
+   * the failure shape ROBINHOOD.md records for a `balanceOf` reader that turned 490
+   * HTTP 429s into plausible zero balances. Non-zero means `deployed` is UNKNOWN.
+   */
+  openPositionsUnknownBasis: number;
   tradesToday: number;
   realisedPnlTodayUsd: number;
   consecutiveReverts: number;
+}
+
+/**
+ * THE DEPLOYED-CAPITAL FIGURE, AND THE ONE PLACE IT IS COMPUTED.
+ *
+ * `deployed = open cost basis + the day's realised LOSSES`.
+ *
+ * WHY LOSSES COUNT. Without the second term this is a concurrency limit denominated in
+ * dollars, not a capital cap: a bot that loses $10 and reopens has the same open basis
+ * and less money. Counting the day's losses makes the cap bound what the day can COST
+ * rather than what happens to be open at an instant.
+ *
+ * WHY PROFIT CREATES NO HEADROOM. The term is `max(0, -pnl)`, so a profitable day leaves
+ * the cap exactly where it was. A gain in the bot's ledger is not a mandate to risk more
+ * of the operator's personal wallet, and the symmetric form would quietly turn one good
+ * morning into a larger afternoon.
+ */
+export function deployedUsd(state: RailState): number {
+  return state.openCostBasisUsd + Math.max(0, -state.realisedPnlTodayUsd);
 }
 
 export interface RailVerdict {
@@ -55,7 +83,9 @@ export async function readRailState(
   c: PoolClient, chain: string, mode: string,
 ): Promise<RailState> {
   const kill = await isHalted(c, chain);
-  const r = await c.query<{ open: string; today: string; pnl: string | null }>(
+  const r = await c.query<{
+    open: string; today: string; pnl: string | null; basis: string; nobasis: string;
+  }>(
     `select
        (select count(*) from bot_trades
          where chain = $1 and mode = $2 and status = any($3))::text as open,
@@ -63,7 +93,12 @@ export async function readRailState(
          where chain = $1 and mode = $2 and created_at >= date_trunc('day', now()))::text as today,
        (select coalesce(sum(net_pnl_usd), 0) from bot_trades
          where chain = $1 and mode = $2
-           and created_at >= date_trunc('day', now()))::text as pnl`,
+           and created_at >= date_trunc('day', now()))::text as pnl,
+       (select coalesce(sum(position_usd), 0) from bot_trades
+         where chain = $1 and mode = $2 and status = any($3))::text as basis,
+       (select count(*) from bot_trades
+         where chain = $1 and mode = $2 and status = any($3)
+           and position_usd is null)::text as nobasis`,
     [chain, mode, NON_TERMINAL]);
   const row = r.rows[0];
   if (!row) {
@@ -74,6 +109,8 @@ export async function readRailState(
     halted: kill.halted,
     haltReason: kill.reason,
     openPositions: Number(row.open),
+    openCostBasisUsd: Number(row.basis),
+    openPositionsUnknownBasis: Number(row.nobasis),
     tradesToday: Number(row.today),
     realisedPnlTodayUsd: Number(row.pnl ?? 0),
     consecutiveReverts: await trailingReverts(c, chain, mode),
@@ -103,7 +140,60 @@ export function evaluateRails(state: RailState): string[] {
     blocked.push(`MAX_CONSECUTIVE_REVERTS: ${state.consecutiveReverts} >= `
       + `${RAILS.MAX_CONSECUTIVE_REVERTS}`);
   }
+  /*
+   * THE HARD CAPITAL CAP. Checked LAST because it is the backstop, and reported with
+   * both of its terms so the log says WHY it bound rather than only that it did.
+   *
+   * AN UNKNOWN BASIS BLOCKS BEFORE THE ARITHMETIC IS TRUSTED. An open row with a null
+   * `position_usd` contributes nothing to `sum()`, so the cap would under-report real
+   * exposure and pass. Unknown is not zero -- the standing rule on this project, and
+   * the one an error path that emits a plausible value always breaks.
+   */
+  if (state.openPositionsUnknownBasis > 0) {
+    blocked.push(`MAX_DEPLOYED_USD: deployed capital is UNKNOWN -- `
+      + `${state.openPositionsUnknownBasis} open position(s) carry a null position_usd, `
+      + 'which sum() would silently treat as $0');
+  } else {
+    /*
+     * FORWARD-LOOKING, AND IT HAS TO BE. Testing `deployed >= cap` after the fact would
+     * admit the trade that takes it to $110. The prospective size is exactly
+     * MAX_POSITION_USD because `positionWei()` sizes every position at it.
+     */
+    const deployed = deployedUsd(state);
+    const after = deployed + RAILS.MAX_POSITION_USD;
+    if (after > RAILS.MAX_DEPLOYED_USD) {
+      blocked.push(`MAX_DEPLOYED_USD: $${deployed.toFixed(2)} deployed `
+        + `(open basis $${state.openCostBasisUsd.toFixed(2)} + realised losses `
+        + `$${Math.max(0, -state.realisedPnlTodayUsd).toFixed(2)}) + `
+        + `$${RAILS.MAX_POSITION_USD} = $${after.toFixed(2)} > `
+        + `$${RAILS.MAX_DEPLOYED_USD}`);
+    }
+  }
   return blocked;
+}
+
+/**
+ * DOES A BREACHED CAPITAL CAP STOP THE DAY, OR ONLY THIS LAUNCH?
+ *
+ * It depends on which term breached it, and the two behave differently:
+ *
+ *   - OPEN BASIS clears by itself. Positions close, `deployed` falls, and the next
+ *     launch is admissible. That is an ordinary capacity limit and correctly SKIPS.
+ *   - REALISED LOSSES never fall within a day. If the loss term ALONE leaves no room
+ *     for one more position, no amount of waiting helps and every further candidate
+ *     would re-run the same refusal for hours. That HALTS, exactly as
+ *     MAX_DAILY_LOSS_USD does and for the same reason.
+ *   - AN UNKNOWN BASIS halts too: it is a defect in the stored state, not a capacity
+ *     condition, and it cannot resolve on its own.
+ *
+ * Under today's rails neither halting branch is reachable -- MAX_DAILY_LOSS_USD stops
+ * the day at $15, far below the $90 of losses this would need. It is written for the
+ * case the cap exists for: the other rails being raised.
+ */
+export function deployedCapIsTerminal(state: RailState): boolean {
+  if (state.openPositionsUnknownBasis > 0) return true;
+  const losses = Math.max(0, -state.realisedPnlTodayUsd);
+  return losses + RAILS.MAX_POSITION_USD > RAILS.MAX_DEPLOYED_USD;
 }
 
 export async function checkRails(
