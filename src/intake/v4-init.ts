@@ -208,17 +208,29 @@ export async function sweepInitialize(
       const chunk = uniq.slice(i, i + 500);
       const vals: unknown[] = [];
       const tuples = chunk.map((r, j) => {
-        const b = j * 11;
+        const b = j * 12;
         vals.push(chain, r.poolId, r.currency0, r.currency1, r.fee, r.tickSpacing,
-          r.hooks, r.sqrtPriceX96, r.initTick, r.blockNumber, r.logIndex);
+          r.hooks, r.sqrtPriceX96, r.initTick, r.blockNumber, r.logIndex, r.txHash);
         return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},`
-          + `$${b + 8},$${b + 9},$${b + 10},$${b + 11})`;
+          + `$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12})`;
       }).join(',');
+      /*
+       * `tx_hash` WAS DECLARED AND NEVER INSERTED, so the column sat null across all
+       * 678,441 rows and the pool's CREATOR -- the sender of the Initialize
+       * transaction -- was unrecoverable without re-sweeping. It is written now, and
+       * the conflict clause UPDATES it rather than doing nothing, so a re-sweep
+       * backfills rows that already exist. Every other column is left exactly as it
+       * was: re-deriving a stored value would be a second derivation of the same
+       * number, and `hooks` in particular is knowingly short by one byte on rows
+       * written before that decoder was fixed.
+       */
       const res = await client.query(
         `insert into v4_pool_init
            (chain,pool_id,currency0,currency1,fee,tick_spacing,hooks,sqrt_price_x96,
-            init_tick,block_number,log_index)
-         values ${tuples} on conflict (chain, pool_id) do nothing`, vals,
+            init_tick,block_number,log_index,tx_hash)
+         values ${tuples}
+         on conflict (chain, pool_id) do update
+           set tx_hash = coalesce(v4_pool_init.tx_hash, excluded.tx_hash)`, vals,
       );
       stored += res.rowCount ?? 0;
     }

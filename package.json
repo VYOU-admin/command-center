@@ -45,7 +45,8 @@
     "launch-backtest": "node dist/cli/launch-backtest.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
-    "launch-economics": "node dist/cli/launch-economics.js"
+    "launch-economics": "node dist/cli/launch-economics.js",
+    "v4-creators": "node dist/cli/v4-creators.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
