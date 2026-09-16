@@ -55,11 +55,19 @@ STATUS              BUILT, DRY RUN ONLY. It cannot broadcast: no private key is
                     eth_sendRawTransaction and every signing method BY NAME.
 mode                dry-run (the only mode that exists)
 first dry run       2026-09-16, 65 minutes, 24 hypothetical trades recorded
-wallet address      NOT CONFIGURED -- no wallet variable exists on the Railway
-                    service (checked 2026-09-16: DATABASE_URL, ALCHEMY_API_KEY and
-                    Discord webhooks only)
-wallet balance      UNVERIFIED -- the operator states ~$24 of ETH on chain 4663;
-                    this has not been read from the chain by any code here
+wallet address      0x4Cc7aF1CB1D0d12b0DDaD35b39f00ea28e0F0d4A  (supplied by the
+                    operator 2026-09-16; ADDRESS ONLY -- no key, no signing path)
+wallet balance      ZERO, READ FROM THE CHAIN 2026-09-16 through readWalletState.
+                    native 0 wei, WETH 0, USDG 0, nonce 0, code 0x (plain EOA).
+                    chainId confirmed 0x1237 = 4663. A control read of the v4
+                    PoolManager returned 20,097 ETH through the same path, so the
+                    zero is this address and not the reader.
+                    THE ~$24 THE OPERATOR STATED IS NOT ON THIS CHAIN AT THIS
+                    ADDRESS. Nonce 0 means it has never sent a transaction here at
+                    all -- it is unused rather than drained, which points at another
+                    chain, another address, or funds not yet moved.
+arming              REFUSED. $0.00 against MAX_CONCURRENT 5 x $10 = $50 required.
+                    Exit code 3, and the loop never started.
 mode                n/a -- no bot exists
 limits              n/a -- see section 4 for the proposed values
 trades to date      0
@@ -1700,13 +1708,15 @@ each with the evidence.
 - ~~The exit's `minOut` comes from the entry quote~~ — **CLOSED.** Every attempt
   re-quotes from the pool's state at exit time, through the one executor the boot path
   also uses.
-- **STILL OPEN — THE WALLET IS AN ADDRESS NOBODY HAS SUPPLIED.** The mechanism is built
-  and exercised: `BOT_WALLET_ADDRESS` is read, the balance comes from the chain, and the
-  bot refuses to arm below `MAX_CONCURRENT × MAX_POSITION_USD` = $50 (proved: exit code
-  3, loop never started). **What does not exist is the address.** Until one is supplied
-  the operator's balance is unread, and at the stated ~$24 against a $50 requirement
-  **the bot as configured would refuse to arm.** That is an operator decision — supply
-  an address, or change what the rails may risk.
+- **STILL OPEN — THE WALLET IS EMPTY.** The address was supplied on 2026-09-16 and its
+  balance was read through the real arming gate: **0 wei native, 0 WETH, 0 USDG, nonce
+  0, plain EOA**, on chainId 4663 confirmed, with a control read proving the path works.
+  The gate did exactly what it is for — **refused to arm, exit code 3, loop never
+  started**. Nonce 0 means the address has never transacted on this chain, so the ~$24
+  is elsewhere: another chain, another address, or not yet moved. **This is not a code
+  defect and nothing here can fix it.** The bot cannot go live until the address holds
+  at least `MAX_CONCURRENT × MAX_POSITION_USD` = $50, or the rails are changed to risk
+  less.
 
 ### B. Unmeasured, so no figure here is a profit figure
 
