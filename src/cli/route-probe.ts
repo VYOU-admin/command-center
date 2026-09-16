@@ -50,6 +50,14 @@ create table if not exists v4_swap_tx (
   primary key (chain, tx_hash)
 );
 create index if not exists v4_swap_tx_to_idx on v4_swap_tx (chain, tx_to);
+/*
+ * ALTER, NOT JUST CREATE. Section 7's first rule: "a `create table if not exists` is a
+ * no-op on an existing table. It does not reconcile a changed shape, and it reports
+ * success either way." Adding `side` to the CREATE did nothing on the table the buy run
+ * had already made, every insert then referenced a column that did not exist, and 315
+ * transactions were read and discarded before that surfaced.
+ */
+alter table v4_swap_tx add column if not exists side text;
 `;
 
 async function main(): Promise<void> {
@@ -161,8 +169,23 @@ async function main(): Promise<void> {
         stored += 1;
       } catch (err) {
         if (err instanceof Error && err.message.includes('compute-unit ceiling')) throw err;
+        /*
+         * A DATABASE ERROR IS NOT A FAILED READ AND MUST NOT BE COUNTED AS ONE. The
+         * first version caught both here, so a missing column reported as 315 failed
+         * transaction reads -- an error path disguising a defect as data, which is the
+         * shape ROBINHOOD.md section 5 calls the worst on this project. A schema or
+         * query fault stops the run; only an RPC fault is tallied.
+         */
+        const m = err instanceof Error ? err.message : String(err);
+        if (/column|relation|syntax|constraint|violates/i.test(m)) throw err;
         failed += 1;
       }
+    }
+    if (failed > 0 && stored === 0) {
+      throw new Error(
+        `route-probe read ${rows.rowCount} transactions and stored NONE. A run that `
+        + 'spends and keeps nothing is a defect, not a clean pass.',
+      );
     }
     log.info('route probe complete', {
       requested: rows.rowCount, stored, failed, cu_spent: rpc.cuSpent,
