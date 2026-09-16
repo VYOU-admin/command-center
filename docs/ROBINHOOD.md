@@ -7,6 +7,11 @@ findings and failure-mode files: there is no second place to look.
 Solana is a different chain and keeps its own procedure in
 `docs/SOLANA-TOKEN-INTAKE.md`. Nothing here applies to it.
 
+**WRITING to this chain is `docs/LAUNCHBOT.md`.** This document governs reading it.
+That one governs the trading bot, where a defect costs money rather than compute
+units; it references this document for chain facts, topic hashes, sign conventions and
+the container hazards, and does not restate them.
+
 ---
 
 ## The four rules that keep this document true
