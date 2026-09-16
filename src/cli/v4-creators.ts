@@ -64,8 +64,8 @@ async function main(): Promise<void> {
    * at all. See LAUNCHBOT.md section 7.
    */
   const feesArg = str('--fees', '');
-  const feeList = feesArg.split(',').map((x) => Number(x.trim()))
-    .filter((x) => Number.isFinite(x));
+  const feeList = feesArg.split(',').map((x) => x.trim()).filter((x) => x !== '')
+    .map((x) => Number(x)).filter((x) => Number.isFinite(x));
   if (feesArg && feeList.length === 0) {
     throw new Error(`--fees ${feesArg} parsed to no numeric tier; refusing to run with `
       + 'a filter that would match nothing.');
