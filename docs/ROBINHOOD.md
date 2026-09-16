@@ -7070,6 +7070,72 @@ the present.** Both halves come from the same era, so the holdout proves the eff
 sampling noise and proves nothing about whether it still exists. **And it is GROSS of gas
 and slippage**, neither of which is stored anywhere on this chain.
 
+#### FORWARD TEST: THE FEE-TIER FINDING HAS DECAYED BY ROUGHLY HALF — 2026-09-16
+
+**The finding was measured entirely inside `v4_swaps_all`, which stops 25 days before
+the present. This tested it on recent launches and it did not hold at its old size.**
+
+**Collected first.** The Initialize sweep was extended to head — **69 requests, 371,881
+logs, 4,140 CU = $0.00186**, inside its 40–110 estimate. Pool creation is now **55%
+denser**: 0.01728 logs/block against the corpus's 0.011115. A bounded recent window of
+1,000,000 blocks (~28 h) was then swept for `Swap`: **the probe measured 3.65/3.66/2.06
+logs per block against the corpus's 1.203 — 3x denser — which is why the range you are
+about to read is the one to probe.** 986 requests, 3,368,255 swaps, coverage exact,
+0 gaps. **Total for the run: ~50,580 CU = $0.023.**
+
+| | HOLDOUT (corpus era) | RECENT (last 1M blocks) |
+|---|---|---|
+| launches tested | 75,282 | **4,994** |
+| base survival to 5 min | 41.03% | **55.97%** |
+| base median return | **0.00000** | **0.00000** |
+| `fee=10000` n / share | 21,657 · 28.8% | 892 · **17.9%** |
+| `fee=10000` survival | 49.11% | 46.41% |
+| **`fee=10000` median** | **+0.27818** | **+0.06610** |
+| `fee=500` n / share | 1,665 · 2.2% | 474 · **9.5%** |
+| `fee=500` survival | **92.79%** | **39.87%** |
+| `fee=500` median | +0.23544 | +0.12639 |
+| `fee=2500` survival | 29.62% | **83.07% — INVERTED** |
+| `fee=2500` median | 0.00000 | 0.00000 |
+| **RULE** share / survival | 14.66% · 56.57% | 10.83% · 51.57% |
+| **RULE median** | **+0.29824** | **+0.13447** |
+| RULE p25 / % positive | +0.10757 · 83.11% | +0.01781 · 78.56% |
+| control median / % positive | 0.00000 · 24.95% | 0.00000 · 33.37% |
+
+**Executable — first trade strictly after +15 s to first strictly after +45 s, no-fill
+counted as zero:** median **+0.26626 → +0.09574**, net of the LP fee tier **+0.25824 →
++0.08169**, positive 75.58% → 68.39%, no-fill 19.76% → **24.21%**.
+
+**THE DIRECTION SURVIVES AND THE SIZE DOES NOT.** The rule still separates — +0.134
+against a control of exactly 0.00000, 78.6% positive against 33.4% — but it is **less
+than half** what the holdout showed, and on the executable definition net of fees it is
+**a third**. The tier that carried most of the rule's weight, `fee=10000`, lost
+three-quarters of its median.
+
+**THE TIER MIX MOVED, WHICH IS THE DECAY MODE NAMED IN ADVANCE.** `fee=2500` fell from
+34.8% of launches to 10.1% and its survival inverted from 29.6% to 83.1%; `fee=500` rose
+from 2.4% to 9.5% while its survival collapsed from 92.8% to 39.9%; `fee=100` went 1.5%
+to 6.8%; and tiers absent from the corpus era — 810000, 12500, 800269 — now carry 7% of
+launches between them. **The venue changed its defaults and the population changed with
+it**, which is exactly what "you are predicting the venue, not the token" predicted.
+
+**Validated on individual records, executable definition.** Ten recent launches, one per
+decile: deciles 3–10 show real two-sided paths matching their returns. Decile 1 is a
+pump-and-dump inside 21 seconds — 5.6e-13 to 1.1e-10 and back. **Decile 2 has exactly one
+swap in its whole life**, which is the 24.21% no-fill case counted as zero rather than
+dropped.
+
+**NO VARIANT WAS SEARCHED FOR.** The recent window is not a holdout — it has now been
+seen — so hunting for a rule that rescues it here would be the thing the holdout
+discipline existed to prevent. The decayed number is the answer.
+
+**A SWEEP DIED ON A TRANSPORT TIMEOUT AT 63.8% AND LOST NOTHING**, because it commits per
+range: 392 ranges and 2,301,538 rows were already durable and the resume covered only the
+remainder. Step 3's three-category rule says a timeout "says nothing about the data" and
+should be retried; this sweep rethrows it instead, which is a defect worth fixing before
+a longer job depends on it.
+
+**Still gross of gas and slippage**, neither of which is stored.
+
 ## 9. Rules here the code does not implement
 
 - **FIXED 2026-09-15 — the cohort phase now derives, PRINTS and ENFORCES its work set
