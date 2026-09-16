@@ -151,6 +151,17 @@ async function main(): Promise<void> {
      * Each hypothesis reports SURVIVAL TO 5 MINUTES by bucket, over every
      * launch in the half, plus the median return of the best backtest cell.
      * ------------------------------------------------------------------ */
+    /* ntile() cannot appear in GROUP BY, so a decile bucket is precomputed in a
+     * subquery and grouped on the resulting column. */
+    const byPre = (id: string, question: string, inner: string, extra = ''): Promise<void> =>
+      H(id, question, `
+        select bucket, count(*)::int n,
+               round(100.0*count(*) filter (where surv_5m)/count(*),2)::text surv_5m_pct,
+               round(100.0*count(*) filter (where surv_1h)/count(*),2)::text surv_1h_pct,
+               round(100.0*count(*) filter (where exit_avail)/count(*),2)::text exit_avail_pct,
+               round(percentile_cont(0.5) within group (order by r)::numeric,5)::text median_ret
+          from (${inner}) z group by 1 ${extra} order by 2 desc`);
+
     const byBucket = (id: string, question: string, bucket: string, extra = ''): Promise<void> =>
       H(id, question, `
         select ${bucket} as bucket, count(*)::int n,
@@ -191,8 +202,10 @@ async function main(): Promise<void> {
              when mom5 <= -0.05 then 'a down >5%' when mom5 < 0 then 'b down'
              when mom5 = 0 then 'c flat' when mom5 < 0.05 then 'd up <5%'
              when mom5 < 0.25 then 'e up 5-25%' else 'f up >25%' end`);
-    await byBucket('11', 'H11 does the FIRST BUY SIZE predict survival? (within counter, deciles)',
-      `counter || ' d' || ntile(10) over (partition by counter order by first_size)`,
+    await byPre('11', 'H11 does the FIRST BUY SIZE predict survival? (within counter, deciles)',
+      `select counter || ' d' || ntile(10) over (partition by counter order by first_size) bucket,
+              surv_5m, surv_1h, exit_avail, r
+         from feat left join ret using (pool_id) where first_size is not null`,
       'having count(*) >= 200');
     await byBucket('12', 'H12 does TICK SPACING predict survival?', `tick_spacing::text`,
       'having count(*) >= 200');
@@ -214,10 +227,13 @@ async function main(): Promise<void> {
              else 'c 3+ prior' end`);
     await byBucket('16', 'H16 does a VANITY token address (ends 1e18) predict survival?',
       `case when right(token,4)='1e18' then 'ends 1e18' else 'other' end`);
-    await byBucket('17', 'H17 does the INITIAL PRICE (sqrtPriceX96 decile) predict survival?',
-      `'d' || ntile(10) over (order by sqrt_price_x96)`);
-    await byBucket('18', 'H18 does 5s VOLUME predict survival? (within counter, deciles)',
-      `counter || ' v' || ntile(10) over (partition by counter order by vol_5s)`,
+    await byPre('17', 'H17 does the INITIAL PRICE (sqrtPriceX96 decile) predict survival?',
+      `select 'd' || ntile(10) over (order by sqrt_price_x96) bucket,
+              surv_5m, surv_1h, exit_avail, r from feat left join ret using (pool_id)`);
+    await byPre('18', 'H18 does 5s VOLUME predict survival? (within counter, deciles)',
+      `select counter || ' v' || ntile(10) over (partition by counter order by vol_5s) bucket,
+              surv_5m, surv_1h, exit_avail, r
+         from feat left join ret using (pool_id) where vol_5s is not null`,
       'having count(*) >= 200');
     await byBucket('19', 'H19 does the pool being created in a BUSY block predict survival?',
       `case when (select count(*) from v4_pool_init q where q.block_number=feat.init_block) = 1
