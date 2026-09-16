@@ -281,6 +281,28 @@ async function main(): Promise<void> {
         new_median: v.neu.length ? pct(v.neu, 0.5).toFixed(4) : 'n/a',
       })),
     });
+    /*
+     * THE LADDER MUST BE RE-DERIVED FROM THE CORRECTED QUOTE. The rungs in
+     * EXIT_RETRY.BOUND_BPS were the quantiles of the shortfall under the OLD quote, and
+     * a rung calibrated against a quote that has since been corrected is a rung
+     * calibrated against a defect. This reports the same quantiles under the corrected
+     * quote, over exactly the trades whose corrected bound would still NOT clear.
+     */
+    const stillFail = newRatios.filter((x) => x > 1 / (1 - SLIPPAGE_BPS / 10000));
+    log.info('RE-DERIVING THE RETRY LADDER FROM THE CORRECTED SHORTFALL', {
+      corrected_quotes: newRatios.length,
+      would_still_miss_the_300bps_bound: stillFail.length,
+      note: 'needed one-leg slippage = 1 - 1/ratio, over the trades that still miss. '
+        + 'These quantiles are the candidate rungs.',
+      shortfall: stillFail.length === 0 ? 'RETURNED NO ROWS' : {
+        n: stillFail.length,
+        p25_bps: Math.ceil((1 - 1 / pct(stillFail, 0.25)) * 10000),
+        median_bps: Math.ceil((1 - 1 / pct(stillFail, 0.5)) * 10000),
+        p75_bps: Math.ceil((1 - 1 / pct(stillFail, 0.75)) * 10000),
+        p90_bps: Math.ceil((1 - 1 / pct(stillFail, 0.9)) * 10000),
+        max_bps: Math.ceil((1 - 1 / Math.max(...stillFail)) * 10000),
+      },
+    });
     log.info('PER-TRADE DETAIL', { detail });
   } finally { c.release(); }
   await app.pool.end();
