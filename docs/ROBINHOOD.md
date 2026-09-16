@@ -7215,6 +7215,86 @@ fallen**, which is the composition shift again. A uniform hourly distribution wo
 
 **Still gross of nothing now except the risk that these windows are 28 hours each.**
 
+#### THE FEE TIER IS THE LAUNCHPAD, AND THE DECAY WAS EARLY — 2026-09-16
+
+**A FOURTH WINDOW, from the midpoint of the untested gap.** The gap between the corpus
+ceiling and the calm window is 18,004,544 blocks (20.8 days); its midpoint is 51,697,727.
+**52,200,000–53,200,000** was chosen on the ETH/USD series before any return was seen —
+nearest the midpoint among the flattest candidates, and measured after the fact at
+**−0.14% drift, 4.70% peak-to-trough**. Sweep: **1,354 requests against 1,354
+estimated — exact**, 6,797,312 logs, 81,240 CU = **$0.0366**, coverage exact, 0 gaps
+inside the window.
+
+| | HOLDOUT-ERA | MIDPOINT | CALM | SELLOFF |
+|---|---|---|---|---|
+| ETH drift · peak-to-trough | — | −0.14% · 4.70% | +0.14% · 1.38% | **−4.06%** · 5.32% |
+| launches | 150,791 | 8,029 | 6,717 | 5,016 |
+| `fee=10000` n · surv · median | 21,657 · 49.1% · **+0.278** | 707 · 56.2% · **+0.114** | 851 · 21.2% · **0.00000** | 892 · 46.4% · +0.066 |
+| **RULE** share · surv · median | **14.66%** · 56.6% · **+0.298** | **3.14%** · 62.7% · +0.145 | **3.33%** · 44.6% · +0.226 | **10.83%** · 51.6% · +0.134 |
+
+**THE BREAK WAS EARLY, NOT RECENT.** The midpoint window — ten days after the corpus
+ceiling — already shows the rule at +0.145 against +0.298, and its share of launches
+already collapsed from 14.66% to 3.14%. All three post-corpus windows sit at roughly half
+the holdout, and the ordering (+0.145, +0.226, +0.134) is noise around that level rather
+than a trend. **The corpus era is the anomaly.**
+
+#### WHAT THE FEE TIER IS A PROXY FOR: THE LAUNCHPAD, AND THEY ARE THE SAME VARIABLE
+
+`v4_pool_init.tx_hash` was declared and never inserted, so this needed a re-sweep to
+populate it — **156 requests, 9,360 CU = $0.0042** — plus `eth_getTransactionByHash` on
+the rule pools: **2,518 transactions, 37,770 CU = $0.017, 100% resolved, 0 failed.**
+
+**CREATOR IDENTITY (`tx.from`) IS USELESS AND THAT IS A CLEAN NEGATIVE.** It is very
+nearly unique per pool — 219 distinct creators for 224 CALM pools, 529 for 542 SELLOFF,
+1,360 for a 1,500-pool holdout sample. Top-1 concentration is 1.1–4.4%. **Across all four
+windows exactly ONE creator has 15 or more rule pools**, so creator cannot form a bucket,
+let alone separate returns. There is no bot fleet of deployers.
+
+**THE LAUNCHPAD (`tx.to`) IS CONCENTRATED, and it is what the tier fingerprints:**
+
+| | distinct targets | top-1 | top-5 |
+|---|---|---|---|
+| HOLDOUT | 95 | 73.3% | 93.6% |
+| MIDPOINT | 10 | **90.1%** | 98.0% |
+| CALM | 21 | 47.3% | 92.9% |
+| SELLOFF | 16 | 66.4% | 98.0% |
+
+**Within the rule the two are near-perfectly collinear**: `fee=10000` is essentially
+always launchpad `0x58daec3116aa…`, and `fee=500` is essentially always
+`0x8366a39cc670…` — **which is the PoolManager itself, i.e. the pool was created
+directly rather than through any launchpad.** The fee tier is not a proxy for the
+launchpad so much as an alias of it.
+
+**THE DECAY MECHANISM, IDENTIFIED RATHER THAN ASSUMED.** It is not different creators
+adopting the same tier. It is **one launchpad's output getting worse**:
+
+| launchpad | HOLDOUT | MIDPOINT | CALM | SELLOFF |
+|---|---|---|---|---|
+| `0x58daec3116aa…` (a launchpad) | **+0.296** on 1,100 | +0.064 on 227 | +0.120 on 97 | +0.056 on 156 |
+| `0x8366a39cc670…` (direct to PoolManager) | +0.185 on 249 | 0.000 on 11 | **+0.221** on 106 | **+0.177** on 360 |
+
+**The dominant launchpad decayed five-fold and the population shifted away from it** —
+from 73.3% of rule pools in the holdout era to 28.8% in the selloff, replaced by direct
+creation, which held up better in the two most recent windows.
+
+**Hooks concentrate like launchpads** — 3 to 27 distinct values per window, top-1 83.8%
+to 96.9% — which is consistent with a hook being part of a launchpad's template. **The
+stored `hooks` values are still short by one byte on every row written before that
+decoder was fixed**; the grouping is unaffected because the truncation is deterministic,
+but two hooks differing only in their first byte would collide, and correcting the data
+needs a re-sweep that was not bought.
+
+**WITHIN one fee tier the launchpad separates only where there is more than one
+launchpad to compare**, which is the holdout era alone: at `fee=10000` it gives +0.297 /
++0.537 / 0.000 / 0.000 across four targets. In all three recent windows `fee=10000` has a
+single launchpad above n=15, so the within-tier test is unavailable there.
+
+**THIS IS A HYPOTHESIS, NOT A FINDING.** All four windows have now been seen, so "trade
+the launchpad rather than the tier" has to be tested on a window not yet touched before
+it means anything. What can be said without a holdout is narrower and still useful:
+**the tier and the launchpad are the same variable, so switching to the launchpad buys
+robustness to a defaults change, not a better signal.**
+
 ## 9. Rules here the code does not implement
 
 - **FIXED 2026-09-15 — the cohort phase now derives, PRINTS and ENFORCES its work set
