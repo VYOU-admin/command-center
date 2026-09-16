@@ -21,7 +21,7 @@ import { TOPICS as EVENT_TOPICS } from '../adapters/token-updates/decode.js';
 const TOPICS_SWAP = EVENT_TOPICS.swapV4;
 import {
   BACKFILL_OFFSETS_S, BLOCKS_PER_SECOND, DETECT_INTERVAL_MS, ENTRY_DELAY_BLOCKS,
-  EXIT_DELAY_BLOCKS, NATIVE_ETH, POOL_MANAGER, RAILS, SLIPPAGE_BPS,
+  EXIT_DELAY_BLOCKS, EXIT_RETRY, NATIVE_ETH, POOL_MANAGER, RAILS, SLIPPAGE_BPS,
 } from '../bot/config.js';
 import { buildPermit2Approve, buildSwap, buildTokenApprove } from '../bot/calldata.js';
 import { minOut, positionWei, qualifies } from '../bot/rule.js';
@@ -32,7 +32,9 @@ import { checkRails } from '../bot/rails.js';
 import { id } from 'ethers';
 import { quoteRate, swapAmounts, tokenPrice } from '../bot/price.js';
 import { ReadOnlyRpc } from '../bot/rpc.js';
-import { reconcileOnBoot } from '../bot/reconcile.js';
+import { clearNeedsExit, reconcileOnBoot } from '../bot/reconcile.js';
+import { configuredWallet, readWalletState, requiredUsd } from '../bot/wallet.js';
+import { executeExit } from '../bot/exit-exec.js';
 
 /*
  * THE MODE IS ALWAYS A DRY-RUN MODE, AND A RUN LABEL ONLY SUFFIXES IT.
@@ -83,21 +85,87 @@ async function main(): Promise<void> {
    * candidate, and the run is bounded by --minutes rather than by spend. */
   const rpc = new ReadOnlyRpc(new RpcClient(RPC_URL.replace('{key}', key), 60000, 5_000_000));
 
+  /*
+   * TEST CONTROL, DRY RUN ONLY. Inflates the exit re-quote so the first rungs of the
+   * ladder are guaranteed to miss and it must climb. A retry path nobody has exercised
+   * is not a retry path, and waiting for a natural revert to appear inside one run is
+   * not a test. It cannot affect a live path because there is no live path.
+   */
+  const fi = args.indexOf('--force-exit-optimism');
+  const forceOptimism = fi >= 0 ? Number(args[fi + 1] ?? 1) : 1;
+  if (!Number.isFinite(forceOptimism) || forceOptimism < 1) {
+    throw new Error(`--force-exit-optimism must be a finite number >= 1, got `
+      + `"${String(args[fi + 1])}"`);
+  }
+
+  /*
+   * THE BOOT SEQUENCE, IN THE ORDER LAUNCHBOT.md SECTION 2 REQUIRES:
+   *   1. read the wallet and decide whether we may arm AT ALL
+   *   2. reconcile every non-terminal row against the chain
+   *   3. EXIT every stuck position, before arming
+   * Any of the three failing stops the process rather than arming beside a problem.
+   */
+  let walletState = null as Awaited<ReturnType<typeof readWalletState>> | null;
   {
     const c = await pool.connect();
     try {
       await c.query(BOT_SCHEMA);
-      /* THE WALLET IS NOT CONFIGURED and this build never needs it. Reconciliation is
-       * still run so the path is exercised rather than written and never executed. */
-      const wallet = process.env['BOT_WALLET_ADDRESS'] ?? null;
+
+      /* ---- 1. THE WALLET GATE --------------------------------------------- */
+      const wallet = configuredWallet();
+      if (wallet === null) {
+        log.warn('NO WALLET CONFIGURED', {
+          required_usd: requiredUsd(),
+          note: 'BOT_WALLET_ADDRESS is unset. A dry run may proceed without one because '
+            + 'it holds nothing and broadcasts nothing; a live mode must not, and none '
+            + 'exists. The balance is UNREAD rather than assumed.',
+        });
+      } else {
+        walletState = await readWalletState(rpc, c, wallet);
+        log.info('WALLET BALANCE, READ FROM THE CHAIN', {
+          address: walletState.address,
+          balance_wei: walletState.balanceWei.toString(),
+          balance_eth: walletState.balanceEth,
+          eth_usd: walletState.ethUsd,
+          balance_usd: Number(walletState.balanceUsd.toFixed(2)),
+          required_usd: walletState.requiredUsd,
+          can_arm: walletState.canArm,
+          reason: walletState.reason,
+        });
+        if (!walletState.canArm) {
+          /*
+           * REFUSE TO ARM. Not a warning that the loop then ignores: arming with less
+           * than MAX_CONCURRENT x MAX_POSITION_USD means a rail meant to bound exposure
+           * would instead be bounded by running out of money, and that surfaces as a
+           * reverting broadcast rather than as a refusal.
+           */
+          log.error('REFUSING TO ARM — BALANCE BELOW WHAT THE RAILS CAN PUT AT RISK', {
+            balance_usd: Number(walletState.balanceUsd.toFixed(2)),
+            required_usd: walletState.requiredUsd, reason: walletState.reason,
+          });
+          c.release(); await pool.end();
+          process.exit(3);
+        }
+      }
+
+      /* ---- 2. RECONCILE ---------------------------------------------------- */
       const rec = await reconcileOnBoot(c, rpc, CHAIN, wallet, MODE);
       log.info('boot reconciliation', { ...rec, wallet_configured: wallet !== null });
+
+      /* ---- 3. EXIT EVERY STUCK POSITION, BEFORE ARMING --------------------- */
+      const cleared = await clearNeedsExit(c, rpc, CHAIN, MODE, { forceOptimism });
+      log.info('boot needs_exit sweep', { ...cleared });
     } finally { c.release(); }
   }
 
   log.info('launchbot starting', {
     mode: MODE, minutes,
     rails: RAILS, slippage_bps: SLIPPAGE_BPS,
+    wallet: walletState === null ? 'NOT CONFIGURED' : walletState.address,
+    wallet_balance_usd: walletState === null ? null
+      : Number(walletState.balanceUsd.toFixed(2)),
+    force_exit_optimism: forceOptimism,
+    exit_delay_blocks: EXIT_DELAY_BLOCKS,
     broadcast: 'IMPOSSIBLE -- no key is read and sendRawTransaction is refused by name',
   });
 
@@ -124,7 +192,10 @@ async function main(): Promise<void> {
     exitClean: 0, exitReverted: 0, exitNotAttempted: 0,
     quoteRefused: 0, quoteReadFailed: 0,
     quoteBasis: {} as Record<string, number>,
+    exitsDue: 0, ladderFired: 0, ladderExhausted: 0,
+    ladderRungs: {} as Record<string, number>,
   };
+  const exitFails: string[] = [];
   const refusals: string[] = [];
   const reverts: string[] = [];
   let consecutiveReverts = 0;
@@ -139,6 +210,105 @@ async function main(): Promise<void> {
       if (k.halted) { log.warn('HALTED', { reason: k.reason }); break; }
 
       const head = Number(await rpc.call('eth_blockNumber', []).then((h) => BigInt(String(h))));
+
+      /*
+       * ---- THE EXIT SWEEP, BEFORE ANYTHING ELSE THIS TICK ----------------------
+       *
+       * Positions whose horizon has arrived are closed FIRST, ahead of looking for new
+       * launches. An open position is money at risk; a launch we have not seen yet is
+       * not. Doing this after detection would let a busy tick delay every exit behind
+       * work that can wait.
+       *
+       * Every exit re-quotes from the pool's state NOW and climbs the measured ladder.
+       */
+      const due = await c.query<{
+        id: string; pool_id: string; token: string; counter: string; fee: number;
+        tick_spacing: number; hooks: string; first_swap_block: string;
+        exit_sim_from: string | null; quoted_out: string | null;
+      }>(
+        `select id::text, pool_id, token, counter, fee, tick_spacing, hooks,
+                first_swap_block::text, exit_sim_from, quoted_out::text
+           from bot_trades
+          where chain = $1 and mode = $2 and status = 'holding'
+            and exit_due_block is not null and exit_due_block <= $3
+          order by exit_due_block limit 5`, [CHAIN, MODE, head]);
+
+      for (const d of due.rows) {
+        stats.exitsDue += 1;
+        if (!d.exit_sim_from) {
+          /* No borrowed holder means the sell cannot be simulated at all in dry run.
+           * Counted as its own outcome, never folded into "reverted". */
+          stats.exitNotAttempted += 1;
+          await c.query(
+            `update bot_trades set status='closed_unsimulatable',
+                    exit_sim_status='no_holder_found', updated_at=now() where id=$1`,
+            [d.id]);
+          continue;
+        }
+        /* The amount is what the borrowed holder actually holds, read from the chain. */
+        let sellAmt: bigint;
+        try {
+          const balData = BALANCE_OF_SEL + '0'.repeat(24) + d.exit_sim_from.slice(2);
+          const bal = BigInt(String(await rpc.call('eth_call',
+            [{ to: d.token, data: balData }, 'latest'])));
+          const wanted = BigInt(d.quoted_out ?? '0');
+          sellAmt = bal === 0n ? 0n : (wanted > 0n && wanted < bal ? wanted : bal);
+        } catch (e) {
+          stats.exitNotAttempted += 1;
+          await c.query(
+            `update bot_trades set status='closed_unsimulatable',
+                    exit_sim_status='probe_failed', exit_sim_note=$2, updated_at=now()
+              where id=$1`, [d.id, (e as Error).message.slice(0, 160)]);
+          continue;
+        }
+        if (sellAmt === 0n) {
+          stats.exitNotAttempted += 1;
+          await c.query(
+            `update bot_trades set status='closed_unsimulatable',
+                    exit_sim_status='holder_zero_balance', updated_at=now() where id=$1`,
+            [d.id]);
+          continue;
+        }
+
+        try {
+          const outcome = await executeExit(
+            { rpc, client: c, forceOptimism, wait: async (): Promise<void> => {} },
+            {
+              tradeId: d.id, poolId: d.pool_id, token: d.token, counter: d.counter,
+              fee: d.fee, tickSpacing: d.tick_spacing, hooks: d.hooks,
+              amountIn: sellAmt, firstSwapBlock: Number(d.first_swap_block),
+              sellFrom: d.exit_sim_from,
+            },
+          );
+          stats.exitClean += 1;
+          if (outcome.attempts.length > 1) stats.ladderFired += 1;
+          if (outcome.filledOn !== null) {
+            stats.ladderRungs[String(outcome.filledOn)] =
+              (stats.ladderRungs[String(outcome.filledOn)] ?? 0) + 1;
+          }
+          await c.query(
+            `update bot_trades set status='closed', exit_sim_status='clean',
+                    exit_attempts=$2, exit_filled_on=$3, exit_bound_bps=$4,
+                    exit_block=$5, updated_at=now() where id=$1`,
+            [d.id, outcome.attempts.length, outcome.filledOn,
+              outcome.filledOn ? EXIT_RETRY.BOUND_BPS[outcome.filledOn - 1] : null, head]);
+        } catch (e) {
+          /*
+           * THE LADDER EXHAUSTED IN THE LOOP. In dry run the position is hypothetical,
+           * so this is recorded and the loop continues rather than halting — but it is
+           * recorded as EXHAUSTED, which is a different thing from a single revert, and
+           * it is counted separately.
+           */
+          stats.exitReverted += 1; stats.ladderFired += 1; stats.ladderExhausted += 1;
+          if (exitFails.length < 8) exitFails.push((e as Error).message.slice(0, 140));
+          await c.query(
+            `update bot_trades set status='exit_exhausted', exit_sim_status='reverted',
+                    exit_sim_note=$2, exit_attempts=$3, exit_block=$4, updated_at=now()
+              where id=$1`,
+            [d.id, (e as Error).message.slice(0, 200), EXIT_RETRY.MAX_ATTEMPTS, head]);
+        }
+      }
+
       if (head <= cursor) { await sleep(DETECT_INTERVAL_MS); continue; }
       const cursorSpan = head - cursor;
 
@@ -330,75 +500,29 @@ async function main(): Promise<void> {
           }
 
           /*
-           * THE EXIT LEG, SIMULATED -- AND THE HONEST LIMIT OF IT STATED IN THE ROW.
+           * THE EXIT IS NO LONGER SIMULATED AT ENTRY TIME. The position is OPENED here
+           * and closed later, when its horizon actually arrives, by the same
+           * `executeExit` the boot path uses.
            *
-           * At entry time the tokens are not held, so `eth_call` of the sell from our
-           * own address reverts for a reason that says nothing about the pool: we have
-           * no balance. Simulating it that way would produce a 100% revert rate that
-           * looks like a broken exit and is really an empty wallet.
+           * WHY THIS CHANGED. The old block simulated the sell immediately, with a bound
+           * derived from the ENTRY quote. On a pool whose median move over the horizon
+           * is +37%, that bound is computed for a price that will not exist by the time
+           * we sell — so it reverts for a reason that has nothing to do with the pool.
+           * Selling at +90 s against a +0 s bound is not a measurement of the exit.
            *
-           * So the sell is simulated FROM AN ADDRESS THAT ACTUALLY HOLDS THE TOKEN --
-           * the sender of the pool's own first swap, whose balance is read before use.
-           * That proves the pool accepts a sell of this size, that the calldata is
-           * well-formed, and that no hook blocks selling. It does NOT prove our wallet's
-           * approval state, which is a separate leg measured separately.
-           *
-           * EVERY OUTCOME IS ITS OWN VALUE, and "could not be attempted" is never
-           * folded in with "reverted". A partial check reported as a full one is the
-           * failure mode this whole document exists to prevent.
+           * THE HOLDER IS STILL BORROWED, and that confound is unchanged: in dry run we
+           * hold nothing, so the sell is simulated as the pool's first-swap sender. What
+           * is new is WHEN it happens and WHAT bound it carries.
            */
-          let exitStatus = 'not_attempted'; let exitNote = ''; let exitFrom: string | null = null;
+          let exitFrom: string | null = null;
           try {
             const txr = (await rpc.call('eth_getTransactionByHash', [sw.transactionHash])) as
               { from?: string } | null;
-            const holder = txr?.from ? txr.from.toLowerCase() : null;
-            if (!holder) { exitStatus = 'no_holder_found'; exitNote = 'first-swap tx unreadable'; }
-            else {
-              exitFrom = holder;
-              const balData = BALANCE_OF_SEL + '0'.repeat(24) + holder.slice(2);
-              const balRaw = await rpc.call('eth_call', [{ to: p.token, data: balData }, 'latest']);
-              const bal = BigInt(String(balRaw));
-              if (bal === 0n) {
-                exitStatus = 'holder_zero_balance';
-                exitNote = 'first-swap sender holds none of the token now';
-              } else {
-                const sellAmt = bal < quoted ? bal : quoted;
-                const sellPlan = buildSwap({ ...plan, zeroForOne: !p.zeroIsPricing,
-                  amountIn: sellAmt, amountOutMinimum: 1n });
-                try {
-                  const rr = await rpc.call('eth_call', [{
-                    from: holder, to: sellPlan.to, value: '0x0', data: sellPlan.data,
-                  }, 'latest']);
-                  exitStatus = 'clean'; exitNote = `returned ${String(rr).slice(0, 18)}`;
-                  stats.exitClean += 1;
-                } catch (e2) {
-                  exitStatus = 'reverted'; exitNote = (e2 as Error).message.slice(0, 200);
-                  stats.exitReverted += 1;
-                }
-              }
-            }
-          } catch (e3) {
-            exitStatus = 'probe_failed'; exitNote = (e3 as Error).message.slice(0, 200);
-          }
-          if (exitStatus !== 'clean' && exitStatus !== 'reverted') stats.exitNotAttempted += 1;
+            exitFrom = txr?.from ? txr.from.toLowerCase() : null;
+          } catch { exitFrom = null; }
 
-          await c.query(
-            `insert into bot_trades (chain,mode,pool_id,token,counter,launchpad,fee,
-               tick_spacing,hooks,status,init_block,first_swap_block,age_blocks_at_entry,
-               age_seconds_at_entry,position_wei,position_usd,quoted_out,min_out,
-               entry_price,entry_calldata,exit_calldata,fill_status,note,
-               exit_sim_status,exit_sim_note,exit_sim_from,px_entry)
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
-                     $24,$25,$26,$27)
-             on conflict (chain,mode,pool_id) do nothing`,
-            [CHAIN, MODE, pid, p.token, p.counter, p.launchpad, p.init.fee,
-              p.init.tickSpacing, p.init.hooks, simOk ? 'simulated' : 'sim_reverted',
-              p.init.blockNumber, firstSwapBlock,
-              firstSwapBlock - p.init.blockNumber,
-              (firstSwapBlock - p.init.blockNumber) / BLOCKS_PER_SECOND,
-              size.toString(), RAILS.MAX_POSITION_USD, quoted.toString(), bound.toString(),
-              rate, buy.data, sell.data, 'dry-run', simNote,
-              exitStatus, exitNote, exitFrom, px]);
+          const exitDue = firstSwapBlock + ENTRY_DELAY_BLOCKS + EXIT_DELAY_BLOCKS;
+
           void quoteBasis; void impactPct; void feePct;
 
           log.info('WOULD TRADE', {
@@ -428,6 +552,7 @@ async function main(): Promise<void> {
     revert_samples: reverts,
     rail_blocks: railBlocks,
     quote_refusals: refusals,
+    exit_failures: exitFails,
     backfill_offsets_s: BACKFILL_OFFSETS_S,
     blocks_per_second: BLOCKS_PER_SECOND,
     entry_delay_blocks: ENTRY_DELAY_BLOCKS, exit_delay_blocks: EXIT_DELAY_BLOCKS,

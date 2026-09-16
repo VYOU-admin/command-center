@@ -69,6 +69,29 @@ alter table bot_trades add column if not exists exit_sim_status text;
 alter table bot_trades add column if not exists exit_sim_note   text;
 alter table bot_trades add column if not exists exit_sim_from   text;
 alter table bot_trades add column if not exists px_entry        numeric;
+alter table bot_trades add column if not exists exit_attempts     integer;
+alter table bot_trades add column if not exists exit_filled_on    integer;
+alter table bot_trades add column if not exists exit_bound_bps    integer;
+alter table bot_trades add column if not exists exit_requote_out  numeric;
+alter table bot_trades add column if not exists exit_due_block    bigint;
+
+-- EVERY EXIT ATTEMPT, RECORDED BEFORE THE NEXT ONE BEGINS.
+-- bot/exit.ts persists each rung as it is tried, so a container replaced mid-ladder
+-- inherits the trail rather than nothing. ROBINHOOD.md records containers being
+-- replaced mid-job twice.
+create table if not exists bot_exit_attempts (
+  chain        text    not null,
+  trade_id     bigint  not null,
+  attempt      integer not null,
+  bound_bps    integer not null,
+  expected_out numeric,
+  min_out      numeric,
+  ok           boolean not null,
+  detail       text,
+  sell_from    text,
+  recorded_at  timestamptz not null default now(),
+  primary key (chain, trade_id, attempt)
+);
 `;
 
 /** Statuses a boot reconciliation must resolve. Anything else is terminal. */
