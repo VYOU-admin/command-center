@@ -99,6 +99,59 @@ export const RAILS = {
  */
 export const SLIPPAGE_BPS = 300;
 
+/**
+ * EXIT RETRY. An exit that reverts leaves the bot holding a token with no way out,
+ * which is the worst outcome available to it — worse than a bad fill, because a
+ * position that cannot be sold is not a loss of some size, it is an unbounded one.
+ *
+ * EVERY NUMBER HERE IS DERIVED FROM THE 11 DECODED ENTRY REVERTS OF 2026-09-16, not
+ * picked. `revert-decode` established that 11 of 12 dry-run reverts were
+ * `V4TooLittleReceived(uint256,uint256)` — the v4 router reporting that OUR OWN
+ * `amountOutMinimum` rejected the trade — and the error's two words state what bound
+ * would have cleared. The measured distribution of (our bound / what the pool would
+ * actually have paid):
+ *
+ *     min 1.0151   p25 1.0406   median 1.2248   p75 2.5432   p90 13.70   max 31.71
+ *
+ * which is an implied one-leg slippage of 1.49% / 3.90% / 18.35% / 60.7% / 92.7% / 96.85%.
+ *
+ * THE LADDER IS THOSE QUANTILES, IN ORDER. Each attempt clears the cases up to its own
+ * quantile and no more, so the schedule is the data rather than a doubling:
+ *
+ *     attempt 1   300 bps   the configured bound (p90 round-trip slippage + drift)
+ *     attempt 2   400 bps   the measured p25 shortfall, 3.90%, rounded up
+ *     attempt 3 1,835 bps   the measured MEDIAN shortfall — half of all observed
+ *                           rejections clear here
+ *     attempt 4 6,070 bps   the measured p75 shortfall — the last rung worth climbing
+ *
+ * **IT STOPS AT THE p75 DELIBERATELY.** The p90 is 92.7%, which is indistinguishable
+ * from giving the tokens away, and the measured median gross return at the horizons
+ * this bot trades is +16% (recent era) to +56% (corpus era) — so a bound past the p75
+ * guarantees a loss larger than the position's whole expected gain. A rung that can
+ * only ever turn a small loss into a total one is not a rescue.
+ *
+ * **n IS 11.** That is a thin base for a four-rung ladder and it is stated rather than
+ * buried; these values are a first schedule to be re-derived from logged live exits,
+ * exactly as SLIPPAGE_BPS is.
+ *
+ * THE INTERVAL IS 5 SECONDS, from the measured median exit fill delay of 1.1–4.5 s
+ * across all ten horizons in the 2026-09-16 grid: long enough that a new trade has
+ * landed and the quote has genuinely moved, so a retry is a fresh attempt rather than
+ * the same one repeated. Four attempts therefore complete within ~15 s.
+ */
+export const EXIT_RETRY = {
+  MAX_ATTEMPTS: 4,
+  INTERVAL_MS: 5000,
+  /** One bound per attempt. Length MUST equal MAX_ATTEMPTS; asserted at load. */
+  BOUND_BPS: [300, 400, 1835, 6070],
+} as const;
+
+if (EXIT_RETRY.BOUND_BPS.length !== EXIT_RETRY.MAX_ATTEMPTS) {
+  /* A ladder shorter than the attempt count would silently reuse its last rung. */
+  throw new Error(`EXIT_RETRY.BOUND_BPS has ${EXIT_RETRY.BOUND_BPS.length} rungs for `
+    + `${EXIT_RETRY.MAX_ATTEMPTS} attempts`);
+}
+
 /** Entry at +15 s, exit at +45 s, at the measured 0.1 s block time. */
 export const BLOCKS_PER_SECOND = 10;
 export const ENTRY_DELAY_BLOCKS = 15 * BLOCKS_PER_SECOND;
