@@ -46,7 +46,8 @@
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
     "launch-economics": "node dist/cli/launch-economics.js",
-    "v4-creators": "node dist/cli/v4-creators.js"
+    "v4-creators": "node dist/cli/v4-creators.js",
+    "route-probe": "node dist/cli/route-probe.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
