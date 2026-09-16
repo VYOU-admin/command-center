@@ -7004,6 +7004,72 @@ LEVEL or a USD figure, and neither is computed. Priced, reported, not spent.
 reserves are stored nowhere, so slippage and fees are not computed and a positive gross
 figure is not a strategy.
 
+#### WHAT PREDICTS A LAUNCH — searched against a pre-committed holdout, 2026-09-16
+
+**Entry timing is dead and this asked a different question: is anything observable at or
+before buy time predictive.** 150,930 launches split 50/50 on the first hex character of
+`md5(pool_id)` — `0`-`7` search, `8`-`f` holdout — fixed before any hypothesis was
+formed, with the same code running both halves. **26 tests were run. Most found
+nothing.**
+
+**THE POOL'S FEE TIER, KNOWN AT CREATION BEFORE ANY SWAP, IS THE SIGNAL.**
+
+| | SEARCH | HOLDOUT |
+|---|---|---|
+| base survival to 5 min | 41.03% | — |
+| base median return, all launches | **0.00000** | **0.00000** |
+| `fee=10000` (1%), `tickSpacing=200` | n 21,664 · surv 49.05% · **med +0.27618** | n 21,657 · surv 49.11% · **med +0.27818** |
+| `fee=500`, `tickSpacing=1` | n 1,717 · surv **91.26%** · med +0.22914 | n 1,665 · surv **92.79%** · med +0.23544 |
+| `fee=2500`, `tickSpacing=25` | n 22,684 · surv 29.95% · med 0.00000 | n 22,643 · surv 29.62% · med 0.00000 |
+| **RULE: fee ∈ {500,10000} and gap 11–600 blocks** | **14.84% of half · surv 56.20% · med +0.29244 · 82.43% positive** | **14.66% · surv 56.57% · med +0.29824 · 83.11% positive** |
+| everything else | med 0.00000 · 24.80% positive | med 0.00000 · 24.95% positive |
+
+**The holdout reproduced every figure to within half a percent**, on ~11,000 pools a
+side. **Momentum over the first 5 s stratifies INSIDE the fee tier and is a second,
+independent signal** — inside `fee=10000`, median return runs 0.063 → 0.278 → 0.328 →
+0.554 across flat/down, up<5%, up 5–25%, up >25%, and the holdout gives 0.063 → 0.278 →
+0.328 → 0.554 again.
+
+**IT IS A MARKET, NOT A BONDING CURVE, and that was tested rather than assumed.**
+64.82% of 334,486 early ticks are up and 35.18% are down; only **6.92%** of rule pools
+never tick down. A monotone curve would not be capturable at any size.
+
+**EXECUTION-REALISTIC, not mark-to-mark**: buying at the first trade STRICTLY AFTER +15 s
+and selling at the first trade STRICTLY AFTER +45 s gives a median of **+0.33685** over
+the 9,064 pools where both exist, and **+0.26626 over every rule pool with no-fill
+counted as zero** (19.76% never filled). **Net of the LP fee tier alone** — 2% round trip
+at 1% — the median is **+0.25824**.
+
+**WHAT FAILED, because twenty tested and one survivor is a different result from one and
+one.** Flat or negligible: the first sender being a known router (42.2% vs 38.7%), the
+sender routing many launches (41.2% vs 41.0% — flat), a vanity `1e18` token address, a
+busy creation block, the counter asset (median 0.00000 for all three), the token already
+having pools, the first swap landing in the creation block (36.4% vs 42.4% — *inverted*
+and still median 0), hook identity once corrected, and first-buy-size and 5 s-volume
+deciles, which are non-monotone and unreliable. **Distinct senders ≥5 raised survival to
+68.7% and produced a NEGATIVE median return of −0.005** — survival and return are not the
+same question. **The initial-price decile looked strong (d3 median +0.334) and was not
+disentangled from the fee tier; it is probably the same signal.**
+
+**TWO OF MY OWN MEASUREMENTS WERE BROKEN AND ARE REPORTED AS BROKEN.** `surv_1h` read
+0.02–0.03% everywhere because the swap window was capped at 36,000 blocks, so it measured
+a boundary rather than survival — the filter-matched-nothing shape. And H1's hook test
+compared a 40-character stored value against a 42-character zero address and matched
+nothing, reporting every launch as hooked; corrected, it is 51.6% vs 39.4% survival and
+median 0.00000 either way.
+
+**VALIDATED ON INDIVIDUAL RECORDS.** Ten rule-bucket launches, one per decile: deciles
+3–10 show smooth two-sided paths matching their computed returns. Decile 1 is the
+cautionary one — nine swaps at `off 0` with ascending `log_index`, a price ladder inside
+a single block, then a collapse. **A mark-to-mark entry can sit at the top of an
+intra-block ladder no real buyer could have transacted at**, which is why the
+execution-realistic figures above use the first trade strictly after the entry instant.
+
+**THE LIMIT THAT MATTERS MOST: the corpus ends at block 42,695,454, about 25 days before
+the present.** Both halves come from the same era, so the holdout proves the effect is not
+sampling noise and proves nothing about whether it still exists. **And it is GROSS of gas
+and slippage**, neither of which is stored anywhere on this chain.
+
 ## 9. Rules here the code does not implement
 
 - **FIXED 2026-09-15 — the cohort phase now derives, PRINTS and ENFORCES its work set
