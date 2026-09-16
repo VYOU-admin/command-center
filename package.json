@@ -48,7 +48,8 @@
     "launch-economics": "node dist/cli/launch-economics.js",
     "v4-creators": "node dist/cli/v4-creators.js",
     "route-probe": "node dist/cli/route-probe.js",
-    "approval-probe": "node dist/cli/approval-probe.js"
+    "approval-probe": "node dist/cli/approval-probe.js",
+    "launchbot": "node dist/cli/launchbot.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
