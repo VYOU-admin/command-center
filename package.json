@@ -58,7 +58,8 @@
     "revert-decode": "node dist/cli/revert-decode.js",
     "exit-retry-drill": "node dist/cli/exit-retry-drill.js",
     "nightly-check": "node dist/cli/nightly-check.js",
-    "quote-check": "node dist/cli/quote-check.js"
+    "quote-check": "node dist/cli/quote-check.js",
+    "seed-stuck": "node dist/cli/seed-stuck.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
