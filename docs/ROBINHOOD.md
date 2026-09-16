@@ -4147,6 +4147,10 @@ investigation. A crash would have been strictly better.
 | age check, per novel token | 26 CU, once, ever | one `eth_getCode`; the answer is cached permanently in both directions |
 | age bisect, per launch | 436 CU (+26 for the upper-end check) | `ceil(log2(35,622)) = 16` reads plus one block timestamp |
 | `supply_ttl_days` | 7 | **operator preference** — supply moves on mints and burns, not on trades |
+| Initialize logs, corpus range | 306,560 over 27,580,188 blocks | **measured 2026-09-16** — 0.0111/block; the 166,822 swapping-pool FLOOR understated it 1.84x |
+| pools initialised and never traded | 45% | **measured** — 306,560 initialised against 159,141 that also swapped |
+| Initialize → first swap | median 8 blocks = 0.8 s | **measured on 150,930 launches**; 22.5% in the creation block itself |
+| degenerate launch pools | 0.092% | **measured** — 111 of 120,060 span >10^6 in price; they destroy a mean and move a median by 0.0001 |
 | `supply_reads_per_run` | 200 | **bound, not an estimate** — a typical run needs ~14; the cap lets a backlog drain over a few cycles |
 
 ---
@@ -6875,6 +6879,130 @@ rows_built 15   trade_rows 13   transfer_rows 2   null_usd_rows 0
 point of `bridge_assets` being in the monitor as well as the intake.
 
 ---
+
+---
+
+### LAUNCH DYNAMICS — the v4 Initialize corpus, 2026-09-16
+
+**A MEASUREMENT PASS, and the collection it needed.** The question was what happens to
+a token's price in its first minutes and whether a non-colocated participant can act.
+
+**`v4_swaps_all` COULD NOT ANSWER IT AND THE REASON IS WORTH KEEPING.** It stores
+`amount0` and `amount1` and nothing that names them, so the token side is unknown and
+getting it backwards inverts every return. A proxy — "the predominantly positive side
+is the token", from the v4 swapper convention — **failed validation against `pool_meta`
+at 227 agree / 264 disagree / 63 ties: 46% on the resolved subset, 54% with the
+polarity flipped. Both are chance.** Decoding settled why: sign predominance measures
+NET TRADE DIRECTION over the sampled window, not currency identity, and on a mature
+pool that is ~50/50. **A proxy that is validatable and fails is worth more than one
+that is never tested**, and this one is recorded so it is not revived.
+
+**`v4_pool_init` NOW HOLDS EVERY v4 POOL'S CURRENCIES AND CREATION BLOCK.** One sparse
+`eth_getLogs` sweep of the Initialize topic across the corpus range:
+
+```
+range        15,115,267..42,695,454   27,580,188 blocks
+estimate     28..80 requests, 1,680..4,800 CU     from a FLOOR of 166,822 logs
+spent        144 requests, 8,640 CU = $0.00389    306,560 Initialize logs stored
+coverage     27,580,188 covered, 141 ranges, 0 gaps -- exact
+wall clock   111.9 s
+```
+
+**THE ESTIMATE WAS 80% LOW AND THE REASON IS IN THE WORD "FLOOR".** It was sized from
+the distinct pools that SWAPPED in range — 166,822 — because every pool that swapped
+must have been initialised. The true log count is **306,560**, so **45% of pools
+initialised in this range never traded at all.** The floor was correctly labelled a
+floor; a lower bound used as an estimate is still a lower bound.
+
+**THE DECODE AGREES WITH `pool_meta` ON 699 OF 699 POOLS, on both the counter and the
+token side, with ZERO disagreements** — the validation the sign proxy never had.
+
+#### THE LAUNCH SET, and what the Initialize filter actually removed
+
+```
+initialised inside the range                306,560
+  ...that also swapped inside it            159,141
+swapped inside the range                    166,822
+  ...with NO Initialize inside it             7,681  <- creation predates coverage
+both sides a pricing asset (the ETH/USD market, not a launch)   95   EXCLUDED
+neither side a pricing asset (cannot be valued)              8,116   EXCLUDED
+                                            -------
+LAUNCH SET                                  150,930   counters: ETH 125,191,
+                                                      USDG 17,251, WETH 8,488
+```
+
+**The 7,681 are the pools the previous pass could only approximate with a block
+margin.** Its 1-hour floor margin discarded 668; the real filter discards 7,681.
+
+#### IS THERE ROOM: THE MEDIAN LAUNCH IS BOUGHT 0.8 SECONDS AFTER IT IS CREATED
+
+**Initialize → first swap**, the figure that decides the question:
+
+| p10 | p25 | **median** | p75 | p90 | p99 |
+|---|---|---|---|---|---|
+| 0 blocks | 1 block | **8 blocks = 0.8 s** | 102 = 10.2 s | 9,731 = 16 min | 3,333,183 |
+
+```
+first swap in the SAME BLOCK as creation   33,926   22.5%
+within 1 second                            88,396   58.6%
+within 5 seconds                          101,026   66.9%
+within 15 seconds                         116,855   77.4%
+```
+
+Initialize → **fifth** swap: median **120 blocks = 12.0 s**, p90 1,153 blocks.
+
+**Nearly a quarter of launches are bought in the block they are created in, and the
+median is bought before a second has passed.** At 0.1 s blocks there is no room in
+front of that for a participant who is not already in the block.
+
+#### THE GRID: EVERY CELL'S MEDIAN OVER ALL LAUNCHES IS EXACTLY ZERO
+
+Entry at +5/+15/+30/+60 s after the first swap, exit at +15/+30/+60/+120/+300 s after
+entry. Price is `|counter| / |token|` in RAW units — **decimals cancel in a ratio of
+prices, so none is read or assumed**, and absolute values make it independent of the
+sign convention (step 10's point for the ETH/USD market).
+
+**All 20 cells report an all-launch median of `0.00000`.** Not negative — exactly zero,
+and structurally so: in every cell the block of launches that never traded again
+straddles the 50th percentile. In the best cell by positive share, 29.0% never traded
+again and 40.1% were positive, so 30.9% were negative and the median lands inside the
+zeros.
+
+**Over launches that actually had a trade to exit into**, the medians are positive and
+the best cell is **entry +15 s, exit +30 s: median +18.2%, 73.1% positive** — but
+**81,659 of 150,661 launches (54.2%) had no trade to exit into at all.** That gap is
+the survivorship cost, and it is the whole result.
+
+**THE MEANS ARE NOT USABLE IN ANY CELL AND THAT IS BAD DATA, NOT A FAT TAIL.** Cell
+means run to **1.06e24** against p99 values between 0.77 and 4.23. The cause is step
+10's degenerate swap appearing at launch scale: **111 of 120,060 pools with two or more
+early swaps span more than 10^6 in price — 0.092%.** Pool `0x9518c977…` alternates an
+`amount1` of ~1e27 raw against raw values of 36,094 and 10,100. **Trimming them moves
+the median by 0.00011 and leaves the conclusion untouched**, which is the property a
+median has and a mean does not.
+
+**VALIDATED ON INDIVIDUAL RECORDS, per the standing rule.** Ten launches, one per
+decile of the best cell's exited distribution: **nine show smooth, plausible price
+paths matching their computed returns**; the tenth is one of the 111 degenerate pools.
+The aggregate is supported.
+
+**I HIT SECTION 7'S `ORDER BY` TRAP IN MY OWN DISPLAY QUERY.** `select off::text …
+order by off` names the output column `off`, so the sort bound to the TEXT column and
+returned blocks as "0, 190, 243, 332, 387, 41, 435, 97". It changed no computed value —
+the cell arithmetic aliases the cast — but it is the trap live in a query written by
+someone who had read the rule that morning. Alias the cast or order by the bare column.
+
+#### WHAT WAS PRICED AND NOT SPENT
+
+**The per-token decimals read costs $1.45 and the measurement does not need it.**
+124,226 distinct tokens survive the filter and 220 are already cached, so 124,006 reads
+at 26 CU is **3,224,156 CU = $1.45 — 370x the Initialize sweep**. Decimals cancel in
+the return ratio, so they buy nothing here; they would be needed only for a price
+LEVEL or a USD figure, and neither is computed. Priced, reported, not spent.
+
+**Everything above is GROSS.** Gas is stored nowhere on this chain's tables and
+reserves are stored nowhere, so slippage and fees are not computed and a positive gross
+figure is not a strategy.
 
 ## 9. Rules here the code does not implement
 
