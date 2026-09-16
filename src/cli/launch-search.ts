@@ -172,6 +172,26 @@ async function main(): Promise<void> {
           from feat left join ret using (pool_id)
          group by 1 ${extra} order by 2 desc`);
 
+    /*
+     * TWO CORRELATED SUBQUERIES ARE MATERIALISED FIRST. Written inline, H15 scanned
+     * all 306,560 Initialize rows per launch row and sat ACTIVE for 9m12s in
+     * pg_stat_activity against ~90s for H1-H14 -- past the 3x wall-clock rule, and a
+     * hang rather than slowness. This is the fourth instance of that shape in this
+     * repository after the 19-minute router query, the 17-minute conventions query and
+     * the 10m34s timestamp work set, and the remedy is the one those established:
+     * materialise the input into an indexed temp table and analyse it.
+     */
+    await c.query(`create temp table tokpool as
+      select pool_id,
+             row_number() over (
+               partition by case when currency0 = any($1) then currency1 else currency0 end
+               order by block_number, pool_id) - 1 as prior_pools
+        from v4_pool_init`, [PRICING]);
+    await c.query('alter table tokpool add primary key (pool_id); analyze tokpool');
+    await c.query(`create temp table blkpool as
+      select block_number, count(*)::int n from v4_pool_init group by 1`);
+    await c.query('alter table blkpool add primary key (block_number); analyze blkpool');
+
     step('hypotheses');
     await byBucket('1', 'H1 does a HOOK predict survival?',
       `case when hooks='0x0000000000000000000000000000000000000000' then 'no hook' else 'has hook' end`);
@@ -217,14 +237,11 @@ async function main(): Promise<void> {
       `case when first_sender in (select sender from sw group by sender
                                    having count(distinct pool_id) > 5000) then 'top router'
              else 'other sender' end`);
-    await byBucket('15', 'H15 does the TOKEN ALREADY HAVING POOLS predict survival?',
-      `case when (select count(*) from v4_pool_init q
-                   where (q.currency0=feat.token or q.currency1=feat.token)
-                     and q.block_number < feat.init_block) = 0 then 'a first pool'
-             when (select count(*) from v4_pool_init q
-                   where (q.currency0=feat.token or q.currency1=feat.token)
-                     and q.block_number < feat.init_block) <= 2 then 'b 1-2 prior'
-             else 'c 3+ prior' end`);
+    await byPre('15', 'H15 does the TOKEN ALREADY HAVING POOLS predict survival?',
+      `select case when t.prior_pools = 0 then 'a first pool'
+                   when t.prior_pools <= 2 then 'b 1-2 prior' else 'c 3+ prior' end bucket,
+              f.surv_5m, f.surv_1h, f.exit_avail, r.r
+         from feat f join tokpool t using (pool_id) left join ret r using (pool_id)`);
     await byBucket('16', 'H16 does a VANITY token address (ends 1e18) predict survival?',
       `case when right(token,4)='1e18' then 'ends 1e18' else 'other' end`);
     await byPre('17', 'H17 does the INITIAL PRICE (sqrtPriceX96 decile) predict survival?',
@@ -235,10 +252,11 @@ async function main(): Promise<void> {
               surv_5m, surv_1h, exit_avail, r
          from feat left join ret using (pool_id) where vol_5s is not null`,
       'having count(*) >= 200');
-    await byBucket('19', 'H19 does the pool being created in a BUSY block predict survival?',
-      `case when (select count(*) from v4_pool_init q where q.block_number=feat.init_block) = 1
-             then 'a alone' when (select count(*) from v4_pool_init q
-             where q.block_number=feat.init_block) <= 3 then 'b 2-3' else 'c 4+' end`);
+    await byPre('19', 'H19 does the pool being created in a BUSY block predict survival?',
+      `select case when b.n = 1 then 'a alone' when b.n <= 3 then 'b 2-3' else 'c 4+' end bucket,
+              f.surv_5m, f.surv_1h, f.exit_avail, r.r
+         from feat f join blkpool b on b.block_number=f.init_block
+         left join ret r using (pool_id)`);
     await byBucket('20', 'H20 does the FIRST SWAP being in the creation block predict survival?',
       `case when creation_gap=0 then 'same block' else 'later' end`);
 
