@@ -61,7 +61,17 @@ async function main(): Promise<void> {
               max(block_number)::text as hi
          from v4_swaps_all where block_number between $1 and $2`, [from, to],
     );
-    const expectedLogs = Number(floor.rows[0]!.pools);
+    /*
+     * `--expected-logs` EXISTS BECAUSE THE FLOOR IS ONLY AVAILABLE INSIDE THE CORPUS.
+     * The floor is the pools that SWAPPED in range, read from `v4_swaps_all` -- which
+     * stops at 42,695,454. Extending past it there is nothing to count, so the figure
+     * is supplied from the density MEASURED over the corpus range (306,560 logs over
+     * 27,580,188 blocks = 0.0111/block) applied to the new one. That is a density from
+     * an ADJACENT range and this document records four of those being wrong; the span
+     * only ever narrows, so the cost of it being high is a few extra halvings.
+     */
+    const override = num('--expected-logs', 0);
+    const expectedLogs = override || Number(floor.rows[0]!.pools);
     if (expectedLogs === 0) {
       throw new Error(
         `v4_swaps_all holds no swaps in ${from}..${to}. A work set of nothing is a `

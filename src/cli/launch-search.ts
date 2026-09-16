@@ -41,13 +41,22 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const i = args.indexOf('--half');
   const half = i >= 0 ? String(args[i + 1]) : 'search';
-  if (half !== 'search' && half !== 'holdout') {
-    throw new Error(`--half must be "search" or "holdout", got "${half}"`);
+  if (half !== 'search' && half !== 'holdout' && half !== 'all') {
+    throw new Error(`--half must be "search", "holdout" or "all", got "${half}"`);
   }
   /* '0'-'7' is search, '8'-'f' is holdout. Fixed before any hypothesis was formed. */
   const pred = half === 'search'
     ? `substr(md5(pool_id),1,1) < '8'`
-    : `substr(md5(pool_id),1,1) >= '8'`;
+    : half === 'holdout' ? `substr(md5(pool_id),1,1) >= '8'`
+      : 'true';
+  /*
+   * A BLOCK RANGE, for the forward test. `--half all --from N --to N` runs the
+   * IDENTICAL code path and definitions over a different era instead of a hash half.
+   * It is not a holdout -- the window is seen -- and nothing about the tests changes.
+   */
+  const fi = args.indexOf('--from'); const ti = args.indexOf('--to');
+  const winFrom = fi >= 0 ? Number(args[fi + 1]) : FROM;
+  const winTo = ti >= 0 ? Number(args[ti + 1]) : TO;
 
   const app = await bootstrap();
   const c = await app.pool.connect();
@@ -67,7 +76,7 @@ async function main(): Promise<void> {
     step(`building the ${half.toUpperCase()} half`);
     await c.query(`create temp table fsw as
       select pool_id, min(block_number) fb from v4_swaps_all
-       where block_number between ${FROM} and ${TO} group by 1`);
+       where block_number between ${winFrom} and ${winTo} group by 1`);
     await c.query('alter table fsw add primary key (pool_id); analyze fsw');
     await c.query(`create temp table lau as
       select i.pool_id, i.block_number init_block, f.fb first_swap,
@@ -76,7 +85,7 @@ async function main(): Promise<void> {
              case when i.currency0 = any($1) then i.currency1 else i.currency0 end token,
              i.fee, i.tick_spacing, i.hooks, i.sqrt_price_x96
         from v4_pool_init i join fsw f on f.pool_id=i.pool_id
-       where i.block_number between ${FROM} and ${TO}
+       where i.block_number between ${winFrom} and ${winTo}
          and ((i.currency0 = any($1)) <> (i.currency1 = any($1)))
          and ${pred.replace('pool_id', 'i.pool_id')}`, [PRICING]);
     await c.query('alter table lau add primary key (pool_id); analyze lau');
