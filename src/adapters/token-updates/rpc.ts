@@ -65,7 +65,7 @@ export interface LogEntry {
 
 interface RpcResponse {
   result?: unknown;
-  error?: { message?: string };
+  error?: { message?: string; data?: unknown };
 }
 
 export interface LogFilter {
@@ -144,7 +144,10 @@ export class RpcClient {
       }
       this.rateRefusals = 0;
       if (!body) throw new Error(`${method}: HTTP ${res.status} with a non-JSON body`);
-      if (body.error) throw new RpcError(body.error.message ?? 'unknown JSON-RPC error');
+      if (body.error) {
+        throw new RpcError(body.error.message ?? 'unknown JSON-RPC error',
+          (body.error as { data?: unknown }).data);
+      }
       /*
        * `result: null` is a real answer for some methods but never for the ones
        * used here, and `undefined` means the response had no result at all.
@@ -295,8 +298,24 @@ export class RpcClient {
 
 /** A JSON-RPC-level error, as opposed to a transport or parse failure. */
 export class RpcError extends Error {
-  constructor(message: string) {
+  /**
+   * THE REVERT PAYLOAD, CARRIED RATHER THAN DISCARDED.
+   *
+   * A JSON-RPC error for a reverted `eth_call` puts the revert bytes in `error.data`,
+   * and this class used to keep only `error.message` — which for a custom error is the
+   * uninformative string "execution reverted". Every exit attempt was therefore
+   * recorded as "execution reverted" while the chain had told us exactly which error
+   * and with what arguments, and a decode branch written against it could never fire.
+   *
+   * `revert-decode` had to go to the transport directly to work around this. Carrying
+   * the field means the live paths get the same answer that tool had to be written to
+   * obtain, and an unreachable decode branch becomes a reachable one.
+   */
+  readonly data: unknown;
+
+  constructor(message: string, data?: unknown) {
     super(message);
     this.name = 'RpcError';
+    this.data = data;
   }
 }
