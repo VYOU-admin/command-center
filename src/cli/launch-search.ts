@@ -27,6 +27,7 @@
  * MEDIAN FIRST, MEAN SECOND, everywhere.
  */
 import { bootstrap } from '../bootstrap.js';
+import { halfPredicate, isHalf } from '../bot/holdout.js';
 import { errorFields, log } from '../logger.js';
 
 const FROM = 15115267;
@@ -41,14 +42,15 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const i = args.indexOf('--half');
   const half = i >= 0 ? String(args[i + 1]) : 'search';
-  if (half !== 'search' && half !== 'holdout' && half !== 'all') {
+  if (!isHalf(half)) {
     throw new Error(`--half must be "search", "holdout" or "all", got "${half}"`);
   }
-  /* '0'-'7' is search, '8'-'f' is holdout. Fixed before any hypothesis was formed. */
-  const pred = half === 'search'
-    ? `substr(md5(pool_id),1,1) < '8'`
-    : half === 'holdout' ? `substr(md5(pool_id),1,1) >= '8'`
-      : 'true';
+  /*
+   * '0'-'7' is search, '8'-'f' is holdout. Fixed before any hypothesis was formed, and
+   * now the ONE implementation in bot/holdout.ts so a later test cannot split the
+   * population differently and still call its second half a holdout.
+   */
+  const pred = halfPredicate(half);
   /*
    * A BLOCK RANGE, for the forward test. `--half all --from N --to N` runs the
    * IDENTICAL code path and definitions over a different era instead of a hash half.

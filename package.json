@@ -53,7 +53,8 @@
     "rail-drill": "node dist/cli/rail-drill.js",
     "reconcile-drill": "node dist/cli/reconcile-drill.js",
     "price-backfill": "node dist/cli/price-backfill.js",
-    "exit-diagnose": "node dist/cli/exit-diagnose.js"
+    "exit-diagnose": "node dist/cli/exit-diagnose.js",
+    "exit-horizon": "node dist/cli/exit-horizon.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
