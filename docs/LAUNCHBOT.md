@@ -1458,6 +1458,135 @@ and confirmed `RAILWAY_GIT_COMMIT_SHA` equalled local HEAD and that the built fi
 carried `EXIT_DELAY_BLOCKS = 90` and `BOUND_BPS: [300, 449, 608, 1343]`** before
 starting. Cost of the lost attempt: about 25 seconds of compute units.
 
+### CATEGORY A CLOSED — 2026-09-16
+
+The four items that "would lose money on the first live trade". Each is implemented and
+each is EXERCISED, because this document's own standard is that a path nobody has run is
+not a path.
+
+#### 1. `needs_exit` IS ACTED ON, AT BOOT, BEFORE ARMING
+
+`clearNeedsExit` runs after reconciliation and before the loop starts, which is section
+2 rule 3 stated exactly: *a position whose buy landed and whose sell did not is exited
+immediately at boot, before the bot arms itself for new launches.*
+
+- **The amount sold is the balance read from the chain**, never the stored quote. A
+  quote is what we expected; a balance is what is there.
+- **A position that cannot be exited HALTS THE BOT AND RAISES.** It does not return a
+  status a caller may ignore, and the bot does not arm. Rule 4: one stuck position is
+  bad, one stuck position plus a bot opening more is what the rule exists to prevent.
+- **A row whose balance is now zero is resolved, not exited.** The chain saying the
+  position is gone is resolution.
+
+**PROVED IN THE REAL BOOT PATH, NOT A DRILL.** `seed-stuck` seeded one `needs_exit` row
+from a fixture whose premise was measured first — a pool whose exit had already
+simulated clean, attributed to that trade's own holder, whose balance was read and
+confirmed non-zero before the row was written. Then `launchbot` was started normally:
+
+```
+BOOT: STUCK POSITIONS FOUND — EXITING BEFORE ARMING   found 1
+  attempt 1 @300bps   V4TooLittleReceived bound=1445157297157294 actual=0
+  attempt 2 @449bps   V4TooLittleReceived bound=1422958489190651 actual=0
+  attempt 3 @608bps   V4TooLittleReceived bound=1399269828340341 actual=0
+  attempt 4 @1343bps  V4TooLittleReceived bound=1289765641390793 actual=0
+launchbot failed: BOOT EXIT EXHAUSTED on trade 132. THE POSITION IS STILL OPEN
+                  and the bot has NOT armed.
+```
+
+**`actual = 0` at every rung — the pool pays nothing**, so no bound could rescue it. The
+ladder exhausted, halted the chain, and refused to arm. All four attempts were read back
+from `bot_exit_attempts` afterwards, which is the proof each was persisted *before* the
+next began rather than flushed at the end.
+
+**The fixture is the same lesson the drill's live half found: a retry ladder rescues a
+mispriced quote, not a dead pool.** The fixture was resolved to `closed_unsellable` with
+that reason recorded, and the halt it correctly set was cleared with counts reconciled
+before and after.
+
+#### 2. THE LADDER IS WIRED INTO THE LOOP
+
+The loop no longer simulates the exit at entry time. **A clean buy OPENS a position**
+carrying an `exit_due_block`, and **every tick closes each position whose horizon has
+arrived — before looking for new launches**, because an open position is money at risk
+and a launch nobody has seen yet is not.
+
+`--force-exit-optimism` is the deliberate test control: it inflates the exit re-quote so
+the early rungs must miss and the ladder must climb. It cannot affect a live path because
+there is no live path.
+
+#### 3. THE EXIT RE-QUOTES AT EXIT TIME
+
+`src/bot/exit-exec.ts` is **the one exit executor**, used by the boot path and the loop
+alike. Every attempt re-reads the pool's swaps up to NOW and calls `bot/quote.ts` again.
+
+The old bound came from the ENTRY quote. On a pool whose median move over the horizon is
++37% (`nightly-check`, 71 trades) that is a bound computed for a price that will not
+exist by the time we sell — and the entry quote is itself the one measured to over-quote
+by 2–3%. **Selling at +90 s against a +0 s bound is not a measurement of the exit.**
+
+Re-quoting per attempt is also the ladder's own contract: `exitWithRetry` states that a
+retry resubmitting the same calldata against the same bound is one attempt logged four
+times.
+
+#### 4. THE WALLET IS AN ADDRESS AND A BALANCE READ FROM THE CHAIN
+
+`src/bot/wallet.ts`. **No private key is read, here or anywhere**, and this adds no
+signing path — `eth_getBalance` is a read and `ReadOnlyRpc` still refuses every signing
+and broadcast method by name.
+
+The gate is `MAX_CONCURRENT × MAX_POSITION_USD` = **$50** — the most the rails will ever
+let be at risk at once. Arming below it means a rail meant to bound exposure is instead
+bounded by running out of money, and that surfaces as a reverting broadcast rather than
+as a refusal. **An unreadable balance refuses too** — never zero, never sufficient.
+
+**THE REFUSAL IS EXERCISED, NOT JUST WRITTEN.** Against an address read and confirmed
+empty first:
+
+```
+WALLET BALANCE, READ FROM THE CHAIN
+   address 0x9f3c7a1b5e2d8046ac71fe3092bd45a6c8e10d77
+   balance_wei 0   balance_eth 0   eth_usd 2409.95   balance_usd 0
+   required_usd 50   can_arm FALSE
+REFUSING TO ARM — BALANCE BELOW WHAT THE RAILS CAN PUT AT RISK
+process exit code 3   —  and "launchbot starting" never printed
+```
+
+And the read path proved against funded addresses: `0x…0001` read **4.611062044573074
+ETH = $11,112.43** and the v4 PoolManager read **20,337.86 ETH = $49,013,249.51**, both
+at an ETH/USD of 2,409.95 taken from the chain's own series.
+
+**THE OPERATOR'S WALLET IS STILL UNREAD, and that is the honest state.** No address was
+supplied, so the "~$24" in section 0 remains a statement rather than a measurement. What
+is now true is that the mechanism exists and works: point `BOT_WALLET_ADDRESS` at the
+real address and the balance is read and gated. **At $24 against a $50 requirement, the
+bot as configured would REFUSE TO ARM** — which is worth knowing before anyone tries.
+
+#### A DEFECT THIS WORK INTRODUCED AND THE CHECK THAT CAUGHT IT
+
+**The edit that replaced the old exit-simulation block DELETED the `insert into
+bot_trades` that sat inside the replaced range.** The loop then ran for nine minutes
+logging four `WOULD TRADE` lines over an **empty table**, with no error anywhere because
+nothing threw.
+
+This is `ROBINHOOD.md` step 12's worst recorded failure in miniature — a write that
+reported "3,200 rows stored" against an empty table — and it was caught the same way and
+by nothing else: **querying on a separate connection instead of believing the log.**
+
+Two things changed. The insert checks `rowCount` rather than assuming, and **the run now
+reconciles against the database on a fresh connection before it reports**: a run that
+simulated trades and stored zero rows RAISES instead of printing a summary.
+
+#### `RpcClient` DISCARDED THE REVERT PAYLOAD, MAKING A DECODE BRANCH UNREACHABLE
+
+`RpcError` kept only `error.message` — for a custom error, the uninformative string
+`execution reverted`. Every exit attempt was recorded as that while the chain had said
+exactly which error and with what arguments, and the `V4TooLittleReceived` decode branch
+in `exit-exec.ts` **could never fire**. `revert-decode` had already worked around it by
+going to the transport directly, which is the tell that should have been read earlier.
+
+`RpcError` now carries `data`. The boot-exit output above — `bound=… actual=0` — is that
+fix, and an unreachable branch became a reachable one.
+
 ## 7. Rules here the code does not implement
 
 **CLOSED SINCE THE LAST PASS:** the exit horizon (changed to +90 s on holdout evidence),
