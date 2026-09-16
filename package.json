@@ -41,7 +41,8 @@
     "verify-watchlist": "node scripts/verify-watchlist-page.mjs",
     "pump-points": "node dist/cli/pump-points.js",
     "token-age": "node dist/cli/token-age.js",
-    "v4-init-sweep": "node dist/cli/v4-init-sweep.js"
+    "v4-init-sweep": "node dist/cli/v4-init-sweep.js",
+    "launch-backtest": "node dist/cli/launch-backtest.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
