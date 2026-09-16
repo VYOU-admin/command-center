@@ -303,7 +303,8 @@ export function createWebServer(opts: WebServerOptions): Server {
             + 'position_usd::float8 as position_usd, entry_price::float8 as entry_price, '
             + 'exit_price::float8 as exit_price, gross_return::float8 as gross_return, '
             + 'gas_usd::float8 as gas_usd, net_pnl_usd::float8 as net_pnl_usd, '
-            + 'fill_status, status from bot_trades where ' + clause
+            + 'fill_status, status, exit_sim_status, '
+            + 'px_30s::float8 as px_30s, px_300s::float8 as px_300s from bot_trades where ' + clause
             + ' order by created_at desc limit ' + String(CAP), params),
           pool.query(
             'select mode, count(*)::int as trades, '
@@ -331,6 +332,9 @@ export function createWebServer(opts: WebServerOptions): Server {
             gasUsd: (r['gas_usd'] as number | null) ?? null,
             netPnlUsd: (r['net_pnl_usd'] as number | null) ?? null,
             fillStatus: (r['fill_status'] as string | null) ?? null,
+            exitSimStatus: (r['exit_sim_status'] as string | null) ?? null,
+            px30s: (r['px_30s'] as number | null) ?? null,
+            px300s: (r['px_300s'] as number | null) ?? null,
             status: String(r['status']),
           })),
           totals: totQ.rows.map((t: Record<string, unknown>) => ({

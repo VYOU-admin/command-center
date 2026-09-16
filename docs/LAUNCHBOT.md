@@ -613,22 +613,210 @@ live gain are different quantities; adding them gives a number true of nothing.
 
 ---
 
+### THE FEE SANITY CHECK — an allow-list, and why not a bound, 2026-09-16
+
+Dry run 1 produced three pools at `fee=803369` from launchpad `0x58daec…`, and all
+three reverted in simulation. The question was what bound would have rejected them.
+
+**Population.** 1,070 rule-qualifying launches whose Initialize transaction target is
+one of the two launchpads, in blocks 63,216,393–64,216,393. Attribution required
+reading the Initialize transactions: 752 reads, 11,280 CU, **$0.00508**, 752 resolved,
+0 failed. "Exit available" means at least one swap in the pool between +150 and +450
+blocks of its first swap — the window this bot would have to sell into.
+
+The three tiers real launchpads use dominate and behave alike:
+
+| fee | n | % of pop | exit available | median return |
+|---|---|---|---|---|
+| 500 | 359 | 33.6% | 86.9% | +0.271 |
+| 10000 | 157 | 14.7% | 92.4% | +0.063 |
+| 100 | 58 | 5.4% | 86.2% | +0.150 |
+
+Everything else is a long tail of one-off tiers, mostly with no exit at all.
+
+**The bound loses to the allow-list, which is the finding:**
+
+| rule | n | % of pop | exit available | median | mean |
+|---|---|---|---|---|---|
+| allow-list {100, 500, 10000} | 574 | 53.6% | **88.3%** | **+0.144** | **+0.319** |
+| bound `fee <= 10000` | 696 | 65.0% | 76.7% | +0.100 | +0.268 |
+
+The 122 extra pools a `<= 10000` bound admits are dominated by two arithmetic runs from
+a single launchpad — `9111, 9121, …, 9841` and `10881, 10891, …, 11201`, each stepping
+by 10, one pool per tier. **Zero of the 33 pools in the second run had an exit
+available.** A factory that walks the fee integer sits just under whatever round number
+a threshold would pick, so magnitude cannot separate it; membership of the three tiers
+real launchpads actually use can.
+
+`ALLOWED_FEES = [100, 500, 10000]`, enforced in `bot/rule.ts`, secondary to the
+launchpad and never a substitute for it.
+
+**What it would have done to dry run 1:** rejected the 3 pools at 803369, all of which
+reverted. 24 rows become 21, and 7 reverts become 4 — a predicted revert rate of
+**19.0%** against the 29.2% actually recorded.
+
+### THE SAFETY RAILS ARE NOW RAILS, AND EVERY ONE HAS BEEN TRIPPED — 2026-09-16
+
+`MAX_CONCURRENT` and `MAX_DAILY_LOSS_USD` were constants in `config.ts` that no code
+read. They were documentation. All five rails now live in `bot/rails.ts`, the single
+implementation, and every figure is read from Postgres rather than counted in memory —
+a container replacement must not let the bot forget it already lost $14 today.
+
+Two rails **halt** rather than skip: a run of reverts and a breached daily loss are
+statements about the strategy or the chain, not about one pool, and continuing to the
+next launch would repeat the mistake within seconds. Concurrency and daily count are
+ordinary capacity limits and correctly skip.
+
+`npm run rail-drill -- --commit` exercises each rail one below its threshold and at it,
+on `chain='drill'` so tripping the kill switch cannot halt the live dry run. **13 of 13
+cases passed**, cleanup verified on a fresh connection (0 rows, 0 control rows):
+
+```
+PASS  MAX_CONCURRENT at 4 open (one below)      ALLOW
+PASS  MAX_CONCURRENT at 5 open (at the rail)    BLOCK  [5 open >= 5]
+PASS  MAX_DAILY_LOSS_USD at -$14                ALLOW
+PASS  MAX_DAILY_LOSS_USD at -$15                BLOCK  [-15.00 <= -15]
+PASS  daily PnL of +$20 (profit, same size)     ALLOW
+PASS  MAX_CONSECUTIVE_REVERTS at 2              ALLOW
+PASS  MAX_CONSECUTIVE_REVERTS at 3              BLOCK  [3 >= 3]
+PASS  a clean simulation after the run          ALLOW
+PASS  MAX_TRADES_PER_DAY at 39                  ALLOW
+PASS  MAX_TRADES_PER_DAY at 40                  BLOCK  [40 >= 40]
+PASS  kill switch not set                       ALLOW
+PASS  kill switch set by an outside writer      BLOCK  [kill switch: rail drill]
+PASS  kill switch cleared                       ALLOW
+```
+
+The profit case is not decoration. Writing the daily-loss test as `abs(pnl) >= MAX`
+would halt the bot for **making** $15, and only a test in both directions catches it.
+
+### BOOT RECONCILIATION, EXERCISED AGAINST REAL ROWS — 2026-09-16
+
+It had only ever run against zero open rows, which proves it can count to nothing.
+`npm run reconcile-drill -- --commit` seeds the cases a container replacement actually
+leaves behind. **7 of 7 passed**, cleanup verified on a fresh connection.
+
+| case | seeded | outcome |
+|---|---|---|
+| 1. buy landed, never sold | `holding`, balance > 0 | → `needs_exit` |
+| 2. intent that never broadcast | `intent`, balance 0 | → `closed_unfilled` |
+| 3. row says holding, chain says zero | `holding`, balance 0 | → `closed_unfilled` |
+| 4. open rows, no wallet configured | `holding` | **HALT**, row untouched |
+| 5. balance unreadable | `holding`, non-contract token | **HALT**, row untouched |
+
+Case 5 is the one worth keeping: `eth_call` to a non-contract returns `0x`, and the
+error was `Cannot convert 0x to a BigInt` followed by a halt. A `?? 0` on that path
+would have produced a perfectly plausible zero balance and silently closed a position
+that was still open — the exact defect this project records for a `balanceOf` reader
+that turned 490 HTTP 429s into zero balances.
+
+**A fixture the drill refused to fake.** The first version looked for a token the
+PoolManager holds none of, to produce the zero-balance case. There is no such token —
+the PoolManager custodies every v4 pool's liquidity — and the drill stopped with
+`refusing to seed cases whose balances were not actually measured` rather than
+inventing one. The zero case is a different **wallet**, not a different token, and
+reconciliation runs twice, which is what the two situations actually look like for a
+bot that has one wallet.
+
+### THE EXIT LEG, SIMULATED — and the honest limit of it
+
+At entry time the tokens are not held. Simulating the sell from our own address would
+revert for a reason that says nothing about the pool — an empty wallet — and would
+report a 100% exit-revert rate that is an artefact.
+
+So the sell is simulated **from an address that actually holds the token**: the sender
+of the pool's own first swap, whose balance is read before use, selling `min(balance,
+our quoted size)`.
+
+**What this proves:** the pool accepts a sell of this size, the calldata is well-formed,
+and no hook blocks selling.
+**What it does not prove:** our wallet's approval state. That is a separate leg, measured
+separately in section 2 — two setup transactions, ERC-20 → Permit2 and Permit2 → router.
+
+Every outcome is its own stored value — `clean`, `reverted`, `no_holder_found`,
+`holder_zero_balance`, `probe_failed` — and the three "could not be attempted" values
+are counted separately from `reverted`. A partial check reported as a full one is the
+failure this document exists to prevent.
+
+### THE PRICE BACKFILL, AND A RECIPROCAL THAT REPORTED TOTAL LOSS — 2026-09-16
+
+`px_30s / px_60s / px_120s / px_300s` were null on every row. `npm run price-backfill`
+fills them with one `eth_getLogs` per trade (60 CU): the v4 Swap event indexes the pool
+id as topic 1, so a single filtered request returns exactly that pool's swaps over the
+300 seconds after entry. 24 attempted, **22 filled, 2 pools had no swaps in the window,
+0 read failures, 1,440 CU ($0.00065)**. Verified on a fresh connection: 20/21/22/22
+non-null across the four columns. A window that has not elapsed is left **null** and
+counted; a null means "not yet observable" and a zero would mean "the price went to
+zero", and the two must never be confused.
+
+**The first grid it produced was a median return of −1.0000 at every horizon, with best
+equal to worst.** That is not a market outcome. `entry_price` held the *quote rate*
+(tokens per pricing unit, which is what `expectedOut` needs to size a buy) while the
+backfill computed a *token price* (pricing units per token). They are exact reciprocals,
+so the ratio was about 1e-30 and rendered as "lost everything". Proof, from the rows
+themselves — the two multiplied should be ≈ 1 if they are inverses:
+
+```
+entry_price x px_30s = 1.122, 1.130, 1.141, 1.160, 1.170, 2.318
+```
+
+They are, and that deviation from 1 **is** the price move.
+
+This is the two-implementations-of-one-rule defect this project has now recorded six
+times. `bot/price.ts` is the single implementation of both conventions, named so a call
+site shows which is in play, and `launchbot` and `price-backfill` both go through it.
+It was caught only because −1.0000 exactly, with zero spread, is impossible. A subtler
+mismatch would have been believed.
+
+### THE WITHIN-RULE EXIT GRID — a hypothesis, not a finding
+
+Recomputed against the correct entry reference, over dry run 1's own 22 priced launches:
+
+| horizon | n priced | n null | median return | % positive | best | worst |
+|---|---|---|---|---|---|---|
+| **+30s (the implemented rule)** | 20 | 4 | **+0.205** | 100.0% | +4.951 | +0.107 |
+| +60s | 21 | 3 | +0.312 | 95.2% | +4.951 | −0.519 |
+| +120s | 22 | 2 | +0.511 | 95.5% | +5.975 | −0.519 |
+| +300s | 22 | 2 | +0.821 | 95.5% | +6.974 | −0.519 |
+
+Restricted to the new fee allow-list (n=21): +0.205 at 30s, +0.835 at 300s.
+
+**Holding longer was monotonically better, and the bot's +30s is the worst of the four
+cells.** `EXIT_DELAY_BLOCKS` has NOT been changed on this evidence and must not be.
+This is 22 launches in one 70-minute window, it is not a holdout, and 100% positive at
++30s is a statement about that window rather than about the strategy. It is recorded
+here as a hypothesis to be tested on a window not yet touched, which is the same
+standard applied to creator identity in ROBINHOOD.md.
+
+The honest reading of the +30s column is narrower and more useful: across those 20
+launches there was no cell where exiting at +30s lost money, which is weak evidence that
+the exit is *safe*, and no evidence at all that it is *optimal*.
+
 ## 7. Rules here the code does not implement
 
-- **The exit leg is constructed but never executed, even in dry run.** `buildSwap`
-  produces the sell calldata and it is stored on every trade row, but nothing simulates
-  it against the pool as it would exist 30 seconds later, and nothing measures the
-  realised exit. The +30/+60/+120/+300 s price backfill specified in section 5 is
-  likewise not yet written: the columns exist and are null.
-- **No fee sanity check.** The launchpad filter alone admitted three pools at an 80% fee
-  and all three reverted. Section 6 records the evidence; the rule does not yet act on it.
-- **`MAX_CONCURRENT` and `MAX_DAILY_LOSS_USD` are defined and not enforced.** A dry run
-  holds no position and realises no loss, so neither has a code path yet. They must gain
-  one before any live mode exists, and until then they are documentation rather than
-  rails.
-- **Boot reconciliation has never been exercised against a real open position**, only
-  against zero rows. Its behaviour on a genuinely stuck position is specified and
-  untested.
+The four items that stood here on 2026-09-16 are all closed, and section 6 records how.
+What follows is what is open now.
+
+- **The exit is executed against a price the bot never checks.** The exit leg is now
+  simulated (section 6), but only at entry time and only from someone else's balance.
+  Nothing re-quotes the pool at +30s to decide whether the bound still makes sense, and
+  `minOut` for the sell is computed from the entry quote. In a pool that moved 80% in
+  30 seconds — the median in the grid above — that bound is far from the market.
+- **`EXIT_DELAY_BLOCKS` is the worst of the four measured horizons** on the bot's own
+  launches, and has deliberately not been changed. It needs a window not yet touched
+  before it moves. Changing it on the 22 rows that suggested it would be fitting the
+  rule to the sample that produced it.
+- **The gas cost of a trade is not measured anywhere.** `gas_usd` is null on every row.
+  A +20% median return on a $10 position is $2, and nothing in this document establishes
+  that the round trip costs less than that. Until it does, no return figure here is a
+  profit figure.
+- **`fill_status` is always the literal 'dry-run'.** Nothing models whether the entry
+  would actually have filled at the quoted price against competing buyers in the same
+  block, so every return in section 6 assumes a fill that a live bot would have to win.
+- **Boot reconciliation resolves a stuck position to `needs_exit` and nothing acts on
+  it.** No code path sells a `needs_exit` row. In dry run that is correct; before a live
+  mode it is the most dangerous gap in this document, because it is the state a
+  container replacement actually produces.
 
 ### The fee bound could not be derived from `v4_pool_creator`, because that table's scope is fee-filtered
 
@@ -655,3 +843,27 @@ one.
 cannot then be used to measure the distribution of the thing that filter keyed
 on. Before quoting a distribution from a stored table, read the query that
 populated it.
+
+
+### Two more defects in `v4-creators`, both found by spending against them
+
+Recorded 2026-09-16, closing the fee bound.
+
+**The default fee scope parsed to `[0]`.** Making the scope a `--fees` flag introduced
+`''.split(',')`, which is `['']`, and `Number('')` is `0`, which is finite. So the
+no-flag default became `fee in (0)` and the work set collapsed from 1,425 pools to 55.
+It was caught only by the `fee_scope` line added to the work-set log in the same commit;
+without it the run would have reported a plausible 55-pool work set, priced it, and read
+it. **A flag whose default silently narrows a population is the same failure as a filter
+that matches nothing** — and the fix for both is to log the scope next to the count.
+
+**The read set was a superset of the priced set.** The estimate counted transactions with
+no resolved creator (752); the read loop selected every distinct `tx_hash` in the work
+set (1,294). Re-running over a partly-collected window therefore priced $0.005 and
+attempted $0.009, and the compute-unit ceiling stopped it at 16,920 CU **with nothing
+stored**. The ceiling did its job. The read now applies the same `not exists` the
+estimate applies, and refuses to spend at all if the two counts differ.
+
+The rule: **price the work you are about to do, not a subset of it.** If an estimate and
+a loop derive their sets separately, they will disagree, and the disagreement will
+surface as a spend rather than as an error.

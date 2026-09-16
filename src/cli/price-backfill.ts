@@ -24,15 +24,11 @@ import { RpcClient } from '../adapters/token-updates/rpc.js';
 import { BACKFILL_OFFSETS_S, ENTRY_DELAY_BLOCKS, POOL_MANAGER } from '../bot/config.js';
 import { TOPICS } from '../adapters/token-updates/decode.js';
 import { BOT_SCHEMA } from '../bot/state.js';
+import { swapAmounts, tokenPrice } from '../bot/price.js';
 
 const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
 const BLOCKS_PER_SECOND = 10;
 const GETLOGS_CU = 60;
-
-function signed(word: string): bigint {
-  const v = BigInt(`0x${word}`);
-  return v >= (1n << 255n) ? v - (1n << 256n) : v;
-}
 
 async function main(): Promise<void> {
   const commit = process.argv.includes('--commit');
@@ -99,17 +95,17 @@ async function main(): Promise<void> {
         }])) as Array<{ blockNumber: string; data: string; logIndex: string }>;
         if (logs.length === 0) { noSwaps += 1; continue; }
 
-        /* TOKEN SIDE BY ADDRESS ORDER, the same convention the pool key uses. */
+        /*
+         * TOKEN SIDE BY ADDRESS ORDER, which is what the v4 pool key itself uses, and
+         * the price from bot/price.ts so this agrees with what the bot recorded at
+         * entry. Computing it here independently is what produced an exit grid of
+         * -1.0000 at every horizon.
+         */
         const tokenIsZero = r.token.toLowerCase() < r.counter.toLowerCase();
         const ticks = logs.map((l) => {
-          const d = l.data.startsWith('0x') ? l.data.slice(2) : l.data;
-          const a0 = signed(d.slice(0, 64)); const a1 = signed(d.slice(64, 128));
-          const abs = (x: bigint): bigint => (x < 0n ? -x : x);
-          if (a0 === 0n || a1 === 0n) return null;
-          const price = tokenIsZero
-            ? Number(abs(a1)) / Number(abs(a0))
-            : Number(abs(a0)) / Number(abs(a1));
-          return { block: Number(BigInt(l.blockNumber)), price };
+          const a = swapAmounts(l.data);
+          if (!a) return null;
+          return { block: Number(BigInt(l.blockNumber)), price: tokenPrice(a, tokenIsZero) };
         }).filter((x): x is { block: number; price: number } => x !== null && x.price > 0);
         if (ticks.length === 0) { noSwaps += 1; continue; }
 

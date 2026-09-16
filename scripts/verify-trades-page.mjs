@@ -47,6 +47,15 @@ async function load(path) {
     modeOptions: d.querySelectorAll('select#mode option').length,
     padOptions: d.querySelectorAll('select#launchpad option').length,
     tokenLinks: [...d.querySelectorAll('td a[href^="https://dexscreener.com/"]')],
+    headerCells: d.querySelectorAll('table thead th').length,
+    cellsPerRow: dataRows.map((r) => r.querySelectorAll('td').length),
+    exitChips: [...d.querySelectorAll('td .ex')].map((x) => x.textContent.trim()),
+    exitChipClasses: [...d.querySelectorAll('td .ex')].map((x) => x.className),
+    /* A price cell is either a number or an em dash. A ZERO would mean the price
+       went to zero and must never stand in for "not observed". */
+    priceCellsZero: [...d.querySelectorAll('table tbody tr td.n')]
+      .filter((x) => /^0(\.0+)?$/.test(x.textContent.trim())).length,
+    nulls: d.querySelectorAll('td .nul').length,
   };
 }
 
@@ -116,3 +125,32 @@ if (all.rendered > 0) {
 
 console.log(failures === 0 ? '\nverify-trades-page: PASS' : `\nverify-trades-page: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
+
+
+/* ---- the exit-leg and backfill columns ---------------------------------- */
+console.log('\nexit-leg and price-backfill columns');
+if (all.headerCells === 14) ok(`header has ${all.headerCells} columns`);
+else fail(`header has ${all.headerCells} columns, expected 14`);
+
+const wrongWidth = all.cellsPerRow.filter((n) => n !== 14).length;
+if (wrongWidth === 0) ok(`every one of ${all.cellsPerRow.length} rows has 14 cells`);
+else fail(`${wrongWidth} rows do not have 14 cells`);
+
+/* EVERY ROW CARRIES AN EXIT-SIM VALUE OR AN EXPLICIT DASH -- never a silent blank,
+   which a reader would take for "fine". */
+const exitShown = all.exitChips.length + [...all.d.querySelectorAll('table tbody tr')]
+  .filter((r) => !r.querySelector('td.empty'))
+  .filter((r) => r.querySelectorAll('td')[11]?.querySelector('.nul')).length;
+if (exitShown >= all.rendered) ok(`all ${all.rendered} rows show an exit-sim value or a dash`);
+else fail(`only ${exitShown} of ${all.rendered} rows show an exit-sim value`);
+
+/* NOT-ATTEMPTED MUST NOT RENDER AS EITHER PASS OR FAIL. */
+const miscoloured = all.exitChips.map((t, i) => ({ t, c: all.exitChipClasses[i] }))
+  .filter(({ t, c }) => (t !== 'clean' && c.includes('ok')) || (t !== 'reverted' && c.includes('bad')));
+if (miscoloured.length === 0) ok('no exit-sim chip is coloured as a pass or fail it is not');
+else fail(`${miscoloured.length} exit-sim chips are miscoloured: ${JSON.stringify(miscoloured)}`);
+
+if (all.priceCellsZero === 0) ok('no numeric cell renders a bare zero');
+else fail(`${all.priceCellsZero} numeric cells render 0, which must be a dash if unobserved`);
+
+console.log(`  (em dashes on the page: ${all.nulls})`);

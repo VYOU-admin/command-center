@@ -24,6 +24,10 @@ export interface TradeRow {
   entryPrice: number | null; exitPrice: number | null; grossReturn: number | null;
   gasUsd: number | null; netPnlUsd: number | null; fillStatus: string | null;
   status: string;
+  /* The exit leg's OWN outcome, distinct from the entry's. 'not attempted' is its
+   * own value and must never render as a revert or as a blank success. */
+  exitSimStatus: string | null;
+  px30s: number | null; px300s: number | null;
 }
 export interface TradeTotals {
   mode: string; trades: number; wins: number; netPnl: number; gas: number;
@@ -72,7 +76,7 @@ export function renderTradesPage(args: {
     </div>`).join('') || '<div class="tot dry"><div class="totmode">no trades yet</div></div>';
 
   const body = rows.length === 0
-    ? '<tr><td class="empty" colspan="11">No trades recorded.</td></tr>'
+    ? '<tr><td class="empty" colspan="14">No trades recorded.</td></tr>'
     : rows.map((r) => `
       <tr>
         <td class="t">${esc(r.createdAt.replace('T', ' ').slice(0, 19))}Z</td>
@@ -90,6 +94,12 @@ export function renderTradesPage(args: {
         <td class="n">${r.gasUsd === null ? '<span class="nul">—</span>' : `$${esc(num(r.gasUsd, 4))}`}</td>
         <td class="n">${money(r.netPnlUsd)}</td>
         <td>${esc(r.fillStatus ?? r.status)}</td>
+        <td>${r.exitSimStatus === null
+          ? '<span class="nul">—</span>'
+          : `<span class="ex ${r.exitSimStatus === 'clean' ? 'ok'
+            : r.exitSimStatus === 'reverted' ? 'bad' : 'na'}">${esc(r.exitSimStatus)}</span>`}</td>
+        <td class="n">${r.px30s === null ? '<span class="nul">—</span>' : esc(r.px30s.toPrecision(4))}</td>
+        <td class="n">${r.px300s === null ? '<span class="nul">—</span>' : esc(r.px300s.toPrecision(4))}</td>
       </tr>`).join('');
 
   const modeOpts = modes.map((m) =>
@@ -128,6 +138,12 @@ export function renderTradesPage(args: {
    border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px}
  .f{display:flex;flex-direction:column;gap:4px}
  .f label{font-size:11px;color:var(--faint);text-transform:uppercase}
+ .ex{padding:1px 6px;border-radius:4px;font-size:11px}
+ .ex.ok{background:#12351f;color:#7ee2a8}
+ .ex.bad{background:#3a1720;color:#ff9aa8}
+ /* NOT-ATTEMPTED IS ITS OWN COLOUR, neither pass nor fail. Rendering it as either
+    would be the partial-check-reported-as-full failure this tab exists to avoid. */
+ .ex.na{background:#2a2a33;color:#a9a9b8}
  .f select{background:var(--panel2);border:1px solid var(--border);border-radius:6px;
    color:var(--text);padding:6px 8px;font-size:13px;min-width:220px}
  button{background:var(--accent);border:1px solid var(--accent);border-radius:6px;
@@ -165,6 +181,7 @@ ${banner}
 <table><thead><tr>
  <th>time</th><th>mode</th><th>token</th><th>launchpad</th><th>entry</th><th>exit</th>
  <th>size</th><th>gross</th><th>gas</th><th>net pnl</th><th>fill</th>
+ <th>exit sim</th><th>px +30s</th><th>px +300s</th>
 </tr></thead><tbody>${body}</tbody></table>
 </div></body></html>`;
 }

@@ -28,6 +28,7 @@ import { expectedOut, minOut, positionWei, qualifies } from '../bot/rule.js';
 import { BOT_SCHEMA, halt, isHalted } from '../bot/state.js';
 import { checkRails } from '../bot/rails.js';
 import { id } from 'ethers';
+import { quoteRate, swapAmounts, tokenPrice } from '../bot/price.js';
 import { ReadOnlyRpc } from '../bot/rpc.js';
 import { reconcileOnBoot } from '../bot/reconcile.js';
 
@@ -202,16 +203,17 @@ async function main(): Promise<void> {
 
           /* QUOTE from the pool's realised first-swap amounts -- a traded price, not a
            * curve guess. A pool we cannot quote is SKIPPED rather than bounded by one. */
-          const d = sw.data.startsWith('0x') ? sw.data.slice(2) : sw.data;
-          const sgn = (w: string): bigint => {
-            const v2 = BigInt(`0x${w}`); return v2 >= (1n << 255n) ? v2 - (1n << 256n) : v2;
-          };
-          const a0 = sgn(d.slice(0, 64)); const a1 = sgn(d.slice(64, 128));
-          const abs = (x: bigint): bigint => (x < 0n ? -x : x);
-          if (a0 === 0n || a1 === 0n) continue;
-          const rate = p.zeroIsPricing
-            ? Number(abs(a1)) / Number(abs(a0))
-            : Number(abs(a0)) / Number(abs(a1));
+          /*
+           * BOTH CONVENTIONS COME FROM bot/price.ts AND NEITHER IS COMPUTED HERE.
+           * `rate` sizes the buy (tokens per pricing unit); `px` is the price that
+           * rises when the token rises, and is the only one comparable with the
+           * backfill columns and with every figure in the chain documents.
+           */
+          const amts = swapAmounts(sw.data);
+          if (!amts) continue;
+          const tokenIsCurrency0 = !p.zeroIsPricing;
+          const rate = quoteRate(amts, tokenIsCurrency0);
+          const px = tokenPrice(amts, tokenIsCurrency0);
           let quoted: bigint; let bound: bigint;
           try { quoted = expectedOut(size, rate); bound = minOut(quoted); } catch { continue; }
 
@@ -313,7 +315,7 @@ async function main(): Promise<void> {
               (firstSwapBlock - p.init.blockNumber) / BLOCKS_PER_SECOND,
               size.toString(), RAILS.MAX_POSITION_USD, quoted.toString(), bound.toString(),
               rate, buy.data, sell.data, 'dry-run', simNote,
-              exitStatus, exitNote, exitFrom, rate]);
+              exitStatus, exitNote, exitFrom, px]);
 
           log.info('WOULD TRADE', {
             pool: pid, token: p.token, launchpad: p.launchpad, fee: p.init.fee,
