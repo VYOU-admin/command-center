@@ -176,33 +176,152 @@ triple. **Nine of ten words are identified with evidence. One is not.**
 12** sampled trades — the ETH is attached to the transaction as native value. The
 wallet holds native ETH and spends it directly.
 
-**The SELL leg is NOT MEASURED and this is a real gap.** The probe sampled entry-moment
-trades only. Selling the token back requires the token approved to whatever contract
-executes the sell, which is an extra transaction and extra gas per token, and it is not
-known whether that path takes the same target or the same shape. **This must be
-measured before any design is built on it.**
+**The SELL leg is measured — see below.** It requires an approval, it routes through a
+different set of contracts than the buy, and the most-used buy route cannot sell at all.
 
-### What is NOT established, and what closes it
+### THE SELL LEG, measured 2026-09-16 (route-probe --side sell, 315 trades, 4,725 CU)
 
-1. **`w3` is unidentified.** Setting it wrong either reverts (safe) or does something
-   unintended (not safe). **Closes free**: sample more callers of this selector and see
-   whether it is constant per caller.
-2. **The function cannot be NAMED.** There is no keccak256 in this environment — the
-   dependencies are `exceljs, pg, rss-parser, yaml`, and Node's `crypto` offers
-   `sha3-256`, which is a different padding and is NOT keccak256. So a candidate
-   signature cannot be checked against an observed selector. `ROBINHOOD.md` records
-   that a fabricated hash has shipped here once, so no selector is asserted from
-   memory. **Closes for the cost of one audited dependency.**
-3. **No ABI source exists.** `ROBINHOOD.md` records Blockscout returning HTTP 403
-   behind Cloudflare on every API path: it is a link target for humans.
-4. **The write-path RPC methods are UNPRICED.** `eth_sendRawTransaction`,
-   `eth_getTransactionCount`, `eth_gasPrice` and `eth_estimateGas` do not appear in the
-   provider cost table `ROBINHOOD.md` section 6 records. They are not guessed here.
+**The sell path is NOT the same set as the buy path, and the difference decides the
+design.**
 
-**THE GATE: a byte-for-byte dry run.** Construct calldata for a trade that already
-happened and compare it against that transaction's observed input. If it matches except
-for amount, recipient and deadline, the shape is confirmed by the strongest test
-available. **No broadcast before that passes.**
+| routing target | sells | share | buys | verdict |
+|---|---|---|---|---|
+| `0x8876789976de…` **Universal Router** | 132 | **41.9%** | 66 | **both legs** |
+| `0x5a1d33c4b150…` | 73 | 23.2% | 83 | both legs |
+| `0x1cbaf24d53fe…` | **0** | — | 108 | **BUY ONLY** |
+| `0xf5576dee97a4…` | 34 | 10.8% | 59 | both legs |
+
+**The most-used BUY route cannot sell at all.** A bot built on `0x1cbaf24d…` would have
+to exit through a different contract, doubling the integration surface. **The Universal
+Router does both** and is the only path here with a verifiable interface.
+
+314 of 315 sells attach no native value, as expected: the token goes in, not ETH.
+
+### AN APPROVAL IS REQUIRED, AND IT IS EFFECTIVELY PER TRADE
+
+Measured over 40 sampled sells (approval-probe, 3,600 CU), sweeping `Approval` logs from
+each token filtered to that seller:
+
+```
+sells with a prior approval by that seller   40 of 40
+sells without one in a 200,000-block lookback  0
+spenders approved   0x5a1d33c4b150…  22      <- a router taking a direct allowance
+                    0x000000000022d473030f116ddee9f6b43ac78ba3  17   <- Permit2
+                    0x9713b78021cf…  17
+                    0xf5576dee97a4…   8
+```
+
+**It is one approval PER TOKEN, and since every trade is a different newly-launched
+token, that is one approval per trade.** This is not an inference from the sample: the
+token did not exist before its own launch, so no allowance for it can predate the trade.
+
+**Gas, from real receipts (median):**
+
+| leg | cost |
+|---|---|
+| approval | **$0.00751** |
+| sell | **$0.04339** |
+| buy | $0.0279 (SELLOFF) – $0.0405 (CALM), measured earlier |
+| **round trip incl. approval** | **≈ $0.079 – $0.092** |
+
+**THIS CORRECTS AN EARLIER FIGURE.** Section 1's round-trip gas of $0.0219 / $0.0809 /
+$0.0557 was `2 × a single-leg median` sampled from ENTRY transactions — all buys. The
+sell leg actually costs more ($0.0434 against a buy-side sample), and the approval was
+not counted at all. **The true round trip is 15–40% higher than reported there.** On a
+$10 position that is **0.79%–0.92%** rather than 0.56%–0.81% — a correction of ~0.1–0.2
+percentage points against a median near +15%, so it does not change the decision, but
+the earlier number was wrong and is superseded here.
+
+### THE FUNCTION SELECTORS, VERIFIED
+
+`ethers` was added for keccak256 — chosen over `js-sha3` because the same package
+supplies ABI encoding for the reconstruction below and transaction signing for the bot,
+and hand-rolling secp256k1, RLP and EIP-1559 is exactly what loses money.
+
+**It immediately cross-checked this project's own records.** All three topic hashes
+`ROBINHOOD.md` carries as read off the chain reproduce exactly from keccak of their
+signatures — `Transfer`, `Initialize` and `Swap`. The document and the hash function now
+confirm each other.
+
+| selector | signature | verified |
+|---|---|---|
+| `0x3593564c` | `execute(bytes,bytes[],uint256)` | **YES** |
+| `0x24856bc3` | `execute(bytes,bytes[])` | **YES** |
+| `0xc1120e3d` | — | **NO candidate matched** |
+| `0x7169b574` | — | **NO candidate matched** |
+| `0x4d819a2a` | — | **NO candidate matched** |
+
+So `0x8876789976de…` is a **Uniswap Universal Router**, a published interface. The three
+unmatched selectors are custom contracts with no obtainable ABI — `ROBINHOOD.md` records
+Blockscout returning HTTP 403 on every API path.
+
+### THE BYTE-FOR-BYTE TEST
+
+Decode each observed input with the verified signature, re-encode the decoded values, and
+compare against the original bytes.
+
+```
+execute(bytes,bytes[],uint256)   3 samples (1 buy, 2 sells)   MATCH, MATCH, MATCH
+execute(bytes,bytes[])           3 samples (3 sells)          MATCH, MATCH, MATCH
+   every one: commands = 0x10  (one command)   inputs = 1 element
+```
+
+**This is a real test because the arguments are DYNAMIC.** `bytes` and `bytes[]` carry
+offsets, lengths and padding that must all be reproduced exactly, so a byte-for-byte
+round trip constrains the layout.
+
+**The same test on `0xc1120e3d` also matches, and that match means much less.** Its ten
+arguments are all STATIC, and any 320-byte body decodes as ten static words and
+re-encodes identically — the round trip is close to tautological there. It confirms the
+layout is ten static words; it confirms nothing about the function.
+
+**WHAT REMAINS UNRESOLVED ON THE UNIVERSAL ROUTER PATH:** the `commands` byte is `0x10`
+in every sample and the single `inputs` element is an opaque blob whose internal layout
+is not verified here. Encoding a NEW trade requires constructing that blob. **That is the
+remaining gap and it is the next thing to close, before any code.**
+
+### `w3` — carried as a known unknown, with its values enumerated
+
+Across 108 transactions on `0xc1120e3d`, `w3` takes **exactly two values**, shared by 80
+distinct senders:
+
+```
+0x…6f97f428021e6e3ed0  = 2,058,538,012,765,370,334,928   n=55, 34 distinct senders
+0x…905a6e5d8b0cdad0b4  = 2,662,847,395,176,824,623,284   n=53, 46 distinct senders
+```
+
+**It is a shared constant, not caller configuration and not a per-trade amount** — the
+earlier reading of "caller config" is superseded. Its meaning is unidentified. **It no
+longer blocks anything**, because the design routes through the Universal Router where
+this word does not exist.
+
+### BOOT RECONCILIATION — required before any code
+
+`ROBINHOOD.md` records containers being replaced mid-job twice, once destroying a
+session's files and once killing a running sweep. **A container replaced between the buy
+and the sell leaves a position open with no process tracking it, and the token is not
+something anyone will come back for.**
+
+The rule: **a position is only real if Postgres says so, and the chain is the
+adjudicator.**
+
+1. **Write intent BEFORE broadcasting.** A row is inserted with status `intent` carrying
+   the pool, the calldata, the value and the nonce, and committed, before
+   `eth_sendRawTransaction` is called. A crash between the insert and the broadcast
+   leaves a row that the chain can be asked about; a crash the other way round leaves a
+   position nobody knows exists.
+2. **On boot, load every row not in a terminal state and reconcile each against the
+   chain** — by transaction hash where one was recorded, and by the wallet's token
+   balance where one was not. The balance is the authority: a non-zero balance of that
+   token means the buy landed whatever the row says.
+3. **Any position whose buy landed and whose sell did not is EXITED IMMEDIATELY** at
+   boot, before the bot arms itself for new launches. It is past its 45-second window by
+   definition, so it is not a trade any more — it is an open exposure.
+4. **Reconciliation failure halts the bot.** A position that cannot be resolved against
+   the chain stops new trading rather than being abandoned, because the one thing worse
+   than a stuck position is a stuck position plus new ones.
+5. **The nonce is read from the chain on boot, never carried in memory**, so a replaced
+   container cannot reuse one.
 
 ### RPC cost of running the bot
 
