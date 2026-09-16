@@ -100,6 +100,22 @@ export const RAILS = {
 export const SLIPPAGE_BPS = 300;
 
 /**
+ * THE MINIMUM CONSECUTIVE SWAPS NEEDED TO MEASURE A POOL'S DEPTH.
+ *
+ * Impact is the median fractional price move per unit of notional across CONSECUTIVE
+ * observed swaps, so n swaps give n-1 pairs and a median over fewer than three pairs is
+ * one or two numbers wearing a median's name. Three is the smallest count at which the
+ * median is not simply an observation — it is the first value where a single degenerate
+ * tick cannot BE the answer, which is the property `ROBINHOOD.md` chooses medians for.
+ *
+ * **A pool below this is REFUSED, not quoted linearly.** The linear quote is the defect
+ * being fixed; falling back to it exactly where the pool is thinnest would reinstate it
+ * in the worst case. The count of launches refused for this reason is reported on every
+ * run, so the cost of the refusal is visible rather than inferred.
+ */
+export const IMPACT_MIN_OBSERVATIONS = 3;
+
+/**
  * EXIT RETRY. An exit that reverts leaves the bot holding a token with no way out,
  * which is the worst outcome available to it — worse than a bad fill, because a
  * position that cannot be sold is not a loss of some size, it is an unbounded one.
@@ -152,10 +168,48 @@ if (EXIT_RETRY.BOUND_BPS.length !== EXIT_RETRY.MAX_ATTEMPTS) {
     + `${EXIT_RETRY.MAX_ATTEMPTS} attempts`);
 }
 
-/** Entry at +15 s, exit at +45 s, at the measured 0.1 s block time. */
+/** Entry at +15 s, at the measured 0.1 s block time. */
 export const BLOCKS_PER_SECOND = 10;
 export const ENTRY_DELAY_BLOCKS = 15 * BLOCKS_PER_SECOND;
-export const EXIT_DELAY_BLOCKS = 30 * BLOCKS_PER_SECOND;
+
+/**
+ * THE EXIT HORIZON. CHANGED 2026-09-16 FROM +30 s TO +90 s, on operator approval, on
+ * holdout evidence. This is a DECISION ON MEASURED EVIDENCE, not a tuned constant, and
+ * the distinction matters enough to record here rather than only in the document.
+ *
+ * WHAT IT WAS: 30 s (300 blocks), inherited from the offline backtest's best cell.
+ * WHAT IT IS:  90 s (900 blocks).
+ *
+ * THE EVIDENCE. `exit-horizon` swept ten horizons out to +600 s across all four swept
+ * windows, on the pre-committed `md5(pool_id)` split that `launch-search.ts` fixed
+ * before any hypothesis was formed (`bot/holdout.ts`). Per window and per half, with
+ * no-fill and no-exit scored zero over EVERY rule launch:
+ *
+ *   window     half      +30 s    +90 s    +180 s
+ *   MIDPOINT   search    0.000    0.022    0.002
+ *   MIDPOINT   holdout   0.001    0.008    0.000
+ *   CALM       search    0.164    0.268    0.092
+ *   CALM       holdout   0.202    0.323    0.339
+ *   SELLOFF    search    0.104    0.204    0.296
+ *   SELLOFF    holdout   0.089    0.199    0.372
+ *
+ * **+90 s beats +30 s in 6 of 6 window×half combinations. +180 s beats it in only 4 of
+ * 6**, failing in MIDPOINT on both halves and in CALM on the search half. Pooled across
+ * all four windows the peak is +180 s (search 0.674, holdout 0.676, reproducing cell for
+ * cell) — but 94.5% of that pooled population is the corpus era, which `ROBINHOOD.md`
+ * establishes as the anomaly.
+ *
+ * **THE BAND'S UPPER END IS UNRESOLVED AT n≈700.** On the recent windows alone the
+ * search half peaks at +90 s and the holdout half at +180 s. The two halves disagree
+ * about where inside 90–180 s the optimum sits, and at that sample size that
+ * disagreement IS the measurement's noise. +90 s is the conservative end of the band —
+ * the point that survives everywhere — and is taken for that reason.
+ *
+ * WHAT WOULD MOVE IT: a window nobody has looked at, or the nightly check reaching its
+ * 140-trade minimum on the bot's own trades. `nightly-check` will alert; it cannot and
+ * must not write this value.
+ */
+export const EXIT_DELAY_BLOCKS = 90 * BLOCKS_PER_SECOND;
 /** Creation-to-first-swap gap the rule requires. */
 export const GAP_MIN_BLOCKS = 11;
 export const GAP_MAX_BLOCKS = 600;

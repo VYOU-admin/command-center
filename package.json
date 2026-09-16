@@ -57,7 +57,8 @@
     "exit-horizon": "node dist/cli/exit-horizon.js",
     "revert-decode": "node dist/cli/revert-decode.js",
     "exit-retry-drill": "node dist/cli/exit-retry-drill.js",
-    "nightly-check": "node dist/cli/nightly-check.js"
+    "nightly-check": "node dist/cli/nightly-check.js",
+    "quote-check": "node dist/cli/quote-check.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
