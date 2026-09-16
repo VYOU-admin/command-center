@@ -50,8 +50,11 @@ as a GUESS. No figure gets in without one or the other.**
 *Updated on every change of state. This is the first thing a session needs.*
 
 ```
-STATUS              NOT BUILT. Scoping complete, execution path partially
-                    established, awaiting operator approval of the design.
+STATUS              BUILT, DRY RUN ONLY. It cannot broadcast: no private key is
+                    read anywhere, and src/bot/rpc.ts refuses
+                    eth_sendRawTransaction and every signing method BY NAME.
+mode                dry-run (the only mode that exists)
+first dry run       2026-09-16, 65 minutes, 24 hypothetical trades recorded
 wallet address      NOT CONFIGURED -- no wallet variable exists on the Railway
                     service (checked 2026-09-16: DATABASE_URL, ALCHEMY_API_KEY and
                     Discord webhooks only)
@@ -474,8 +477,39 @@ depending on it.
 
 ## 4. Safety rails
 
-*Proposed. Values and their reasons are in the design; every one is hard-coded, not
-configuration, so a YAML edit cannot loosen a limit.*
+Hard-coded in `src/bot/config.ts`. Not configuration: `ROBINHOOD.md` records that monitor
+options are persisted into `monitors.config`, so a YAML value is a database value and a
+database value is editable by anything with a connection.
+
+| rail | value | why |
+|---|---|---|
+| max position | $10 | operator, 2026-09-16 |
+| max concurrent | 5 | $50 of $100 at risk, leaving headroom for a stuck exit |
+| max trades/day | 40 | ~8% of the 485/day available in the SELLOFF window |
+| max daily loss | $15 | 15% of capital |
+| consecutive simulation reverts | 3 | a broken calldata shape must stop at once |
+| kill switch | a Postgres row, re-read on a fresh connection every tick | a memory flag dies with the container and cannot be set from outside |
+
+**A kill-switch READ FAILURE halts.** An unreachable database is not permission to keep
+trading.
+
+**ONE IMPLEMENTATION OF EVERY RULE**, called by the dry-run path and by any future live
+path. A dry run over different code proves nothing about the live path.
+
+| rule | the one place it lives |
+|---|---|
+| calldata construction | `src/bot/calldata.ts` — `buildSwap`, `buildTokenApprove`, `buildPermit2Approve` |
+| entry rule | `src/bot/rule.ts` — `qualifies()` |
+| position sizing | `src/bot/rule.ts` — `positionWei()` |
+| slippage bound | `src/bot/rule.ts` — `minOut()`, constant in `config.ts` |
+
+**The slippage bound is 300 bps and it is OURS.** The 9 of 9 native-ETH buys observed on
+this chain set `amountOutMinimum` to 0 and take no protection; that is not copied.
+Derived from p90 round-trip slippage at $10 (1.085% / 0.350% / 0.549% across the three
+windows), halved per leg, plus three ticks of the observed ~0.8% per-tick drift to cover
+the 5 s detection latency: 0.54% + 2.4% ≈ 2.94%. **`buildSwap` REFUSES a non-positive
+bound rather than defaulting it.** It is a first value to be re-derived from logged live
+slippage, not a measurement of itself.
 
 ---
 
@@ -487,11 +521,111 @@ configuration, so a YAML edit cannot loosen a limit.*
 
 ## 6. Findings, as they arrive
 
-*Empty. Nothing has traded.*
+### FIRST DRY RUN — 2026-09-16, 65 minutes, live launches
+
+```
+ticks                760        Initialize logs seen     238
+candidates           211        qualified                 24   (11.4% of candidates)
+simulated             24        simulated CLEAN           17
+                                simulated REVERTED         7   (29.2%)
+skipped by a rail      0        RPC cost      102,479 CU = $0.046 for 65 min
+```
+
+**24 qualifying launches in 65 minutes is ~532/day**, above the 200–486/day the
+backtest windows measured.
+
+#### WHAT THE DRY RUN REVEALED THAT THE BACKTEST DID NOT
+
+**1. NEARLY A THIRD OF QUALIFYING LAUNCHES PRODUCE CALLDATA THAT REVERTS.** 7 of 24
+reverted on `eth_call` against the live pool. **The backtest had no equivalent of this
+number because it never simulated anything** — it computed returns from prices that
+already existed. A trade that cannot execute is not a trade, and this is a cost the
+measured +15% median never carried.
+
+**2. THE FEE TIER AND THE LAUNCHPAD ARE NO LONGER COLLINEAR, and the live data broke
+the tie within an hour.**
+
+| launchpad | fee | pools | simulated clean |
+|---|---|---|---|
+| `0x58daec3116aa…` | 10000 | 10 | 8 |
+| PoolManager (direct) | 500 | 9 | 8 |
+| `0x58daec3116aa…` | **803369** | 3 | **0** |
+| `0x58daec3116aa…` | 100 | 2 | 1 |
+
+**One launchpad now emits four fee tiers.** The backtest measured them as
+near-perfectly collinear; that has already ended. **Making the launchpad primary was
+right — and it is also, on its own, too permissive**: every one of the three pools it
+produced at an 80% fee reverted. The backtest's "extreme fee is poison" finding appears
+here as a simulation revert rather than as a bad return, which is a cheaper way to learn
+it. **A fee sanity check belongs in the rule, and it is recorded here before being
+written.**
+
+**3. THE RPC COST IS 2.4x THE ESTIMATE.** Section 2 priced a 5 s Initialize poll at
+$0.47/day. The measured run costs **$1.11/day**, because the estimate counted only that
+poll: the loop also pays a second `eth_getLogs` per tick to find first swaps, one
+`eth_getTransactionByHash` per candidate to read the launchpad, and one `eth_call` per
+simulation. 760 ticks x 2 getLogs = 91,200 CU of the 102,479. **The earlier figure was
+not wrong so much as incomplete, and it is superseded.**
+
+**4. The observed creation-to-first-swap gap on qualifying launches** ran 4.9 s to
+49.8 s with a mean of 12.0 s. The rule's 11–600 block window bounds this by
+construction, so it is a description of what passed rather than of all launches.
+
+**5. Position sizing and the bound held exactly**: 24 of 24 at $10.00, and
+`min_out / quoted_out` = 0.97000 on every one — the 300 bps bound applied without
+exception.
+
+#### TWO DEFECTS THE DRY RUN FOUND IN ITSELF, BOTH MINE
+
+**The entry rule could never fire.** Detection passed `initBlock + 1` as the first-swap
+block, because at Initialize time the first swap has not happened. The gap was therefore
+1 on every candidate, below the 11-block minimum, and the first run saw launches and
+qualified none of them. Pools are now held pending until their first Swap lands and are
+judged on the real gap — which also improved the quote, since it now comes from a traded
+price rather than from the initial `sqrtPriceX96`.
+
+**THE LAUNCHPAD ADDRESS WAS FABRICATED.** The config carried
+`0x58daec3116aa2cc3c60f7c1bdf9c895f7d1d0e35`: the first twelve characters came from a
+truncated `0x58daec3116aa…` in this project's own notes and **the remaining twenty-eight
+were invented**. The real address is `0x58daec3116aae6d93017baaea7749052e8a04fa7`. It
+matched nothing, so every launch was rejected with "launchpad not in the list". This is
+the fabricated-constant failure `ROBINHOOD.md` records for a topic hash — *a fabricated
+topic matches zero logs and reads as a clean sweep* — repeated with an address, three
+passes after that rule was quoted back. **A TRUNCATION IN A DOCUMENT IS NOT AN
+IDENTIFIER.** Both addresses are now read from `v4_pool_creator` with their counts beside
+them.
+
+#### THE /trades TAB
+
+Verified by executing the served page in jsdom, per `ROBINHOOD.md` step 14:
+
+```
+rendered data rows 24    page claims 24 of 24    script errors 0
+banner states the mode                     every one of 24 rows carries a mode label
+totals grouped per mode (1 block)          24 token links well-formed
+mode filter -> 24 rows                     launchpad filter -> 15 of 24
+a malformed filter is ignored, not applied
+verify-trades-page: PASS
+```
+
+**Totals are computed per mode and never summed across modes.** A dry-run gain and a
+live gain are different quantities; adding them gives a number true of nothing.
 
 ---
 
 ## 7. Rules here the code does not implement
 
-- **Everything.** No code exists yet. This section starts accumulating the moment it
-  does.
+- **The exit leg is constructed but never executed, even in dry run.** `buildSwap`
+  produces the sell calldata and it is stored on every trade row, but nothing simulates
+  it against the pool as it would exist 30 seconds later, and nothing measures the
+  realised exit. The +30/+60/+120/+300 s price backfill specified in section 5 is
+  likewise not yet written: the columns exist and are null.
+- **No fee sanity check.** The launchpad filter alone admitted three pools at an 80% fee
+  and all three reverted. Section 6 records the evidence; the rule does not yet act on it.
+- **`MAX_CONCURRENT` and `MAX_DAILY_LOSS_USD` are defined and not enforced.** A dry run
+  holds no position and realises no loss, so neither has a code path yet. They must gain
+  one before any live mode exists, and until then they are documentation rather than
+  rails.
+- **Boot reconciliation has never been exercised against a real open position**, only
+  against zero rows. Its behaviour on a genuinely stuck position is specified and
+  untested.
