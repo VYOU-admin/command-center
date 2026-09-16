@@ -19,6 +19,30 @@
  * it far more than that price implies. The bound was never the cause — the quote was.
  *
  * ---------------------------------------------------------------------------
+ * TWO TERMS, AND THE EXACT ONE TURNED OUT TO BE THE BIG ONE
+ * ---------------------------------------------------------------------------
+ *
+ * The first version of this file carried the impact term alone, on the reasoning that
+ * linear extrapolation was what the reverts proved wrong. `quote-check` measured it
+ * against ground truth and **the reasoning was right and the term was the wrong one**:
+ *
+ *     measured impact           median 0.17%   p90 0.37%
+ *     measured OVER-QUOTE       median 2.50%   p90 16.0%   97.4% of trades over-quoted
+ *
+ * Impact is an order of magnitude too small to explain the shortfall. **The missing
+ * term was the pool's OWN LP FEE**, which is taken off every swap before anything else
+ * and is stated exactly in the pool key we already carry: `fee` is in hundredths of a
+ * basis point, so 10000 is 1% and 500 is 0.05%. On a 1% pool the last realised price
+ * already implies 1% more output than a trader can get, every time, deterministically.
+ *
+ * So the quote is `linear x (1 - fee) x (1 - impact)`:
+ *
+ *   - **the FEE term is EXACT** — read from the pool key, no estimation, no observations
+ *     needed, and it is the dominant correction;
+ *   - **the IMPACT term is MEASURED** — small, real, and the only thing that catches a
+ *     pool where our own size is the problem (one pool measured 47.4%).
+ *
+ * ---------------------------------------------------------------------------
  * THE IMPACT TERM, DERIVED FROM THE POOL'S OWN SWAPS
  * ---------------------------------------------------------------------------
  *
@@ -47,10 +71,14 @@
  * WHAT IT REFUSES TO DO, AND WHY REFUSING IS THE POINT
  * ---------------------------------------------------------------------------
  *
- * - **Too few observations to measure depth: it RAISES.** It does NOT fall back to the
- *   linear quote, because the linear quote is the defect being fixed and a silent
- *   fallback would reinstate it exactly where the pool is thinnest. A pool that has not
- *   traded enough to be measured is a pool we cannot size a trade into.
+ * - **Too few observations to measure depth: the FEE term still applies and the impact
+ *   term is reported as UNMEASURED.** The first version raised here, and `quote-check`
+ *   showed that refusing **26 of 40** trades to avoid a 0.17%-median correction is a
+ *   worse outcome than the defect. The argument that a fallback reinstates the defect
+ *   was about falling back to the FULLY linear quote; falling back to a quote carrying
+ *   the exact fee — the dominant term — is a different thing, and the measurement is
+ *   what separates them. **The basis is on every quote and is counted per run**, so a
+ *   run where most quotes are fee-only is visible rather than inferred.
  * - **Impact at or above 1: it RAISES.** If our own trade is modelled to move the price
  *   by 100% the honest answer is that this pool cannot absorb this size, not a quote of
  *   zero. `ROBINHOOD.md`'s standing rule is that an error path emitting a plausible
@@ -60,6 +88,13 @@
  * cannot be quoted is a result, not a silent skip.
  */
 import { IMPACT_MIN_OBSERVATIONS } from './config.js';
+
+/**
+ * Uniswap's fee unit: hundredths of a basis point. 10000 = 1%, 500 = 0.05%, 100 = 0.01%.
+ * `ROBINHOOD.md` records the Initialize event's `fee` word directly, so this is the
+ * pool's own declared fee and not a figure anybody chose.
+ */
+const FEE_DENOMINATOR = 1_000_000;
 
 /** One observed swap on the pool: its price, and the pricing-asset size that moved it. */
 export interface PoolTick {
@@ -79,13 +114,20 @@ export interface Depth {
 }
 
 export interface QuoteResult {
-  /** What we expect to receive, impact included. This is the number to bound. */
+  /** What we expect to receive, fee and impact included. This is the number to bound. */
   expectedOut: bigint;
   /** The old linear quote, kept so the correction is visible rather than implied. */
   linearOut: bigint;
-  /** The haircut applied, 0..1. */
+  /** The pool's own declared fee, as a fraction. EXACT. */
+  feeFraction: number;
+  /** The measured price impact of our own size, as a fraction. 0 when unmeasured. */
   impactFraction: number;
-  depth: Depth;
+  /**
+   * `fee+impact` when the pool had enough observations, `fee-only` when it did not.
+   * Counted per run so a run dominated by fee-only quotes is visible.
+   */
+  basis: 'fee+impact' | 'fee-only';
+  depth: Depth | null;
 }
 
 function median(xs: number[]): number {
@@ -123,6 +165,8 @@ export interface QuoteParams {
   rateOutPerIn: number;
   /** Which leg. Decides which side of the trade carries the notional. */
   side: 'buy' | 'sell';
+  /** The pool's DECLARED fee, in hundredths of a basis point, from its own pool key. */
+  fee: number;
   /** The pool's observed swaps, in chain order, at quote time. */
   ticks: PoolTick[];
 }
@@ -141,21 +185,20 @@ export function quote(p: QuoteParams): QuoteResult {
     throw new Error(`linear quote is not a usable number (${linear}); refusing to quote`);
   }
 
-  const depth = poolDepth(p.ticks);
-  if (depth === null) {
-    throw new Error(`pool has fewer than ${IMPACT_MIN_OBSERVATIONS} usable consecutive `
-      + `swaps (${p.ticks.length} ticks); its depth cannot be measured and this quote `
-      + 'will NOT fall back to the linear one that caused 11 of 12 reverts');
-  }
-
   /*
-   * THE NOTIONAL IS THE PRICING-ASSET SIDE OF OUR OWN TRADE.
-   * On a buy we spend it, so it is `amountIn`. On a sell we receive it, so the linear
-   * output is the best available estimate of it — a first-order correction, which is
-   * what this whole term is.
+   * THE FEE, FIRST AND EXACTLY. Taken off every swap before any curve arithmetic, and
+   * stated in the pool key, so it needs no observation and admits no estimate.
    */
-  const ourNotional = p.side === 'buy' ? Number(p.amountIn) : linear;
-  const impactFraction = depth.impactPerNotional * ourNotional;
+  if (!Number.isFinite(p.fee) || p.fee < 0 || p.fee >= FEE_DENOMINATOR) {
+    throw new Error(`pool fee ${p.fee} is not a usable fraction of ${FEE_DENOMINATOR}; `
+      + 'refusing to quote rather than assuming a tier');
+  }
+  const feeFraction = p.fee / FEE_DENOMINATOR;
+
+  const depth = poolDepth(p.ticks);
+  const impactFraction = depth === null
+    ? 0
+    : depth.impactPerNotional * (p.side === 'buy' ? Number(p.amountIn) : linear);
 
   if (!Number.isFinite(impactFraction) || impactFraction < 0) {
     throw new Error(`impact is not a usable number (${impactFraction}); refusing to quote`);
@@ -166,14 +209,16 @@ export function quote(p: QuoteParams): QuoteResult {
       + 'would be a plausible value on an error path rather than an answer');
   }
 
-  const out = BigInt(Math.floor(linear * (1 - impactFraction)));
+  const out = BigInt(Math.floor(linear * (1 - feeFraction) * (1 - impactFraction)));
   if (out <= 0n) {
-    throw new Error(`impact-corrected quote rounds to ${out}; refusing to bound it`);
+    throw new Error(`corrected quote rounds to ${out}; refusing to bound it`);
   }
   return {
     expectedOut: out,
     linearOut: BigInt(Math.floor(linear)),
+    feeFraction,
     impactFraction,
+    basis: depth === null ? 'fee-only' : 'fee+impact',
     depth,
   };
 }

@@ -97,6 +97,7 @@ async function main(): Promise<void> {
     let oldWouldClear = 0; let newWouldClear = 0; let compared = 0;
     let revOldClear = 0; let revNewClear = 0; let revCompared = 0;
     const impacts: number[] = [];
+    const byBasis: Record<string, number> = {};
     const detail: Array<Record<string, unknown>> = [];
 
     for (const r of rows.rows) {
@@ -136,10 +137,15 @@ async function main(): Promise<void> {
       /* ---- the two quotes ---- */
       const linear = BigInt(Math.floor(Number(size) * rate));
       let newQuoted: bigint | null = null; let impactFrac = 0; let refusal = '';
+      let basis = 'refused'; let feeFrac = 0;
       try {
-        const q = quote({ amountIn: size, rateOutPerIn: rate, side: 'buy', ticks });
+        const q = quote({
+          amountIn: size, rateOutPerIn: rate, side: 'buy', fee: r.fee, ticks,
+        });
         newQuoted = q.expectedOut; impactFrac = q.impactFraction;
-        impacts.push(q.impactFraction);
+        basis = q.basis; feeFrac = q.feeFraction;
+        if (q.basis === 'fee+impact') impacts.push(q.impactFraction);
+        byBasis[q.basis] = (byBasis[q.basis] ?? 0) + 1;
       } catch (e) {
         refusal = (e as Error).message.slice(0, 90);
         if (refusal.includes('fewer than')) refusedFewTicks += 1; else refusedImpact += 1;
@@ -199,6 +205,7 @@ async function main(): Promise<void> {
       }
       detail.push({
         trade: r.id, status: r.status, ticks: ticks.length,
+        fee_pct: (feeFrac * 100).toFixed(4), basis,
         impact_pct: newQuoted === null ? null : (impactFrac * 100).toFixed(2),
         linear: linear.toString(), corrected: newQuoted?.toString() ?? 'REFUSED',
         actual: actual.toString(),
@@ -237,7 +244,10 @@ async function main(): Promise<void> {
       },
     });
     log.info('3. WHAT THE CORRECTION COSTS', {
-      refused_too_few_observations: refusedFewTicks,
+      quotes_by_basis: byBasis,
+      note: 'fee-only means the pool had fewer than the minimum consecutive swaps, so '
+        + 'the EXACT fee term applied and impact was not measurable. It is not a refusal.',
+      refused_outright: refusedFewTicks + refusedImpact,
       min_observations_required: IMPACT_MIN_OBSERVATIONS,
       refused_impact_at_or_above_100pct: refusedImpact,
       no_ground_truth_available: noTruth,
