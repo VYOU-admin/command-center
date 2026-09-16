@@ -55,23 +55,27 @@ STATUS              BUILT, DRY RUN ONLY. It cannot broadcast: no private key is
                     eth_sendRawTransaction and every signing method BY NAME.
 mode                dry-run (the only mode that exists)
 first dry run       2026-09-16, 65 minutes, 24 hypothetical trades recorded
-wallet address      0x4Cc7aF1CB1D0d12b0DDaD35b39f00ea28e0F0d4A  (supplied by the
+wallet address      0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a  (supplied by the
                     operator 2026-09-16; ADDRESS ONLY -- no key, no signing path)
-wallet balance      ZERO, READ FROM THE CHAIN 2026-09-16 through readWalletState.
-                    native 0 wei, WETH 0, USDG 0, nonce 0, code 0x (plain EOA).
-                    chainId confirmed 0x1237 = 4663. A control read of the v4
-                    PoolManager returned 20,097 ETH through the same path, so the
-                    zero is this address and not the reader.
-                    THE ~$24 THE OPERATOR STATED IS NOT ON THIS CHAIN AT THIS
-                    ADDRESS. Nonce 0 means it has never sent a transaction here at
-                    all -- it is unused rather than drained, which points at another
-                    chain, another address, or funds not yet moved.
-arming              REFUSED. $0.00 against MAX_CONCURRENT 5 x $10 = $50 required.
-                    Exit code 3, and the loop never started.
-mode                n/a -- no bot exists
-limits              n/a -- see section 4 for the proposed values
-trades to date      0
-capital approved    $100 total, $10 per position (operator, 2026-09-16)
+wallet balance      $126.73, READ FROM THE CHAIN 2026-09-16 by npm run wallet-probe.
+                    native 52,569,197,952,034,720 wei = 0.05256919795203472 ETH at
+                    ETH/USD 2,410.735 from the chain's own series. WETH 0,
+                    USDG 0.000001 (ONE raw unit of a 6-decimal token -- dust, and
+                    reported rather than rounded to zero). nonce 130, code 0x, a
+                    plain EOA. chainId confirmed 0x1237 = 4663. Control read of the
+                    v4 PoolManager through the identical path: 19,964.71 ETH,
+                    1,757.92 WETH, 42,536,952.25 USDG -- the reader works.
+arming              PASSES BOTH. $126.73 against MAX_CONCURRENT 5 x $10 = $50
+                    required, and against the $100 MAX_DEPLOYED_USD cap. The boot
+                    path armed for the first time on 2026-09-16 (mode
+                    dry-run-capgate) -- every earlier run either had no wallet or
+                    refused, so the ALLOW direction had never been observed.
+mode                dry-run only. Five runs to date; see section 6.
+limits              the six rails of section 4, all enforced in bot/rails.ts and
+                    all exercised by npm run rail-drill (24 of 24)
+trades to date      0 REAL. 107 hypothetical rows across every dry-run mode.
+capital approved    $100 total, $10 per position (operator, 2026-09-16), and since
+                    2026-09-16 ENFORCED as MAX_DEPLOYED_USD rather than stated here
 ```
 
 **Nothing in this repository has ever written to a chain.** Verified 2026-09-16:
@@ -1750,10 +1754,191 @@ directions; see category A above.
 impact median needs, against 2 of 34 last run. **Across 66 live trades the impact term
 has now fired twice.** The exact fee term carries the entire correction in practice.
 
+### THE WALLET ADDRESS WAS WRONG, AND EVERY FIGURE TAKEN AGAINST IT WAS TRUE OF NOBODY — 2026-09-16
+
+**The address this document carried, `0x4Cc7aF1CB1D0d12b0DDaD35b39f00ea28e0F0d4A`, was
+not the operator's.** It was a placeholder that reached section 0 as though it had been
+supplied, and everything measured against it — `native 0 wei, WETH 0, USDG 0, nonce 0`,
+the refusal to arm, the conclusion that *"the ~$24 the operator stated is not on this
+chain at this address"* — was a correct reading of an address nobody owns. The real
+address is **`0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a`**.
+
+**THIS IS THE FABRICATED-CONSTANT FAILURE FOR THE THIRD TIME ON THIS PROJECT, AND THE
+SECOND TIME WITH AN ADDRESS.** `ROBINHOOD.md` records a made-up `Transfer` topic hash
+that matched zero logs across 100,000 blocks and read as a clean sweep; section 6 above
+records a launchpad address whose last twenty-eight characters were invented and which
+rejected every launch as "not in the list". **A wrong address does not error. It returns
+a perfectly well-formed answer about somewhere else**, and here that answer was zero —
+the single most plausible value a wallet can hold, and the one this document had already
+built a whole refusal path around.
+
+**WHAT THE CONTROL READ DID AND DID NOT BUY.** The previous read was careful in the way
+this project asks for: it proved the READER worked, by reading the PoolManager through the
+same path and getting 20,097 ETH. That check was sound and it passed, and it could never
+have caught this — **a control proves the instrument, not the subject.** Nothing in a
+balance read can tell you that you are pointed at the wrong wallet, and the only thing
+that would have is the operator reading the address back, which is what happened.
+
+**THE `nonce 0` WAS THE TELL AND IT WAS READ THE WRONG WAY ROUND.** The old address had
+never transacted on this chain, and that was written down as *"unused rather than drained,
+which points at another chain, another address, or funds not yet moved"* — the right list
+of possibilities with the likeliest one, *another address*, treated as an aside. **The
+real wallet has nonce 130.** An address the operator uses has a transaction history; an
+address with none is more likely to be the wrong address than an untouched one.
+
+#### WHAT IT ACTUALLY HOLDS
+
+```
+npm run wallet-probe -- --address 0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a
+516 CU = $0.00023
+
+chainId       0x1237 = 4663, CONFIRMED BEFORE ANY BALANCE WAS READ
+native        52,569,197,952,034,720 wei = 0.05256919795203472 ETH
+              x $2,410.735 (native_usd_prices, the chain's own series) = $126.73
+WETH          0
+USDG          0.000001   <- ONE raw unit of a 6-decimal token. Dust, and it is
+                            reported rather than rounded away: a null and a zero
+                            and a dust balance are three different facts.
+nonce         130        <- it HAS transacted on this chain
+code          0x         -> plain EOA
+CONTROL, same path, v4 PoolManager: 19,964.71 ETH, 1,757.92 WETH, 42,536,952.25 USDG
+```
+
+**THE OPERATOR'S STATED "~$24" IS STILL NOT WHAT IS THERE, and it is now wrong in the
+other direction** — $126.73 against ~$24. That figure has never been a measurement and is
+not treated as one; the chain is the authority and the chain says $126.73.
+
+#### THE READ NOW HAS CODE BEHIND IT, WHICH IT DID NOT BEFORE
+
+**`readWalletState` reads the native balance and nothing else.** The WETH, USDG, nonce and
+code figures section 0 carried came from queries typed by hand at the time and were not
+reproducible from anything in the repository — which is how a wrong address survives in a
+document: there is nothing to re-run. `npm run wallet-probe` is now the committed path,
+it performs the control read every time rather than only when the answer is inconvenient,
+and it finishes by calling **the real `readWalletState`** so the arming verdict is not a
+second implementation of the gate.
+
+**`balanceOf`'s selector is COMPUTED with keccak, not typed.** Four bytes feel too small
+to get wrong, and a wrong selector returns `0x` — which is exactly the value this file
+exists to distinguish from a real zero.
+
+#### ARMING, AGAINST BOTH LIMITS
+
+| | | |
+|---|---|---|
+| balance | **$126.73** | read from the chain |
+| MAX_CONCURRENT 5 x $10 | $50 required | **PASSES**, 2.5x over |
+| MAX_DEPLOYED_USD | $100 cap | **PASSES**, the balance covers the whole cap |
+
+**THE ALLOW DIRECTION OF THE ARMING GATE HAD NEVER RUN, AND NOW HAS.** Every previous boot
+either had no wallet configured or refused with exit code 3, so the gate was proved in one
+direction only — and this document's own standard is that a rail tested in one direction
+is half a rail. Booted on the real address as mode `dry-run-capgate`:
+
+```
+WALLET BALANCE, READ FROM THE CHAIN  balance_usd 126.73  required_usd 50
+                                     can_arm TRUE  max_deployed_usd 100  covers_cap TRUE
+launchbot starting  mode dry-run-capgate   <- the line that never printed before
+12 ticks, 9 initializes, 9 candidates, 0 qualified, 1,645 CU = $0.00074 for 1 minute
+VERIFIED ON A FRESH CONNECTION: simulated 0, rows in this mode 0, rows_not_stored 0
+```
+
+**Zero qualified in a minute is the rule being selective, not a fault** — run 4 qualified
+32 of 443 candidates over 95 minutes, and nine candidates is well inside the gap.
+
+### THE HARD CAPITAL CAP, AND IT IS EXERCISED — 2026-09-16
+
+`MAX_DEPLOYED_USD = 100`. The specification, the quantity it bounds and the reasoning are
+in section 4; this is what running it proved.
+
+**IT EXISTS BECAUSE THE BALANCE GATE HAS NO UPPER SIDE.** The wallet reads $126.73 today
+and the gate's whole question is whether it covers $50. **Nothing in the bot bounded the
+other direction** — the "$100 capital approved" line in section 0 was a sentence in a
+document, enforced by no code, and a wallet that grew to $5,000 would have passed the same
+gate with a factor of a hundred to spare. This is the operator's personal wallet and the
+bot is entitled to a stated amount of it, not to whatever happens to be in it.
+
+**IT CANNOT BIND ON THE LIVE PATH TODAY AND THAT IS STATED UP FRONT.** `MAX_CONCURRENT 5 x
+$10 = $50` of open basis plus `MAX_DAILY_LOSS_USD $15` caps deployed capital at **$65**,
+so one of those two fires first every time. **The cap is a backstop against those being
+raised** — which makes it precisely the kind of rail that gets written wrong and never
+noticed, and precisely the kind this document says must be tripped deliberately.
+
+#### THE DRILL: 24 of 24, AND EIGHT OF THEM ARE THE NEW RAIL
+
+`npm run rail-drill -- --commit`, on `chain='drill'` so nothing it does can touch the live
+dry run. **Every cap case holds FOUR positions, one below `MAX_CONCURRENT`, so the cap is
+the only rail that can fire** — otherwise a case would pass its BLOCK expectation while
+testing concurrency. The cap admits while `deployed + $10 <= $100`, so $90 deployed is the
+last admissible state:
+
+```
+PASS  $85 deployed (one below)                                    ALLOW
+PASS  $90 deployed (the LAST admissible trade)                    ALLOW
+PASS  $91 deployed (at the rail)                                  BLOCK
+        MAX_DEPLOYED_USD: $91.00 deployed (open basis $91.00 + realised losses $0.00)
+                          + $10 = $101.00 > $100
+PASS  $79 open + $11 of realised losses = $90                     ALLOW
+PASS  $80 open + $11 of realised losses = $91                     BLOCK   <- THE LOSS TERM
+PASS  $91 deployed WITH a +$50 profitable day                     BLOCK   <- NO HEADROOM
+PASS  an open position with a NULL position_usd                   BLOCK   <- UNKNOWN
+        MAX_DEPLOYED_USD: deployed capital is UNKNOWN -- 1 open position(s) carry a
+                          null position_usd, which sum() would silently treat as $0
+```
+
+**THE LOSS CASES USE $11, WHICH IS BELOW `MAX_DAILY_LOSS_USD`'S $15, DELIBERATELY.** A
+$31 loss would have breached the cap and the daily-loss rail together, and the case would
+have passed its expectation while proving nothing about which rail fired. Choosing the
+loss so that only one rail can fire is what makes it a test of the loss TERM rather than
+of the loss RAIL.
+
+**THE PROFIT CASE IS NOT DECORATION, FOR THE SAME REASON THE DAILY-LOSS DRILL'S IS NOT.**
+`max(0, −pnl)` and `−pnl` differ only on a profitable day, and the wrong one hands a bot
+that made $50 in the morning an extra $50 of the operator's wallet in the afternoon.
+
+**THE NULL CASE IS THE ONE THAT WOULD HAVE SHIPPED SILENTLY.** `sum(position_usd)` skips a
+null, so an open position of unknown size contributes $0 and the cap reports headroom it
+does not have. That is this project's most-recorded failure shape — the `balanceOf` reader
+that turned 490 HTTP 429s into plausible zero balances — arriving inside the rail written
+to prevent over-exposure. It is counted separately and refuses.
+
+#### HALT OR SKIP: THE TWO TERMS BEHAVE DIFFERENTLY AND THE RAIL SAYS SO
+
+A breached cap is not one condition. **Open basis clears by itself** — positions close,
+deployed falls, the next launch is admissible — so that SKIPS, like concurrency.
+**Realised losses never fall within a day**, so if the loss term alone leaves no room,
+every further candidate for hours would re-run the same refusal; that HALTS, exactly as
+`MAX_DAILY_LOSS_USD` does. An unknown basis halts too: it is a defect in stored state, not
+a capacity condition. `deployedCapIsTerminal` is the one place that distinction lives, and
+it was exercised as a pure function because the halting branch needs $90 of losses, which
+`MAX_DAILY_LOSS_USD` makes unreachable through the database:
+
+```
+PASS  cap breached by OPEN BASIS alone           halts=false   deployed $100.00
+PASS  cap breached with an $11 loss              halts=false   deployed $111.00
+PASS  LOSSES ALONE leave no room ($100 lost)     halts=TRUE
+PASS  an UNKNOWN basis                           halts=TRUE
+```
+
+#### WHAT THE DRILL CHANGED IN ITSELF
+
+**Its `seed()` wrote every row with a NULL `position_usd`**, which was harmless until the
+cap existed and then made *every* case block on "deployed is UNKNOWN" — so the
+`MAX_CONCURRENT at 5` case would have gone on passing its BLOCK expectation while
+testing the wrong rail entirely. **A case that blocks for the wrong reason passes.** Open
+rows now carry a real basis unless the case is specifically about its absence.
+
+**Cleanup verified from a SEPARATE PROCESS on a fresh connection**, not from the drill's
+own report: `bot_trades` on `chain='drill'` **0**, `bot_control` **0**. And on the live
+chain, **0 open rows and 0 open rows with a null `position_usd`** — so the new unknown-basis
+branch cannot block the running dry run.
+
 ## 7. Rules here the code does not implement
 
-**CATEGORY A IS CLOSED EXCEPT FOR ONE ITEM THAT NEEDS THE OPERATOR.** Section 6 records
-each with the evidence.
+**CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
+evidence. Closing it does not make the bot live: there is still no signing path, no
+private key is read anywhere, and every figure in this document is a simulation — see
+category C.
 
 ### A. Would lose money on the first live trade
 
@@ -1765,15 +1950,19 @@ each with the evidence.
 - ~~The exit's `minOut` comes from the entry quote~~ — **CLOSED.** Every attempt
   re-quotes from the pool's state at exit time, through the one executor the boot path
   also uses.
-- **STILL OPEN — THE WALLET IS EMPTY.** The address was supplied on 2026-09-16 and its
-  balance was read through the real arming gate: **0 wei native, 0 WETH, 0 USDG, nonce
-  0, plain EOA**, on chainId 4663 confirmed, with a control read proving the path works.
-  The gate did exactly what it is for — **refused to arm, exit code 3, loop never
-  started**. Nonce 0 means the address has never transacted on this chain, so the ~$24
-  is elsewhere: another chain, another address, or not yet moved. **This is not a code
-  defect and nothing here can fix it.** The bot cannot go live until the address holds
-  at least `MAX_CONCURRENT × MAX_POSITION_USD` = $50, or the rails are changed to risk
-  less.
+- ~~The wallet is empty~~ — **CLOSED, AND IT WAS THE WRONG ADDRESS.** The address this
+  document carried was a placeholder, not the operator's; the real one is
+  `0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a` and it holds **$126.73** —
+  0.05256919795203472 ETH, nonce 130, plain EOA, chainId 4663 confirmed, with a control
+  read on the same path. **Arming passes against both limits**, the $50 requirement and
+  the $100 cap, and the boot path armed for the first time. The earlier "0 wei, nonce 0"
+  was a correct reading of an address nobody owns — see section 6.
+- **NEW, AND CLOSED IN THE SAME PASS — nothing bounded total exposure.**
+  `MAX_DEPLOYED_USD = 100` now does, enforced in `bot/rails.ts` over the cost basis of
+  open positions plus the day's realised losses, and exercised in both directions
+  including the loss term, the profit case and an unknown basis. **It cannot bind under
+  today's other rails** — they cap deployed capital at $65 — so it is a backstop, which
+  is why it was tripped deliberately rather than waited for.
 
 ### B. Unmeasured, so no figure here is a profit figure
 
@@ -1812,6 +2001,18 @@ each with the evidence.
   +450 s is exactly 0.00000 in every window and both halves. Unresolved.
 - **The stored `hooks` values are one byte short** on rows written before that decoder
   was fixed. Deterministic, so grouping is unaffected.
+- **`MAX_DEPLOYED_USD` CANNOT BIND ON THE LIVE PATH AS THE RAILS STAND.** `MAX_CONCURRENT
+  5 x $10` of open basis plus `MAX_DAILY_LOSS_USD $15` caps deployed capital at **$65**
+  against a $100 cap, so one of those two always fires first. It is a backstop against
+  those being raised and is exercised only in `rail-drill`, which constructs states the
+  live path cannot reach. **Its HALTING branch needs $90 of realised losses**, which
+  `MAX_DAILY_LOSS_USD` makes unreachable, so that branch is proved as a pure function and
+  has never run against the database.
+- **The balance and the cap are now the same size, which hides a distinction.** The wallet
+  reads $126.73 against a $100 cap, so both the $50 gate and the cap pass comfortably and
+  neither constrains the other. **A wallet between $50 and $100 is the case that separates
+  them** — it may legitimately arm and trade, because the other rails bound deployed
+  capital at $65 — and nothing has exercised it.
 
 ### The fee bound could not be derived from `v4_pool_creator`, because that table's scope is fee-filtered
 
