@@ -13,6 +13,7 @@ import type { Pool } from '../store/db.js';
 import { getMonitorStates, getRecentRuns } from '../store/registry.js';
 import { escapeHtml, renderDashboard } from './views.js';
 import { renderWatchlistPage } from './watchlist-page.js';
+import { renderTradesPage } from './trades-page.js';
 import { renderTokensPage, type ChainGroup, type TokenGroup, type TokenIngest, type TokenPrice,
   type WalletRow, type WindowRow } from './tokens-page.js';
 
@@ -275,6 +276,83 @@ export function createWebServer(opts: WebServerOptions): Server {
      * the total matching count is shown beside it. A silent truncation would read as
      * "that is all that happened".
      */
+    /*
+     * /trades -- what the launch bot did, or would have done.
+     *
+     * TOTALS ARE COMPUTED PER MODE AND NEVER SUMMED ACROSS MODES. A dry-run gain and a
+     * live gain are different quantities; adding them produces a number true of nothing.
+     * A MALFORMED filter is treated as NO filter, never as an error -- a filter that
+     * silently matches nothing is the failure shape this project keeps hitting.
+     */
+    if (path === '/trades') {
+      try {
+        const CAP = 500;
+        const qMode = url.searchParams.get('mode');
+        const qPad = url.searchParams.get('launchpad');
+        /* A malformed filter is NO filter, never an error. */
+        const mode = qMode && /^[a-z-]{1,16}$/.test(qMode) ? qMode : null;
+        const pad = qPad && /^0x[0-9a-fA-F]{40}$/.test(qPad) ? qPad.toLowerCase() : null;
+        const where: string[] = ['chain = $1'];
+        const params: unknown[] = ['robinhood'];
+        if (mode) { params.push(mode); where.push(`mode = $${params.length}`); }
+        if (pad) { params.push(pad); where.push(`lower(launchpad) = $${params.length}`); }
+        const clause = where.join(' and ');
+        const [rowsQ, totQ, cntQ, modeQ, padQ] = await Promise.all([
+          pool.query(
+            'select id::text as id, mode, created_at, pool_id, token, launchpad, fee, '
+            + 'position_usd::float8 as position_usd, entry_price::float8 as entry_price, '
+            + 'exit_price::float8 as exit_price, gross_return::float8 as gross_return, '
+            + 'gas_usd::float8 as gas_usd, net_pnl_usd::float8 as net_pnl_usd, '
+            + 'fill_status, status from bot_trades where ' + clause
+            + ' order by created_at desc limit ' + String(CAP), params),
+          pool.query(
+            'select mode, count(*)::int as trades, '
+            + 'count(*) filter (where net_pnl_usd > 0)::int as wins, '
+            + 'coalesce(sum(net_pnl_usd),0)::float8 as net, '
+            + 'coalesce(sum(gas_usd),0)::float8 as gas '
+            + 'from bot_trades where ' + clause + ' group by mode order by mode', params),
+          pool.query('select count(*)::int as n from bot_trades where ' + clause, params),
+          pool.query("select distinct mode from bot_trades where chain = 'robinhood' order by 1"),
+          pool.query('select lower(launchpad) as addr, count(*)::int as n from bot_trades '
+            + "where chain = 'robinhood' and launchpad is not null "
+            + 'group by 1 order by 2 desc limit 25'),
+        ]);
+        const html = renderTradesPage({
+          rows: rowsQ.rows.map((r: Record<string, unknown>) => ({
+            id: String(r['id']), mode: String(r['mode']),
+            createdAt: new Date(r['created_at'] as string).toISOString(),
+            poolId: String(r['pool_id']), token: String(r['token']),
+            launchpad: (r['launchpad'] as string | null) ?? null,
+            fee: (r['fee'] as number | null) ?? null,
+            positionUsd: (r['position_usd'] as number | null) ?? null,
+            entryPrice: (r['entry_price'] as number | null) ?? null,
+            exitPrice: (r['exit_price'] as number | null) ?? null,
+            grossReturn: (r['gross_return'] as number | null) ?? null,
+            gasUsd: (r['gas_usd'] as number | null) ?? null,
+            netPnlUsd: (r['net_pnl_usd'] as number | null) ?? null,
+            fillStatus: (r['fill_status'] as string | null) ?? null,
+            status: String(r['status']),
+          })),
+          totals: totQ.rows.map((t: Record<string, unknown>) => ({
+            mode: String(t['mode']), trades: Number(t['trades']), wins: Number(t['wins']),
+            netPnl: Number(t['net']), gas: Number(t['gas']),
+          })),
+          shown: rowsQ.rowCount ?? 0,
+          total: Number((cntQ.rows[0] as Record<string, unknown>)['n']),
+          modes: modeQ.rows.map((m: Record<string, unknown>) => String(m['mode'])),
+          launchpads: padQ.rows.map((l: Record<string, unknown>) =>
+            ({ addr: String(l['addr']), n: Number(l['n']) })),
+          filterMode: mode, filterLaunchpad: pad, cap: CAP,
+        });
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } catch (err) {
+        log.error('trades page failed', errorFields(err));
+        res.writeHead(500); res.end('trades page failed');
+      }
+      return;
+    }
+
     if (path === '/watchlist') {
       const q = url.searchParams;
       const rawToken = (q.get('token') ?? '').trim().toLowerCase();
