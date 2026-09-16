@@ -205,7 +205,7 @@ async function main(): Promise<void> {
       }
       detail.push({
         trade: r.id, status: r.status, ticks: ticks.length,
-        fee_pct: (feeFrac * 100).toFixed(4), basis,
+        fee_tier: r.fee, fee_pct: (feeFrac * 100).toFixed(4), basis,
         impact_pct: newQuoted === null ? null : (impactFrac * 100).toFixed(2),
         linear: linear.toString(), corrected: newQuoted?.toString() ?? 'REFUSED',
         actual: actual.toString(),
@@ -257,6 +257,29 @@ async function main(): Promise<void> {
         p90_pct: (pct(impacts, 0.9) * 100).toFixed(2),
         max_pct: (Math.max(...impacts) * 100).toFixed(2),
       },
+    });
+    /*
+     * WHERE THE REMAINING OVER-QUOTE LIVES. If the fee term were double-counting, the
+     * high-fee tier would now UNDER-quote while the low-fee tier still over-quoted.
+     * Splitting by tier is the cheapest way to tell a missing term from a doubled one.
+     */
+    const byTier: Record<string, { n: number; old: number[]; neu: number[] }> = {};
+    for (const d0 of detail) {
+      const f = String(d0['fee_tier'] ?? 'unknown');
+      const o = d0['old_over_actual']; const nw = d0['new_over_actual'];
+      if (typeof o !== 'string') continue;
+      byTier[f] ??= { n: 0, old: [], neu: [] };
+      byTier[f]!.n += 1; byTier[f]!.old.push(Number(o));
+      if (typeof nw === 'string') byTier[f]!.neu.push(Number(nw));
+    }
+    log.info('OVER-QUOTE BY FEE TIER, before and after the fee term', {
+      note: 'a tier that now sits BELOW 1.0 would mean the fee is double-counted; one '
+        + 'still above it means a term is still missing.',
+      tiers: Object.entries(byTier).map(([f, v]) => ({
+        fee: f, n: v.n,
+        old_median: v.old.length ? pct(v.old, 0.5).toFixed(4) : 'n/a',
+        new_median: v.neu.length ? pct(v.neu, 0.5).toFixed(4) : 'n/a',
+      })),
     });
     log.info('PER-TRADE DETAIL', { detail });
   } finally { c.release(); }
