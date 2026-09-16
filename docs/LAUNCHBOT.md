@@ -1296,54 +1296,237 @@ median gross return of +16%, where the old p75 of 60.7% was four times above it.
 last rung is for the first time an economically coherent rescue rather than a pure
 damage limit.**
 
+### THIRD DRY RUN — 2026-09-16, 95 minutes, live launches
+
+The first run under the +90 s horizon, the corrected quote and the re-derived ladder.
+
+```
+ticks 1,108   initializes 658   candidates 516   qualified 34
+simulated 34  simClean 23   simReverted 11        skippedRail 0
+exitClean 8   exitReverted 26   exitNotAttempted 0
+quoteRefused 0   quoteReadFailed 0
+quoteBasis  fee-only 32   fee+impact 2
+156,872 CU = $0.07059     exit_delay_blocks 900 (the new +90 s)
+```
+
+**THE RAIL DID NOT CAP THE SAMPLE. `skippedRail: 0`**, against 19 blocked launches in
+run 2. The run used mode `dry-run-r3` so `MAX_TRADES_PER_DAY` counted its own budget,
+which is the remedy section 7 had recorded and rule 3 made a defect in the code. **34
+trades over 95 minutes is a full run, not a truncated one**, and it reached 34 of its
+40-trade budget without touching it.
+
+#### THE REVERT RATE DID NOT MOVE, EXACTLY AS THE QUOTE CHECK PREDICTED
+
+| run | horizon | quote | n | reverted | rate |
+|---|---|---|---|---|---|
+| 1 | +30 s | linear | 24 | 7 | **29.2%** |
+| 2 | +30 s | linear | 16 | 5 | **31.3%** |
+| **3** | **+90 s** | **fee + impact** | **34** | **11** | **32.4%** |
+
+**The quote fix did not move the revert rate**, which `quote-check` predicted before the
+run — 4 of 11 recorded reverts would clear under either quote. The prediction holding is
+worth as much as the number: the offline measurement and the live run agree.
+
+**THE CAUSE IS UNCHANGED AND IS STILL OURS.** Decoding all 23 reverts across the three
+runs: **18 `V4TooLittleReceived` — our own bound — and 5 bare reverts with no payload.**
+The shortfall distribution across all of them is min 1.015, p25 1.092, median 1.199,
+p75 2.543, p90 13.70.
+
+**By fee tier, run 3:**
+
+| fee | n | entry clean | entry revert | exit clean |
+|---|---|---|---|---|
+| 500 | 22 | 18 | 4 (18%) | 8 |
+| 10000 | 10 | 5 | **5 (50%)** | **0** |
+| 100 | 2 | 0 | **2 (100%)** | 0 |
+
+The 1% tier reverts at 50% against the 0.05% tier's 18%, and **not one of its ten
+exits simulated clean**. That is a tier-level split the allow-list does not make, and it
+is n=10 — recorded as something to watch, not acted on.
+
+#### THE IMPACT TERM IS NEARLY DEAD IN THE LIVE LOOP
+
+**`fee-only 32, fee+impact 2`.** At the entry moment — +15 s after a pool's first swap —
+almost no pool has the four consecutive swaps the impact median needs. The term that
+took the most work is active on **6% of trades**, and the exact fee term carries
+essentially all of the correction in practice. It is kept because the 2 where it did
+fire are exactly the pools where our size is the problem, and because one historical
+pool measured a 47.4% impact — but its practical contribution is near zero and saying so
+is more useful than the effort implies.
+
+`quoteRefused: 0` and `quoteReadFailed: 0` — the refusal paths did not fire at all, so
+they remain untested against live data.
+
+#### THE EXIT LEG GOT WORSE, NOT BETTER: 26 OF 34 REVERTED
+
+Against run 2's 14 of 16. Section 6 already establishes that this figure is dominated by
+the borrowed fixture's approvals rather than by the pool — 9 of run 2's 14 had neither
+approval — and nothing in this run changes that confound. **It is not evidence the exit
+is failing more; it is the same unmeasurable quantity measured again on a larger sample.**
+
+#### THE EXIT GRID AT THE NEW +90 s HORIZON
+
+`nightly-check`, over all 71 trades with a full window elapsed, exit-availability beside
+every median as required:
+
+| horizon | n | exit found | median | % positive |
+|---|---|---|---|---|
+| +15 s | 71 | 64 | 0.209 | 88.7% |
+| +30 s (the OLD rule) | 71 | 63 | 0.258 | 87.3% |
+| +45 s | 71 | 62 | 0.317 | 87.3% |
+| +60 s | 71 | 61 | 0.337 | 85.9% |
+| **+90 s (CONFIGURED)** | 71 | **60** | **0.374** | 84.5% |
+| +120 s | 71 | 59 | 0.410 | 83.1% |
+| +180 s | 71 | 55 | 0.606 | 77.5% |
+| +300 s | 71 | 43 | 0.646 | 59.2% |
+| +450 s | 71 | 41 | **0.710** | 56.3% |
+| +600 s | 71 | 25 | **0.000** | 35.2% |
+
+**The change is vindicated on the bot's own trades: +90 s (0.374) against the old
++30 s (0.258).** Exit-availability falls only 63 → 60 across that move, so the gain is
+not bought by giving up the ability to sell.
+
+**The nightly check did NOT alert**, and both thresholds are why: the margin to the best
+cell (+450 s) is 0.336 and material against the 0.25 threshold, but the sample is 71
+against a 140 minimum. **A material margin on an insufficient sample is exactly the case
+the minimum exists for**, and it is the first time both conditions have been exercised in
+opposite directions on one run.
+
+The +450 s peak here disagrees with the offline holdout, where +450 s is **exactly
+0.00000 in every window and both halves**. 71 trades from one afternoon do not overturn
+12,624 holdout launches, and the disagreement is recorded rather than resolved.
+
+#### THE FULL ROUND TRIP, ON A $10 POSITION
+
+| component | cost | provenance |
+|---|---|---|
+| LP fee, both legs | **$0.0654** | run 3's own fee mix, weighted: 0.654% round trip |
+| slippage, both legs | ~$0.026 | 0.26% at $10, measured from realised impact (SELLOFF) |
+| gas: buy + sell | $0.071–$0.084 | 200 real receipts per era |
+| gas: two approvals | $0.015 | ERC-20 → Permit2 and Permit2 → router, $0.00751 each |
+| RPC, per trade | $0.0021 | 156,872 CU / 34 trades |
+| **total** | **$0.179 – $0.192** | **1.8%–1.9% of a $10 position** |
+
+**Costs are not the binding constraint.** Against a median gross of +0.374 at +90 s on
+the bot's own trades, or +0.157–0.180 in the recent-era holdout, a 1.9% round trip is
+noise. **The binding constraints are the 32.4% revert rate and exit availability**, not
+the money a completed trade costs.
+
+**RPC for the run: 156,872 CU = $0.07059 for 95 minutes = $1.07/day**, consistent with
+run 1's $1.11/day. The per-candidate tick read the corrected quote needs did not move it
+materially, because it is charged only on the 34 qualifying launches rather than on all
+516 candidates.
+
+#### `/trades` ANNOUNCED LIVE TRADES OVER A DRY RUN, AND MY VERIFIER PASSED IT
+
+The run label introduced mode `dry-run-r3`. The page's dry-run test was
+`mode === 'dry-run'`, an exact string match, so 34 hypothetical rows were banded
+**"THIS PAGE CONTAINS LIVE TRADES"** and chipped red. The banner exists for exactly one
+reason — so nobody reads a dry run as real money a week later — and it said the opposite.
+
+**The verifier passed it, which is the worse half.** It asserted the banner *states a
+mode*, not that it states the *correct* one: presence rather than truth. It now fails
+when every row is a dry-run mode and the banner claims live, and when any dry-run row is
+chipped live. Both checks were confirmed to FAIL against the unfixed page before the fix
+deployed, so they are known to be able to fail.
+
+`isDryRunMode` is the one predicate, used by the banner, the totals blocks and the row
+chips, so those three cannot disagree. Re-verified in a DOM after the fix: **74 rendered
+= 74 claimed, 2 mode blocks never summed, 17 of 17 checks pass.**
+
+#### A BUILD THAT NEVER STARTED, AND THE DEPLOYMENT LIST IS WHAT FOUND IT
+
+The push carrying the banner fix was rejected once with `remote: fatal error in
+commit_refs`, landed on retry — and **started no build**. `git ls-remote` showed the
+commit on the remote while the container sat on its predecessor for eight minutes.
+`ROBINHOOD.md` says to check the deployment list at ~3x rather than wait; the list's
+newest entry named the previous commit, so nothing was building. An empty commit
+re-triggered it and it deployed in under two minutes. **A webhook that did not fire and
+a slow build are indistinguishable from inside the container.**
+
+#### A CONTAINER REPLACEMENT DESTROYED THE FIRST ATTEMPT AT THIS RUN
+
+The 95-minute run was launched, and 13 seconds later the container was replaced —
+deployment `cfec4c06` → `20559cbc`, pid 1 restarting at 18:38:03 — taking the process
+and `/app/run3.log` with it. I had polled for a *new* deployment id and launched against
+the first one that appeared, which was itself about to be superseded. `ROBINHOOD.md`
+records this exact shape: *a check that read the top row passed against the previous
+deployment because the new one did not exist yet.*
+
+**The relaunch waited for the id to be STABLE across three reads sixty seconds apart,
+and confirmed `RAILWAY_GIT_COMMIT_SHA` equalled local HEAD and that the built files
+carried `EXIT_DELAY_BLOCKS = 90` and `BOUND_BPS: [300, 449, 608, 1343]`** before
+starting. Cost of the lost attempt: about 25 seconds of compute units.
+
 ## 7. Rules here the code does not implement
 
-The four items that stood here on 2026-09-16 are all closed, and section 6 records how.
-What follows is what is open now.
+**CLOSED SINCE THE LAST PASS:** the exit horizon (changed to +90 s on holdout evidence),
+the quote's missing term (the fee, now applied; the impact term added and measured), the
+retry ladder's stale calibration (re-derived), and `MAX_TRADES_PER_DAY` truncating a test
+run (a dry-run-only run label). Section 6 records each.
 
-- **The exit is executed against a price the bot never checks.** The exit leg is now
-  simulated (section 6), but only at entry time and only from someone else's balance.
-  Nothing re-quotes the pool at +30s to decide whether the bound still makes sense, and
-  `minOut` for the sell is computed from the entry quote. In a pool that moved 80% in
-  30 seconds — the median in the grid above — that bound is far from the market.
-- **`EXIT_DELAY_BLOCKS` is the worst of the four measured horizons** on the bot's own
-  launches, and has deliberately not been changed. It needs a window not yet touched
-  before it moves. Changing it on the 22 rows that suggested it would be fitting the
-  rule to the sample that produced it.
-- **The gas cost of a trade is not measured anywhere.** `gas_usd` is null on every row.
-  A +20% median return on a $10 position is $2, and nothing in this document establishes
-  that the round trip costs less than that. Until it does, no return figure here is a
-  profit figure.
-- **`fill_status` is always the literal 'dry-run'.** Nothing models whether the entry
-  would actually have filled at the quoted price against competing buyers in the same
-  block, so every return in section 6 assumes a fill that a live bot would have to win.
-- **Boot reconciliation resolves a stuck position to `needs_exit` and nothing acts on
-  it.** No code path sells a `needs_exit` row. In dry run that is correct; before a live
-  mode it is the most dangerous gap in this document, because it is the state a
-  container replacement actually produces.
-- **The exit leg has never been simulated from a wallet with our own approvals.** The
-  only figure that is about the pool rather than the fixture is 2 clean against 5
-  reverted, n=7. Until a wallet exists that holds a token and both approvals, the exit's
-  success rate is unmeasured, and no return in section 6 should be read as achievable.
-- **`MAX_TRADES_PER_DAY` counts calendar days in the database's timezone**, so two runs
-  in one afternoon share a budget. That is correct for a risk limit and wrong for a test
-  harness; the second dry run was truncated to 16 trades by it. A drill mode that runs
-  against a separate `mode` value would avoid this without weakening the rail.
-- **`expectedOut` HAS NO PRICE-IMPACT TERM, AND THAT IS THE LARGEST KNOWN DEFECT IN THE
-  BOT.** It extrapolates the pool's first realised trade price linearly to our $10.
-  11 of 12 decoded reverts are the router refusing our own bound because of it, with a
-  median overstatement of 1.22x and a p90 of 13.7x. Widening the bound treats the
-  symptom; the quote is the cause. Fixing it changes what the bot believes a trade is
-  worth, which is a definition and an operator's call.
-- **The exit retry is implemented and NOT WIRED INTO THE DRY-RUN LOOP.** `bot/exit.ts`
-  and its drill exist and pass; `launchbot.ts` still simulates a single exit attempt.
-  Wiring it needs a live exit to retry, which dry-run does not have.
-- **The exit horizon is beaten in 6 of 6 window×half combinations and has not been
-  changed.** The robust band is 90–180 s; the exact point is unresolved at n≈700. The
-  nightly check will alert when the bot's own trades reach 140.
-- **`bot_horizon_prices` accumulates and nothing prunes it.** Ten rows per trade. At 40
-  trades a day that is 146,000 rows a year, which is nothing, but no removal path exists
-  and `ROBINHOOD.md` records that every derived table needs one.
+**WHAT IS OPEN NOW. This list is the pre-live gate and is grouped by what it would cost
+to be wrong.**
+
+### A. Would lose money on the first live trade
+
+- **NO CODE PATH SELLS A `needs_exit` ROW.** Boot reconciliation correctly identifies a
+  position whose buy landed and whose sell did not, marks it, and then nothing acts. In
+  dry run that is right; live it is the single most dangerous gap in this document,
+  because a container replacement mid-trade is the state this project has already
+  produced twice and it is exactly what leaves an unsellable bag.
+- **The exit retry is implemented, drilled, and NOT WIRED INTO THE LOOP.** `bot/exit.ts`
+  passes 12 of 12 including a real revert against a live pool; `launchbot.ts` still
+  simulates one exit attempt and never calls it. The ladder exists and is not used.
+- **NO WALLET EXISTS.** No address is configured, no balance has been read from the
+  chain by any code here, and the $24 the operator states is unverified. Every rail that
+  depends on a balance is therefore untested against a real one.
+- **The exit's `minOut` is computed from the ENTRY quote.** Nothing re-quotes the pool
+  at +90 s. On a pool whose median move over that window is +37%, the sell's bound is
+  derived from a price that is 90 seconds stale — and the entry quote is itself the one
+  measured to over-quote by 2–3%.
+
+### B. Unmeasured, so no figure here is a profit figure
+
+- **A 2–3% RESIDUAL OVER-QUOTE IS BOUNDED AND NOT IDENTIFIED.** The fee explains part,
+  the measured impact explains 0.17%, and 2–3% remains on every real tier. Our 300 bps
+  bound sits exactly on top of it, which is the revert mechanism. Until the residual is
+  identified the revert rate cannot be moved deliberately.
+- **`gas_usd` is null on every row.** The round trip is costed in section 6 from
+  external measurements, not from this bot's own trades, and no row carries what it
+  actually paid.
+- **`fill_status` is always the literal `dry-run`.** Nothing models whether our entry
+  would have won against competing buyers in the same block. Every return assumes a fill
+  a live bot must beat somebody to.
+- **The exit leg's success rate is unmeasured.** 26 of 34 reverted in run 3, but that
+  figure is dominated by the borrowed fixture's approvals rather than by the pool. The
+  only figure that is about the pool is 2 clean against 5 reverted, n=7.
+- **The 1% fee tier reverted 5 of 10 and exited clean 0 of 10 in run 3.** A tier-level
+  split the allow-list does not make, at n=10. Watch it; do not act on it.
+
+### C. Paths that exist and have never executed
+
+- **`quoteRefused` and `quoteReadFailed` are both 0 across every run.** The quote's two
+  refusal branches — too few observations, impact at or above 100% — have never fired
+  against live data.
+- **The impact term fires on 6% of trades** (`fee-only 32, fee+impact 2`). At entry a
+  pool almost never has four consecutive swaps, so the term that took the most work is
+  nearly inert in practice.
+- **The nightly check has never sent an alert.** Its thresholds have now been exercised
+  in opposite directions — a material 0.336 margin on an insufficient 71-trade sample —
+  but the delivery path itself is unexercised.
+- **`MAX_CONCURRENT` and `MAX_DAILY_LOSS_USD` have never bound in a live run**, only in
+  the drill. Dry run holds no position and realises no loss, so neither can.
+
+### D. Structural, and stated so they are not rediscovered
+
+- **`bot_horizon_prices` accumulates and nothing prunes it.** Ten rows per trade, and no
+  removal path, which `ROBINHOOD.md` requires of every derived table.
+- **The +450 s peak on the bot's own 71 trades contradicts the offline holdout**, where
+  +450 s is exactly 0.00000 in every window and both halves. Unresolved.
+- **The stored `hooks` values are one byte short** on rows written before that decoder
+  was fixed, inherited from `ROBINHOOD.md`. Deterministic, so grouping is unaffected, but
+  two hooks differing only in their first byte would collide.
 
 ### The fee bound could not be derived from `v4_pool_creator`, because that table's scope is fee-filtered
 
