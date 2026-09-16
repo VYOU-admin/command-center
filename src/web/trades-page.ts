@@ -29,6 +29,15 @@ export interface TradeRow {
   exitSimStatus: string | null;
   px30s: number | null; px300s: number | null;
 }
+/**
+ * THE ONE PREDICATE for "is this mode hypothetical". Exported so a test can exercise it
+ * and so no caller re-implements it as an equality check, which is how the banner came
+ * to announce live trades over a dry run.
+ */
+export function isDryRunMode(mode: string): boolean {
+  return mode === 'dry-run' || mode.startsWith('dry-run-');
+}
+
 export interface TradeTotals {
   mode: string; trades: number; wins: number; netPnl: number; gas: number;
 }
@@ -56,7 +65,20 @@ export function renderTradesPage(args: {
     ? '<span class="nul">—</span>'
     : `<span class="${x >= 0 ? 'up' : 'down'}">${x >= 0 ? '+' : '−'}${esc(num(Math.abs(x) * 100, 1))}%</span>`);
 
-  const anyLive = totals.some((t) => t.mode !== 'dry-run' && t.trades > 0);
+  /*
+   * A MODE IS A DRY RUN WHEN IT STARTS WITH 'dry-run', NOT WHEN IT EQUALS IT.
+   *
+   * This was an exact-string test, and the moment `launchbot` gained a run label the
+   * mode `dry-run-r3` stopped matching — so the page announced **"THIS PAGE CONTAINS
+   * LIVE TRADES"** over 34 hypothetical rows. The banner exists precisely so nobody
+   * reads a dry run as real money, and it said the opposite.
+   *
+   * `launchbot` guarantees the prefix: the label is a SUFFIX on the literal 'dry-run'
+   * and cannot replace it, so a prefix test is sound rather than lenient. The ONE
+   * predicate lives here and is used by the banner, the totals blocks and every row
+   * chip, so those three can never disagree about what a mode is.
+   */
+  const anyLive = totals.some((t) => !isDryRunMode(t.mode) && t.trades > 0);
   const banner = anyLive
     ? `<div class="banner live">THIS PAGE CONTAINS LIVE TRADES. Totals are shown per mode
        and are never summed across modes.</div>`
@@ -65,7 +87,7 @@ export function renderTradesPage(args: {
        This build has no signing path.</div>`;
 
   const totalsHtml = totals.map((t) => `
-    <div class="tot ${t.mode === 'dry-run' ? 'dry' : 'live'}">
+    <div class="tot ${isDryRunMode(t.mode) ? 'dry' : 'live'}">
       <div class="totmode">${esc(t.mode)}</div>
       <div class="totgrid">
         <div><span>net pnl</span><b>${money(t.netPnl)}</b></div>
@@ -80,7 +102,7 @@ export function renderTradesPage(args: {
     : rows.map((r) => `
       <tr>
         <td class="t">${esc(r.createdAt.replace('T', ' ').slice(0, 19))}Z</td>
-        <td><span class="mode ${r.mode === 'dry-run' ? 'dry' : 'live'}">${esc(r.mode)}</span></td>
+        <td><span class="mode ${isDryRunMode(r.mode) ? 'dry' : 'live'}">${esc(r.mode)}</span></td>
         <td><a href="${chart(r.token)}" target="_blank" rel="noopener noreferrer"
                title="${esc(r.token)}">${esc(short(r.token))}</a></td>
         <td>${r.launchpad

@@ -56,6 +56,9 @@ async function load(path) {
     priceCellsZero: [...d.querySelectorAll('table tbody tr td.n')]
       .filter((x) => /^0(\.0+)?$/.test(x.textContent.trim())).length,
     nulls: d.querySelectorAll('td .nul').length,
+    rowModes: dataRows.map((r) => r.querySelector('.mode')?.textContent?.trim() ?? ''),
+    bannerSaysLive: /LIVE TRADES/i.test(d.querySelector('.banner')?.textContent ?? ''),
+    liveChips: [...d.querySelectorAll('td .mode.live')].map((x) => x.textContent.trim()),
   };
 }
 
@@ -153,6 +156,22 @@ if (all.priceCellsZero === 0) ok('no numeric cell renders a bare zero');
 else fail(`${all.priceCellsZero} numeric cells render 0, which must be a dash if unobserved`);
 
 console.log(`  (em dashes on the page: ${all.nulls})`);
+
+/* ---- THE BANNER MUST NOT CLAIM LIVE MONEY OVER A DRY RUN --------------- */
+console.log('\nmode labelling is CORRECT, not merely present');
+const dry = (m) => m === 'dry-run' || m.startsWith('dry-run-');
+const allDry = all.rowModes.length > 0 && all.rowModes.every(dry);
+if (allDry && all.bannerSaysLive) {
+  fail(`every row is a dry-run mode (${[...new Set(all.rowModes)].join(', ')}) but the `
+    + 'banner announces LIVE TRADES — the label is not merely missing, it is WRONG');
+} else if (allDry) {
+  ok(`all ${all.rowModes.length} rows are dry-run modes and the banner does not claim live`);
+} else {
+  ok(`page carries non-dry-run modes: ${[...new Set(all.rowModes.filter((m) => !dry(m)))].join(', ')}`);
+}
+const wrongChips = all.liveChips.filter(dry);
+if (wrongChips.length === 0) ok('no dry-run row is chipped as live');
+else fail(`${wrongChips.length} dry-run rows are chipped as live: ${[...new Set(wrongChips)].join(', ')}`);
 
 console.log(failures === 0 ? '\nverify-trades-page: PASS' : `\nverify-trades-page: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
