@@ -162,7 +162,10 @@ async function main(): Promise<void> {
         await c.query(
           `insert into v4_swap_tx
              (chain,side,tx_hash,pool_id,win,tx_to,tx_from,value_wei,selector,input_len,input)
-           values ($11,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           /* $11 is the side and belongs in the SECOND column. Written as ($11,$1,...)
+            * it put the chain in side and the side in chain, which no type check
+            * catches because both are text. */
+           values ($1,$11,$2,$3,$4,$5,$6,$7,$8,$9,$10)
            on conflict (chain,tx_hash) do nothing`,
           [chain, r.tx_hash, r.pool_id, r.win, tx.to ? tx.to.toLowerCase() : null,
             tx.from.toLowerCase(), BigInt(tx.value ?? '0x0').toString(),
