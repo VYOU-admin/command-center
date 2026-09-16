@@ -7136,6 +7136,85 @@ a longer job depends on it.
 
 **Still gross of gas and slippage**, neither of which is stored.
 
+#### BAD DAY OR REGIME CHANGE, AND WHAT A TRADE COSTS — 2026-09-16
+
+**THE DECAY IS STRUCTURAL AND THE SELLOFF WAS NOT THE CAUSE.** A second 1M-block window
+was swept from a calm period, chosen on the chain's own ETH/USD series before any return
+was looked at: **60,700,000–61,700,000, +0.14% drift and 1.38% peak-to-trough**, the
+flattest stretch available between the corpus ceiling and the recent window, against the
+selloff window's **−4.06% drift and 5.32%**.
+
+| | HOLDOUT-ERA | CALM | SELLOFF |
+|---|---|---|---|
+| launches | 150,791 | 6,717 | 5,016 |
+| base median return | 0.00000 | 0.00000 | 0.00000 |
+| `fee=10000` n · surv · median | 21,657 · 49.1% · **+0.278** | 851 · **21.2%** · **0.00000** | 892 · 46.4% · +0.066 |
+| `fee=500` n · surv · median | 1,665 · 92.8% · +0.235 | 116 · 56.9% · **+0.289** | 474 · 39.9% · +0.126 |
+| `fee=2500` surv · median | 29.6% · 0.00000 | 78.9% · 0.00000 | 83.1% · 0.00000 |
+| **RULE** share · surv · median | 14.66% · 56.6% · **+0.298** | **3.33%** · 44.6% · +0.226 | 10.83% · 51.6% · +0.134 |
+
+**`fee=10000` carried 93% of the holdout rule's population and is DEAD in the calm
+window** — median exactly 0.00000 on 851 pools, survival 21.2% against 49.1%. It cannot
+be the selloff, because the calm window precedes it. **The rule still shows +0.226 there
+only because `fee=500` took over**, and the rule now selects 3.33% of launches against
+14.66%. Market conditions add a second, smaller effect on top: +0.226 calm against +0.134
+selloff.
+
+#### SLIPPAGE, MEASURED FROM REALISED IMPACT — AND THINNESS IS NOT THE RECENT PROBLEM
+
+Reserves are stored nowhere and a v4 pool has no contract, so this is measured from the
+chain rather than read or assumed: every stored swap is a trade of known size that moved
+the price by a known amount. Observed trade sizes are **median $86 (holdout-era), $275
+(calm), $238 (selloff)** with 282,119 / 759 / 2,309 trades under $10, so quoting $10–$100
+is a SHORT extrapolation inside the observed range rather than a guess.
+
+**Median round-trip slippage, both legs:**
+
+| position | HOLDOUT-ERA | CALM | SELLOFF |
+|---|---|---|---|
+| $10 | 0.519% | 0.201% | 0.258% |
+| $50 | 2.595% | 1.003% | 1.292% |
+| $100 | 5.191% | 2.005% | 2.584% |
+
+**Corpus-era pools were 2–2.6x THINNER per dollar than recent ones.** Thin pools are not
+a recent phenomenon and the direction is the opposite of what was expected.
+
+**Gas, from 200 real receipts per era, never assumed** — median per leg $0.0109 /
+$0.0405 / $0.0279, so a round trip is **$0.0219 / $0.0809 / $0.0557**.
+
+**NET OF EVERYTHING, over ALL rule pools with no-fill counted as zero:**
+
+| | HOLDOUT-ERA | CALM | SELLOFF |
+|---|---|---|---|
+| $10 median · p25 · p75 | **+0.243** · 0.006 · 0.467 | **+0.163** · 0.000 · 0.285 | **+0.075** · 0.000 · 0.258 |
+| $100 median · p25 · p75 | **+0.194** · 0.000 · 0.413 | **+0.150** · 0.000 · 0.255 | **+0.059** · 0.000 · 0.225 |
+
+**The 25th percentile is 0.00000 in every window at $100**, which is the no-fill and
+dead-pool mass showing through. **Half the decay survives full costing and half does
+not.**
+
+**A SLIPPAGE BUG NEARLY REPORTED THE STRATEGY AS FREE.** The first run took the TOKEN
+side as the counter — the price expression one line above was correct, which is what let
+it pass — valuing trades at a median of **$201 billion**, collapsing impact-per-dollar to
+`0.00000000`, and reporting round-trip slippage as **0.00000 at $10, $50 and $100 alike**.
+A cost of exactly nothing is a plausible value on an error path, and it was caught only
+because $201 billion is not a plausible trade size.
+
+#### HOW OFTEN IT FIRES
+
+| | HOLDOUT-ERA | CALM | SELLOFF |
+|---|---|---|---|
+| pools created per day | 9,607 | **20,422** | 16,236 |
+| rule-qualifying per day | **697.6** | **200.8** | **485.8** |
+| no-fill rate | 16.75% | 20.54% | 21.77% |
+| busiest 4 hours hold | 19.9% | 34.8% | 30.6% |
+
+**Pool creation has more than doubled while rule-qualifying launches per day have
+fallen**, which is the composition shift again. A uniform hourly distribution would put
+16.7% in any four hours, so the clustering is mild rather than a four-hour trading day.
+
+**Still gross of nothing now except the risk that these windows are 28 hours each.**
+
 ## 9. Rules here the code does not implement
 
 - **FIXED 2026-09-15 — the cohort phase now derives, PRINTS and ENFORCES its work set
