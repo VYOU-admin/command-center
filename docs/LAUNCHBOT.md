@@ -891,6 +891,258 @@ Note also that the +30s column has a **positive worst case in both runs** — ac
 launches there was no cell where exiting at +30s lost money. That is weak evidence the
 exit is safe and no evidence at all that it is optimal, which remains the honest reading.
 
+### THE EXIT HORIZON, ON THE PRE-COMMITTED HOLDOUT — 2026-09-16
+
+Both dry runs put the configured +30 s last of four horizons. That was 36 launches from
+one afternoon. This settles it properly.
+
+**THE SPLIT IS THE ONE `launch-search.ts` FIXED BEFORE ANY HYPOTHESIS WAS FORMED** —
+first hex character of `md5(pool_id)`, `0`-`7` search, `8`-`f` holdout — now extracted
+into `bot/holdout.ts` so a second implementation cannot bucket pools differently and
+still call its result a holdout. Ten horizons out to +600 s, entry at +15 s, every
+launch in `ALLOWED_FEES` with a gap of 11–600 blocks, across all four swept windows.
+Zero CU.
+
+**Pooled, 12,782 search against 12,624 holdout:**
+
+| horizon | SEARCH median | HOLDOUT median | exit found (holdout) | median GIVEN an exit |
+|---|---|---|---|---|
+| +15 s | 0.118 | 0.120 | 84.3% | 0.163 |
+| **+30 s (configured)** | **0.242** | **0.249** | 81.8% | 0.320 |
+| +45 s | 0.316 | 0.318 | 76.4% | 0.435 |
+| +60 s | 0.393 | 0.394 | 74.2% | 0.567 |
+| +90 s | 0.560 | 0.565 | 70.9% | 0.845 |
+| +120 s | 0.660 | 0.662 | 67.9% | 1.054 |
+| **+180 s** | **0.674** | **0.676** | 62.3% | 1.380 |
+| +300 s | 0.425 | 0.476 | 55.2% | 1.793 |
+| +450 s | 0.000 | 0.000 | 47.8% | 2.072 |
+| +600 s | 0.000 | 0.000 | 30.1% | 2.089 |
+
+**The holdout reproduced the search half cell for cell** — every horizon within ~0.005,
+the same peak, margin +0.427 against +0.432. The survivor is **+180 s**.
+
+**THE TWO COLUMNS MUST BE READ TOGETHER AND THAT IS WHY BOTH ARE THERE.** `median given
+an exit` rises monotonically all the way to +600 s (2.09) — waiting always improves the
+price. `exit found` falls from 84% to 30% — waiting steadily removes the chance of
+selling at all. The peak of the median over EVERY launch is where those two cross, and
+past +300 s the no-exit zeros take the median entirely.
+
+#### THE POOLED NUMBER IS THE CORPUS ERA, AND THE CORPUS IS THE ANOMALY
+
+94.5% of that population is the corpus window, which `ROBINHOOD.md` establishes as the
+outlier. Restricted to the three post-corpus windows — 707 search, 689 holdout:
+
+| horizon | SEARCH | HOLDOUT |
+|---|---|---|
+| +30 s | 0.057 | 0.060 |
+| +90 s | **0.157** | 0.157 |
+| +120 s | 0.155 | 0.171 |
+| +180 s | 0.080 | **0.180** |
+
+**The two halves disagree about the peak: search says +90 s, holdout says +180 s.** At
+n≈700 the ranking inside the 90–180 s plateau is not resolved, and saying otherwise
+would be reading noise.
+
+#### PER WINDOW, BOTH HALVES — WHICH IS WHERE THE ROBUST ANSWER IS
+
+| window | half | +30 s | +90 s | +180 s | +300 s |
+|---|---|---|---|---|---|
+| MIDPOINT (n≈242) | search / holdout | 0.000 / 0.001 | 0.022 / 0.008 | 0.002 / 0.000 | 0 / 0 |
+| CALM (n≈142) | search / holdout | 0.164 / 0.202 | **0.268 / 0.323** | 0.092 / 0.339 | 0 / 0 |
+| SELLOFF (n≈313) | search / holdout | 0.104 / 0.089 | 0.204 / 0.199 | **0.296 / 0.372** | 0.000 / 0.369 |
+
+**+90 s beats +30 s in 6 of 6 window×half combinations. +180 s beats it in 4 of 6**,
+failing in MIDPOINT (both halves) and CALM (search only). **The robust statement is
+that the configured +30 s is beaten everywhere by something in the 90–180 s band; the
+exact point inside that band is not established.**
+
+#### THE FAILURES, WHICH ARE MOST OF THE GRID
+
+- **+450 s and +600 s are exactly 0.00000 in every era and every half.** More than half
+  of launches have no trade to exit into by then, and the zeros own the median.
+- **+300 s is 0.00000 in all three recent windows** while reading +0.425/+0.476 pooled.
+  It survives only on corpus-era pools.
+- **MIDPOINT is flat at every horizon** — 0.000 to 0.022 across the whole grid, both
+  halves. The rule barely functions in that window at all, and no exit horizon rescues
+  it. A horizon change is not a fix for a window where the entry has no edge.
+- **The magnitude does not transfer between eras.** +180 s is +0.676 pooled and +0.180
+  in the recent holdout — a factor of nearly four. Only the ORDERING transfers.
+
+#### TWO DEFECTS THIS GRID FOUND IN ITSELF
+
+**The longest horizon could never fill.** The first run loaded ticks to exactly +600 s
+and then asked the +600 s horizon for a trade strictly after +600 s. There is none by
+construction, so the cell reported `exit_found: 0` and a median of exactly 0.00000 — my
+own boundary presented as a market result. `ROBINHOOD.md` records the identical shape in
+`surv_1h`. Ticks now run 300 s past the longest horizon, derived from the measured
+median exit fill delay of 1.1–4.5 s, and the censoring bound moves with them.
+
+**The exit could re-select the entry tick.** On a quiet pool the entry fills LATER than
+an early horizon mark, and a plain `off > mark` would then return the entry trade itself
+and report a return of exactly 0 — which looks like an ordinary flat result, not a
+defect. The exit is now strictly after BOTH the mark and the entry fill.
+
+**`EXIT_DELAY_BLOCKS` HAS NOT BEEN CHANGED.** The operator decides.
+
+### WHY A THIRD OF TRADES REVERT: IT IS OUR OWN SLIPPAGE BOUND — 2026-09-16
+
+The revert rate did not move when the fee allow-list went in, so the cause was still
+unknown. `npm run revert-decode` re-simulates each failed entry at the block we would
+have traded and captures the revert payload `RpcClient` discards when it turns the
+response into an Error. 12 trades, 1,524 CU, $0.00069.
+
+**THE CAUSES CLUSTER ON ONE FIELD:**
+
+```
+11x  V4TooLittleReceived(uint256,uint256)   <- our own amountOutMinimum
+ 1x  empty revert payload (0x), no reason
+```
+
+**`0x8b063d73` was identified by computing keccak of candidate signatures**, not by
+lookup — `ROBINHOOD.md` records a fabricated hash shipping here once. `0x5bf6f916`,
+returned by every at-head replay, is `TransactionDeadlinePassed()`: the stored deadline
+was `now + 300 s` during the dry run, which confirms the at-head column says nothing
+and the historical block is the right question.
+
+**THE ERROR STATES WHAT BOUND WOULD HAVE CLEARED**, and the distribution is the finding:
+
+| | min | p25 | median | p75 | p90 | max |
+|---|---|---|---|---|---|---|
+| our bound / what the pool would pay | 1.015 | 1.041 | 1.225 | 2.543 | 13.70 | 31.71 |
+| implied one-leg slippage needed | 1.49% | 3.90% | **18.35%** | 60.7% | 92.7% | 96.85% |
+
+**This is not a bound that is slightly too tight. It is bimodal.** A quarter of the
+rejections are marginal — 1.5% to 3.9%, just outside our 3% — and the rest are pools
+where our quote is wrong by a multiple.
+
+**THE ROOT CAUSE IS THE QUOTE, NOT THE BOUND.** `expectedOut` takes the realised price
+of the pool's FIRST swap and extrapolates it linearly to our $10, with **no price-impact
+term anywhere**. On a pool whose first trade was a few dollars, a $10 buy moves the
+price far more than that extrapolation admits, and the router correctly refuses. Every
+tier and both launchpads are represented among the 11, so this is not a property of any
+launchpad — it is a property of our own arithmetic.
+
+**Widening the bound therefore cannot be the whole answer**, and the measured
+distribution says so: a bound that rescued the median would be accepting an 18.35%
+haircut against a measured median gross return of +16% (recent era). **It is recorded
+here and the quote is NOT yet fixed** — that is a change to what the bot believes a
+trade is worth, which is a definition.
+
+### EXIT RETRY: A LADDER THAT IS THE MEASURED QUANTILES — 2026-09-16
+
+An exit that reverts and is abandoned leaves the bot holding a token it cannot sell,
+which is the worst outcome available to it. `bot/exit.ts` is the one implementation.
+
+| attempt | bound | provenance |
+|---|---|---|
+| 1 | 300 bps | the configured bound — p90 round-trip slippage at $10 plus three ticks of drift |
+| 2 | 400 bps | the measured **p25** shortfall, 3.90%, rounded up |
+| 3 | 1,835 bps | the measured **median** shortfall — half of all observed rejections clear here |
+| 4 | 6,070 bps | the measured **p75** shortfall — the last rung worth climbing |
+
+**IT STOPS AT THE p75 DELIBERATELY.** The p90 shortfall is 92.7%, indistinguishable from
+giving the tokens away, and the measured median gross return means any bound past the
+p75 guarantees a loss larger than the position's whole expected gain. **A rung that can
+only turn a small loss into a total one is not a rescue.**
+
+**THE INTERVAL IS 5 SECONDS**, from the measured median exit fill delay of 1.1–4.5 s
+across all ten horizons: long enough that a new trade has landed and the quote has
+genuinely moved, so a retry is a fresh attempt rather than the same one repeated. Four
+attempts complete within ~15 s.
+
+**EVERY ATTEMPT RE-QUOTES, EVERY ATTEMPT IS RECORDED BEFORE THE NEXT BEGINS, AND
+EXHAUSTION RAISES** — it does not return a status a caller may ignore, because the
+position is still open and a status field eventually gets unchecked.
+
+**n IS 11.** That is a thin base for a four-rung ladder and it is stated rather than
+buried. These are a first schedule to be re-derived from logged live exits.
+
+#### THE DRILL — 12 of 12, INCLUDING A REAL REVERT AGAINST A LIVE POOL
+
+`npm run exit-retry-drill -- --commit`. The forced failure uses the **measured** median
+quote optimism of 1.2248, not a round number, so the early rungs fail for exactly the
+reason the ladder was built for.
+
+```
+PASS  the ladder is the measured quantiles, in order        300,400,1835,6070
+PASS  a rung past the measured data RAISES
+PASS  an unquotable pool RAISES rather than selling blind
+PASS  a bound that zeroes minOut RAISES
+PASS  a first-attempt success stops the ladder
+PASS  two failures then a fill reports the rung that worked  filled on 3
+PASS  the widening bound is applied per attempt              300,400,1835
+PASS  EXHAUSTION RAISES rather than returning a status
+PASS  every attempt was recorded before the raise            4 recorded
+PASS  the raise says the position is still open
+PASS  a REAL V4TooLittleReceived was produced against a live pool
+```
+
+**The live half is the one worth reading, and its result is not the happy one:**
+
+```
+#1 @300bps  failed — V4TooLittleReceived bound=29760802800000 actual=0
+#2 @400bps  failed — V4TooLittleReceived bound=29453990400000 actual=0
+#3 @1835bps failed — V4TooLittleReceived bound=25051232460000 actual=0
+#4 @6070bps failed — V4TooLittleReceived bound=12057727320000 actual=0
+outcome: RAISED — EXIT EXHAUSTED, THE POSITION IS STILL OPEN
+```
+
+**`actual = 0` at every rung. The pool would pay NOTHING**, so no bound could ever have
+rescued it, and the ladder exhausted and raised rather than widening toward zero. That
+is the correct behaviour and it is also the limit of what a retry can do: **a retry
+ladder rescues a mispriced quote, not a dead pool.** The tokens in that fixture are
+unsellable at any bound, and the honest response is to be loud about it.
+
+**A DEFECT THE DRILL FOUND IN ITSELF.** Its first version priced the fixture from a swap
+in the last 200,000 blocks; the fixture pool — a dead launch, which is what most of
+these are — had none, so the live half reported `NOT RUN`. Honest and useless: the whole
+point is that a retry path nobody has exercised is not a retry path. It now prices from
+the trade's own stored `px_entry`, and a holder who no longer holds the token raises
+rather than running a test whose premise is false.
+
+### THE NIGHTLY CHECK IS ADAPTIVE, AND IT RECOMMENDS ONLY — 2026-09-16
+
+`npm run nightly-check` backfills the price at EVERY horizon for every trade the bot
+took and reports which horizon would have been best. **It never writes
+`EXIT_DELAY_BLOCKS`.** A rule that rewrites its own parameters will chase noise into a
+bad regime with nobody able to say when it changed — and this project has the evidence:
+the fee-tier rule was measured at +0.298, decayed to +0.145 within ten days, and nothing
+in the data announced it. A bot re-fitting itself nightly would have followed that decay
+down without a line in any log.
+
+**THE TWO THRESHOLDS ARE DERIVED FROM THE HOLDOUT STUDY ABOVE, not chosen:**
+
+- **Minimum sample 140.** The two halves agreed on the direction in 6 of 6 window×half
+  combinations, and the smallest per-window sample where they still agreed is CALM at
+  **141 holdout / 144 search**. Below that they start disagreeing about which horizon
+  wins. **At `MAX_TRADES_PER_DAY = 40` a single day can never reach it**, so the check
+  accumulates over a trailing window and reports how many days it drew on.
+- **Margin 0.25.** Two independent halves measuring the SAME quantity at that sample
+  size differed by **0.247** (CALM, +180 s: 0.339 against 0.092). That is the
+  measurement's own noise floor, so a smaller margin would fire on disagreement one
+  dataset produces by itself.
+
+**FIRST RUN — the thresholds working in opposite directions, which is the useful case:**
+
+```
+sample 40   min_sample 140   sample_sufficient FALSE
+configured +30s  median 0.19889
+best       +180s median 0.56804     margin 0.36915   threshold 0.25   MATERIAL
+would_alert FALSE      alert_sent FALSE
+backfill 40 trades, 400 horizon rows, 275 filled, 2,400 CU
+```
+
+**The margin IS material and the alert correctly did NOT fire**, because 40 trades is
+below the sample where the offline halves agreed. A check that alerted here would be
+alerting on a third of the evidence it needs.
+
+**THE BOT'S OWN 40 LIVE TRADES INDEPENDENTLY REPRODUCE THE PEAK AT +180 s** — 0.154 /
+0.199 / 0.240 / 0.288 / 0.353 / 0.377 / **0.568** / 0.560 / 0.217 / 0.000 across the ten
+horizons, with exit-availability falling 34 → 14 of 40. That is a third dataset agreeing
+with the corpus holdout and the recent holdout on the ordering. **It is also closer in
+MAGNITUDE to the corpus era than to the recent windows, which is unexplained** and is
+not read as evidence for either.
+
 ## 7. Rules here the code does not implement
 
 The four items that stood here on 2026-09-16 are all closed, and section 6 records how.
@@ -924,6 +1176,21 @@ What follows is what is open now.
   in one afternoon share a budget. That is correct for a risk limit and wrong for a test
   harness; the second dry run was truncated to 16 trades by it. A drill mode that runs
   against a separate `mode` value would avoid this without weakening the rail.
+- **`expectedOut` HAS NO PRICE-IMPACT TERM, AND THAT IS THE LARGEST KNOWN DEFECT IN THE
+  BOT.** It extrapolates the pool's first realised trade price linearly to our $10.
+  11 of 12 decoded reverts are the router refusing our own bound because of it, with a
+  median overstatement of 1.22x and a p90 of 13.7x. Widening the bound treats the
+  symptom; the quote is the cause. Fixing it changes what the bot believes a trade is
+  worth, which is a definition and an operator's call.
+- **The exit retry is implemented and NOT WIRED INTO THE DRY-RUN LOOP.** `bot/exit.ts`
+  and its drill exist and pass; `launchbot.ts` still simulates a single exit attempt.
+  Wiring it needs a live exit to retry, which dry-run does not have.
+- **The exit horizon is beaten in 6 of 6 window×half combinations and has not been
+  changed.** The robust band is 90–180 s; the exact point is unresolved at n≈700. The
+  nightly check will alert when the bot's own trades reach 140.
+- **`bot_horizon_prices` accumulates and nothing prunes it.** Ten rows per trade. At 40
+  trades a day that is 146,000 rows a year, which is nothing, but no removal path exists
+  and `ROBINHOOD.md` records that every derived table needs one.
 
 ### The fee bound could not be derived from `v4_pool_creator`, because that table's scope is fee-filtered
 
