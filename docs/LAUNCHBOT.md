@@ -92,7 +92,10 @@ mode                dry-run by default and five dry runs to date (section 6).
                     line here saying "the only mode that exists"; it was already
                     false and is now merged into this one.
 limits              the six rails of section 4, all enforced in bot/rails.ts and
-                    all exercised by npm run rail-drill (26 of 26)
+                    all exercised by npm run rail-drill (32 of 32)
+kill switch         keyed (chain, mode) since 2026-09-16: AUTOMATIC halts are
+                    mode-scoped, MANUAL halts chain-wide. npm run halt-control
+                    is the operator's side and the only writer of the sentinel.
 slippage bound      1000 bps, changed from 300 on 2026-09-16 on measured
                     evidence -- section 4
 exit retry ladder   [1000, 1343], two rungs, re-derived at the new bound
@@ -895,11 +898,91 @@ database value is editable by anything with a connection.
 **A kill-switch READ FAILURE halts.** An unreachable database is not permission to keep
 trading.
 
-### THE KILL SWITCH IS CHAIN-WIDE, AND IT STAYS THAT WAY — decided 2026-09-16
+### THE KILL SWITCH HAS TWO SCOPES — CHANGED 2026-09-16, operator-approved
 
-**NOTHING WAS CHANGED.** `bot_control` is keyed on `chain` alone, so one row halts every
-mode on `robinhood` — including live. The question is whether that is right, and the answer
-is yes for the reason it exists and no for one specific consequence, so both are recorded.
+| | |
+|---|---|
+| **was** | `bot_control` keyed on `chain`. Every halt chain-wide. |
+| **is** | keyed `(chain, mode)`. **Automatic halts are mode-scoped; manual halts are chain-wide.** |
+| **why** | a dry run holds nothing, so its inability to close a hypothetical position said nothing about live exposure — and stopped live trading anyway. **Demonstrated twice in one afternoon.** |
+
+**THE TWO SCOPES ARE NOT A REFINEMENT OF ONE IDEA. THEY ANSWER DIFFERENT QUESTIONS.** A
+human reaching for the switch wants EVERYTHING to stop and cannot be required to know
+which modes are running — a mode-scoped emergency stop is not an emergency stop. An
+automatic halt is a statement about the run that raised it.
+
+```
+mode = '*'          CHAIN-WIDE. Only `halt-control` writes it. Stops every mode.
+mode = <a mode>     THAT MODE ONLY. What the bot itself raises.
+```
+
+**THE BOT CANNOT RAISE A CHAIN-WIDE HALT, AND `state.halt()` REFUSES THE SENTINEL.** `mode`
+is a REQUIRED parameter rather than one defaulting to `'*'`, because **a default is exactly
+how every automatic halt became chain-wide in the first place** — and making it required
+meant the compiler found all eight call sites instead of silently preserving the old
+behaviour. The refusal is asserted in the drill rather than assumed.
+
+**A CHAIN-WIDE HALT IS CHECKED FIRST AND REPORTED AS SUCH**, so a manual stop is never
+masked by a mode's own row, and a log line says WHICH row stopped the bot:
+`[CHAIN-WIDE] …` against `[mode dry-run-r5] …`.
+
+#### THE MIGRATION IS IDEMPOTENT, WHICH IT HAD TO BE
+
+`BOT_SCHEMA` runs on **every boot**, so `drop constraint` then `add primary key` unguarded
+would fail the second time and take the whole statement — and every boot — with it. The
+swap is guarded on the key's COLUMN COUNT, so the branch is false once the key is already
+`(chain, mode)`: **genuinely idempotent rather than merely surviving.** Verified by running
+the schema three times in succession, exit 0 each time, and the key still reads
+`PRIMARY KEY (chain, mode)`.
+
+**Existing rows backfill to the sentinel** because they WERE chain-wide by construction —
+there was no other kind. The one extant row was already cleared, so the backfill changed
+no behaviour; it only labelled history with the scope it actually had.
+
+#### THE GUARDS DIFFER BY SCOPE, DELIBERATELY
+
+| clearing | guard |
+|---|---|
+| a **MODE**'s automatic halt | **REFUSES while that mode has `needs_exit` rows.** The halt is a statement about an unresolved position; clearing it while the position is unresolved is the failure it exists to prevent. |
+| the **CHAIN-WIDE** manual halt | **no guard, full disclosure.** Releasing a manual stop is the same human's decision as setting it, and a guard would mean an operator who hit the switch could be prevented from releasing it by a condition they had already accepted. It reports everything outstanding per mode instead. |
+
+**Clearing the chain-wide halt does NOT clear a mode's own** — separate rows, cleared
+separately, so releasing the manual stop cannot silently release an unresolved position.
+
+#### 32 of 32 IN THE DRILL, AND THE CASE THAT MATTERS EXPECTS *ALLOW*
+
+`rail-drill` now exercises **two modes**, because a single-mode drill can show that a halt
+blocks and **cannot show the property this change actually bought**:
+
+```
+PASS  AUTOMATIC halt on 'drill' blocks 'drill'                       BLOCK
+PASS  AUTOMATIC halt on 'drill' does NOT block 'drill-other'         ALLOW  <- THE POINT
+PASS  MANUAL chain-wide halt blocks 'drill'                          BLOCK
+PASS  MANUAL chain-wide halt ALSO blocks 'drill-other'               BLOCK
+PASS  a chain-wide halt is REPORTED as chain-wide, not the mode's own BLOCK
+PASS  state.halt() REFUSES the sentinel — the bot cannot stop every mode
+```
+
+#### WHAT CLEARS IT, AND WHO
+
+**`npm run halt-control`** — the operator's side, and the only thing that writes the
+sentinel. `--status` shows every scope with the `needs_exit` rows per mode beside it;
+`--halt-chain`, `--clear-chain` and `--clear-mode` each require a reason so the record
+never goes blank. Dry by default, verified on a fresh connection.
+
+**The bot still cannot clear any halt.** Nothing in `launchbot`'s path clears a row: a
+process that can switch off the thing that switched it off has no kill switch.
+`resolve-unsellable`'s old `--clear-halt` moved here, because with two scopes "clear the
+halt" stopped being one action and keeping a clearer there would have been a second
+implementation of this one.
+
+### THE PREVIOUS DECISION, KEPT BECAUSE THE REASONING IS WHAT CHANGED
+
+**THIS WAS THE 2026-09-16 DECISION TO LEAVE IT ALONE, AND IT WAS SUPERSEDED THE SAME DAY**
+by the change above, once the "one specific consequence" it identified turned out to fire
+twice in an afternoon. It is kept because the reasoning is what the change was built from:
+chain-wide is right for the reason the switch exists and wrong for one consequence, and
+**the resolution was to split the scopes rather than to pick one of them.**
 
 **WHY CHAIN-WIDE IS RIGHT.** The kill switch's whole purpose is *stop everything now, from
 outside, without a deploy*. An operator reaching for it is not in a position to know which
@@ -918,12 +1001,10 @@ hypothetical position is not a statement about live exposure. The correct design
 **manual halts chain-wide, automatic halts scoped to the mode that raised them** — a single
 boolean row keyed on `chain` cannot express both.
 
-**IT WAS NOT CHANGED IN THIS PASS, DELIBERATELY.** The kill switch is an exercised rail —
-`rail-drill` trips it in both directions — and re-keying it is a change to what a tested
-safety mechanism means, which is an operator's decision rather than a side effect of
-building live mode. It is carried in section 7 category D with the proposed fix, and
-section 8 mitigates it procedurally instead: **resolve the stuck rows before the first live
-run**, so the condition cannot arise.
+**IT WAS NOT CHANGED IN THAT PASS, DELIBERATELY** — re-keying an exercised rail is an
+operator's decision rather than a side effect of building live mode. **The operator took
+it the same day**, and the proposed fix recorded here is what was implemented: manual
+halts chain-wide, automatic halts scoped to the mode that raised them.
 
 **WHAT CLEARS IT, AND WHO.** Only a human, from outside the bot, with counts reconciled:
 
@@ -3192,7 +3273,11 @@ category C.
 ### D. Structural, and stated so they are not rediscovered
 
 - **`bot_horizon_prices` and `bot_exit_attempts` accumulate and nothing prunes them.**
-- **AN AUTOMATIC HALT IS CHAIN-WIDE WHEN IT SHOULD BE MODE-SCOPED.** `bot_control` is
+- ~~An automatic halt is chain-wide when it should be mode-scoped~~ — **FIXED 2026-09-16,
+  operator-approved.** `bot_control` is keyed `(chain, mode)`; `state.halt()` refuses the
+  chain-wide sentinel; 32 of 32 in `rail-drill`, including the case that proves one mode's
+  halt leaves another alone. See section 4.
+- **THE SUPERSEDED REASONING, kept because it is what the fix was built from:** `bot_control` is
   keyed on `chain`, which is RIGHT for a manual emergency stop — an operator reaching for
   it cannot be required to name the right mode — and WRONG for the automatic halts, which
   call the same `halt()`. A dry run holds nothing, so its inability to clear a hypothetical
@@ -3238,7 +3323,11 @@ category C.
   template. Noticed, recorded, not chased.
 - **The stored `hooks` values are one byte short** on rows written before that decoder
   was fixed. Deterministic, so grouping is unaffected.
-- **EVERY DRY RUN THAT ENDS WITH AN OPEN POSITION HALTS THE CHAIN AT ITS NEXT BOOT.**
+- ~~Every dry run that ends with an open position halts the CHAIN at its next boot~~ —
+  **CLOSED 2026-09-16 by the scope split.** It now halts ITS OWN MODE, which is correct:
+  that mode does have an unresolved position. Live is untouched. The mechanism below is
+  kept because it is still what happens within a mode, and a dry run left with an open
+  position still needs resolving before that mode will arm again.
   Demonstrated twice on 2026-09-16, the second time within minutes of the first cleanup.
   `reconcileOnBoot` reads the borrowed holder's balance — deliberately, so hypothetical
   positions are not all reported closed — that holder usually still holds, the row becomes
@@ -3351,9 +3440,8 @@ gates; the bot cannot arm and no key exists.
    and the build gate enforces that. **It must be the key for that exact address** — the
    signer refuses if it derives anything else, because every rail, balance read and
    reconciliation is about the configured address.
-2. **A decision on the kill-switch scope** (section 4). Either accept that a dry-run halt
-   can stop live trading and rely on step 1 below, or approve re-keying automatic halts to
-   the mode that raised them. **No code change is proposed without that decision.**
+2. ~~A decision on the kill-switch scope~~ — **TAKEN 2026-09-16.** Automatic halts are
+   mode-scoped, manual halts chain-wide, implemented and drilled 32 of 32.
 
 **A NOTE ON WHERE THE KEY GOES, WHICH IS NOT DECIDED HERE.** `ROBINHOOD.md` records that
 setting a Railway service variable **replaces the container**, so putting a key there while
@@ -3366,7 +3454,7 @@ that should be made before step 3, not during it.
 
 | # | step | what it is | why it is here and not later |
 |---|---|---|---|
-| **1** | **Resolve the 7 stuck rows** | `dry-run-r5`'s `needs_exit` rows, via a boot of that mode or a scoped resolution | the kill switch is chain-wide: leave them and the first live run can be halted by a dry run's failure. Costs nothing and removes a whole class of confusion. |
+| ~~**1**~~ | ~~Resolve the 7 stuck rows~~ | **DONE 2026-09-16** — 137 `closed_unsellable` on proven `actual=0`, the other six `closed_unfilled` by the boot sweep. And the reason it mattered is **gone**: automatic halts are mode-scoped, so a dry run's failure can no longer halt live. | — |
 | ~~**2**~~ | ~~Close `sell-not-broadcast`~~ | **DONE 2026-09-16** — the broadcaster is threaded through `exit-exec` and forwarded by both callers; 10 of 10 in `exit-broadcast-drill`. See 2C. | it was the one remaining code change that had to precede a key, and it is no longer outstanding |
 | **3** | **Supply the key** | `BOT_PRIVATE_KEY`, per the note above | after step 2, so the first thing the signer can be asked to do is already correct |
 | **4** | **Re-run the gates with the key present** | `npm run live-gate-drill` | case 6 becomes vacuous the moment a key exists and the drill SAYS SO. Everything else must still pass, and `--live` must still be refused by the prerequisites. |
