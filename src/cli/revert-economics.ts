@@ -768,6 +768,18 @@ async function main(): Promise<void> {
             + 'position\'s whole expected gain — the rule the 300 bps ladder already used',
           of_the_missed_how_many_have_an_exit: missed.filter(
             (l) => l.ret[CONFIGURED_H] !== null).length,
+          /*
+           * THE INDIVIDUAL LAUNCHES, because a rung decides money and an interpolated
+           * quantile over n=7 is not something to calibrate against. At a wide bound the
+           * quantiles collapse onto duplicates and a duplicate rung is "one attempt
+           * logged twice", which `exitWithRetry`'s own contract forbids.
+           */
+          each_missed_launch: [...missed]
+            .sort((a, b) => critBps(a) - critBps(b))
+            .map((l) => `needs ${critBps(l)}bps  ${l.ret[CONFIGURED_H] === null
+              ? 'NO EXIT AT ALL — a dead pool, no rung can rescue it'
+              : `exit found, return ${(retAt(l, CONFIGURED_H, 0) * 100).toFixed(1)}%`}`
+              + `  [${l.label} trade ${l.key}]`),
         };
       };
       log.info('=== THE RETRY LADDER, RE-DERIVED — at the CURRENT bound ===',
