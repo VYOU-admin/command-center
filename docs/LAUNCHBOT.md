@@ -2635,6 +2635,84 @@ where the entry has no edge** — the identical conclusion the exit-horizon stud
   at a 1,000 bps bound the accepted haircut is up to 10% on top of that, which is inside the
   recent-era median gross and nowhere near it at 3,400.
 
+### LIVE MODE BUILT AND PROVEN OFF — 2026-09-16
+
+The design is section 2A. This is what running it produced, on the deployed container
+carrying commit `a972e78`, verified from `/app/dist` before anything was launched.
+
+**THE STATIC GATE, over the deployed source:** 135 files, 2 permitted comment mentions,
+every rule confined, `PASS`, exit 0. **And it is known to be able to fail** — a probe file
+containing `process.env['BOT_PRIVATE_KEY']` made it exit 1 naming the file and line, and
+removing it passed again.
+
+**THE RUNTIME DRILL: 20 of 20**, `BOT_PRIVATE_KEY` not set, so the no-key case is a real
+demonstration rather than a vacuous one — which the drill reports either way.
+
+**`launchbot --live` ON THE REAL CONTAINER, exit code 1:**
+
+```
+WARN  LIVE MODE REQUESTED   mode=live
+      the explicit flag was passed. Every gate below must clear before anything can be
+      signed, and no key exists in this build.
+ERROR REFUSING TO ARM IN LIVE MODE: 4 prerequisite(s) outstanding.
+  1. [sell-not-broadcast] ... a live BUY with a simulated SELL opens real positions the
+     bot cannot close ...
+  2. [approvals-not-executed] ...
+launchbot --live EXIT=1
+```
+
+**It refused BEFORE reading a balance, reconciling a row or spending a compute unit** —
+the live gate is ordered first in the boot sequence for exactly that reason.
+
+**AND THE ENV VAR RAISES RATHER THAN BEING IGNORED**, which was the requirement that live
+can never be enabled by a variable alone:
+
+```
+BOT_LIVE=1 node dist/cli/launchbot.js --minutes 1   ->  EXIT=1
+   "BOT_LIVE is set to "1", and it does NOT control live mode."
+```
+
+Note what that means: **setting the variable does not quietly give you a dry run either.**
+The process refuses outright, so an operator who believed the variable was the control
+finds out immediately rather than watching a "live" run that is a simulation.
+
+**`approve-setup`, READ HALF, against the USDG dust the wallet holds:**
+
+```
+owner 0x4ab5…cb4a   token 0x5fc5…d168   amount_raw 1   (sized from the BALANCE)
+step 1  token.approve(Permit2, 1)              current allowance 0        SEND
+step 2  Permit2.approve(token, router, 1, exp) current 0, expiration 0    SEND
+DRY RUN — NOTHING SENT        exit 0
+```
+
+Both allowance reads succeeded against the real contracts, so **Permit2 exists and answers
+at `0x0000…78ba3`** — previously an address taken from a measurement, now a contract that
+has been called. **The write half refused as designed:**
+
+```
+approve-setup --live --commit   ->  EXIT=1
+   "LIVE MODE REQUIRES BOT_PRIVATE_KEY AND IT IS NOT SET"
+```
+
+That is the real call site reaching `createBroadcaster` and being refused there, not a
+drill.
+
+#### THE DRY RUN STILL WORKS, AND THE NEW BOUND SHOWS ITS FIRST LIVE SIGN
+
+The mode refactor rewired how `launchbot` decides its mode, so a plain dry run was re-run
+to confirm nothing broke — `mode dry-run-gate`, 12 ticks, 1,858 CU:
+
+```
+qualified 3   simulated 3   simClean 3   simReverted 0   slippage_bps 1000
+```
+
+**ZERO REVERTS OF THREE, where 300 bps measured 29.2 / 31.3 / 32.4 / 40.6% across four
+runs.** `revert-economics` predicted the rate would fall to about 7% at this bound, and
+3 of 3 is consistent with that — **but n=3 is three observations and this is not evidence
+of anything.** It is recorded because it is the first live data point in the direction the
+offline measurement predicted, and the figure to watch on the next full run is the revert
+rate against that 7%.
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
