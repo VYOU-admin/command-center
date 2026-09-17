@@ -179,6 +179,15 @@ enter at the first trade after +15 s, exit at the first trade after +45 s:
 | no-fill rate | 16.75% | not computed | 20.54% | 21.77% |
 | rule trades per day | 697.6 | not computed | 200.8 | 485.8 |
 
+> **EVERY RETURN FIGURE IN THE TABLE ABOVE IS MARK-TO-MARKET AND OVERSTATED.** The price
+> was taken from ANY swap, buys included, so a honeypot's series of trapped buyers scored as
+> a gain, and a launch with no exit scored 0 rather than −100%. Recomputed from REAL SELLS
+> ONLY the same cells are **+0.286 / +0.050 / +0.174 / +0.109** — the midpoint window loses
+> two thirds. **5.7% of corpus-era rule launches and 11.3–13.0% of recent ones could never be
+> sold by anybody**, and ~4% of trades the rule actually ENTERS in the recent era are
+> unrecoverable total losses. See "THE BACKTEST WAS MARK-TO-MARKET" in section 6 before
+> relying on any number in this table.
+
 **Costs, all measured, none assumed.** Median round-trip slippage from realised impact
 (see `ROBINHOOD.md` for the method): 0.52% / 0.20% / 0.26% at $10 across HOLDOUT / CALM
 / SELLOFF, rising to 5.19% / 2.01% / 2.58% at $100. Gas from 200 real receipts per era:
@@ -4173,6 +4182,154 @@ and nowhere else.*
 this pass introduced has ever been written, and `gas_usd` is non-null on **0**. Those two
 are the evidence that the live entry path has never run, and they were measured rather
 than reasoned about.
+
+### THE BACKTEST WAS MARK-TO-MARKET, AND HERE IS THE REALISABLE NUMBER — 2026-09-17
+
+**EVERY RETURN FIGURE IN THIS DOCUMENT WAS COMPUTED FROM THE PRICE IMPLIED BY ANY SWAP,
+BUYS INCLUDED.** `launch-backtest` prices a launch as `abs(counter)/abs(token)` with no
+direction filter and marks a pool at an offset with the LAST swap at or before it. **A
+honeypot's price series is made entirely of trapped buyers**, so it rises monotonically and
+the backtest scored it as a gain; and **a launch with no trade between entry and exit carries
+its entry mark forward, so `p_out = p_in` and the return is EXACTLY ZERO.** An unsellable
+position is not flat. It is −100%.
+
+`realised-backtest` recomputes the same four windows with one change: **the exit price may
+only come from a swap that is a SELL, and a launch with no such swap scores −1.0.** Zero CU —
+this is the already-collected corpus. The launch sets reconcile with section 1 (22,246 against
+the published 14.66% of 150,791; MIDPOINT 253 against 252).
+
+#### THE SIGN CONVENTION, AND THE CIRCULAR VALIDATION THAT WAS REJECTED
+
+`v4_swaps_all` names no direction. The obvious check — join to `v4_swap_tx.side` — returns
+**761 of 761 with zero exceptions and proves nothing**, because `route-probe` populated that
+column by selecting rows on the very sign in question. **It recovers its own filter.**
+
+Validated instead against `tx.value` on single-swap native-ETH transactions, where the ETH
+actually sent is independent of the amounts: **142 consistent, 2 not.** Both counter-examples
+were opened rather than dismissed — `0x47e256a8…` sent 0.001 ETH and RECEIVED 0.0249,
+`0x57b92bd5…` sent 0.00002 and received 0.00356. **Both are sells carrying a dust value, so
+`tx.value > 0` was the weak proxy and not the amounts.** The convention is the swapper's
+perspective: token amount negative is a SELL.
+
+#### 1. THE PUBLISHED MEDIANS AGAINST THE REALISED ONES
+
+At the published horizon (entry +15 s, exit +45 s), denominator every rule-qualifying launch,
+no-fill scored 0 exactly as section 1 does:
+
+| window | published mark-to-mark | REALISED, sells only | change |
+|---|---|---|---|
+| HOLDOUT-ERA | +0.298 | **+0.286** | −4% |
+| MIDPOINT | +0.145 | **+0.050** | **−66%** |
+| CALM | +0.226 | **+0.174** | −23% |
+| SELLOFF | +0.134 | **+0.109** | −19% |
+
+**THE PUBLISHED MEDIANS ARE OVERSTATED, BY TWO THIRDS IN THE WORST WINDOW AND BY A FIFTH TO A
+QUARTER IN THE TWO THAT MATTER MOST.** The corpus era barely moves, which is itself the
+finding: **the mark-to-market bias grew with the honeypot rate**, and the honeypot rate
+doubled after the corpus (below).
+
+At the horizon the bot actually ships (`EXIT_DELAY_BLOCKS`, +90 s) the realised medians are
+**+0.624 / +0.243 / +0.301 / +0.207**.
+
+#### 2. HOW MANY OF THE RULE'S LAUNCHES COULD NEVER BE SOLD
+
+**A reverted transaction emits no logs**, so every sell in the corpus is proof that some
+non-pool holder's transfer succeeded — and a pool with ZERO sells in its entire history is one
+where that never happened to anybody.
+
+| window | rule launches | never a sell, EVER | rate | of those, bought MORE THAN ONCE | rate |
+|---|---|---|---|---|---|
+| HOLDOUT-ERA | 22,246 | 1,260 | **5.66%** | 969 | 4.36% |
+| MIDPOINT | 253 | 15 | **5.93%** | 9 | 3.56% |
+| CALM | 230 | 26 | **11.30%** | 18 | 7.83% |
+| SELLOFF | 563 | 73 | **12.97%** | 51 | 9.06% |
+
+**THE UNSELLABLE RATE MORE THAN DOUBLED BETWEEN THE CORPUS ERA AND THE RECENT WINDOWS — 5.7%
+to 11.3–13.0%** — and it moves with the return decay section 1 records without explaining.
+Corpus-wide across all 184,572 pools that ever swapped, **31,641 (17.14%) never saw a sell.**
+
+**VALIDATED ON INDIVIDUAL RECORDS, NOT ON THE RATE.** The worst in the corpus:
+
+```
+0xd66002c132b5215e86ae94700ed2e38ca07e61dc   123 buys   0 sells   over 2,565 blocks
+0x6ab0c58b1ca9185c27b57ef30adcbf4a9e13ab76   105 buys   0 sells   over 1,820 blocks
+0x679ea06c488ed96048aa8147f841520ff23a573b    99 buys   0 sells   over 1,530 blocks
+CALM    0xc047e40b9d982890e624a5328c375a616cb4bcbb    12 buys   0 sells
+SELLOFF 0x645183ab27e2bca4e52ffcd9cbe2a2900554195d    12 buys   0 sells
+```
+
+**123 people bought a token over four minutes and not one of them ever got out.** That is CME
+before CME, 123 times over, in a window this project measured and called +0.298.
+
+**THE NUMBER THAT MATTERS OPERATIONALLY IS SMALLER AND WORSE.** Most never-sellable pools have
+no buy at or after the +15 s entry mark, so the rule never enters them. Of launches the rule
+BOTH enters and can never sell: **105 of 22,246 in HOLDOUT (0.47%), but 8 of 230 in CALM
+(3.5%) and 21 of 563 in SELLOFF (3.7%).** **In the recent era roughly one trade in 27 is a
+total loss with no recovery available at any horizon or any bound.** The live run hit one in
+two, which is a small sample sitting inside that rate rather than outside it.
+
+#### 3. THE TWO FAILURE MODES ARE NOT THE SAME RISK
+
+At +90 s with the generous sell window, of the launches scored −100%:
+
+| window | −100% total | token NEVER sellable | pool DIED |
+|---|---|---|---|
+| HOLDOUT-ERA | 4,069 | 105 | 3,964 |
+| MIDPOINT | 40 | 1 | 39 |
+| CALM | 51 | 8 | 43 |
+| SELLOFF | 116 | 21 | 95 |
+
+**THE DEAD-POOL BUCKET IS FOUR TO FORTY TIMES THE HONEYPOT BUCKET, AND ONLY THE HONEYPOT ONE
+IS WHAT 2E CAN PREVENT.** A pre-buy sellability check cannot see a pool that still has buyers
+at entry and none at exit. **Building 2E removes the smaller of the two problems.**
+
+#### 4. WHETHER THERE IS AN EDGE ON TOKENS THAT COULD ACTUALLY BE SOLD
+
+Restricting to launches where a sell ever printed — the population a perfect pre-buy check
+would leave — at +90 s:
+
+| window | all launches | SELLABLE ONLY | with the bot's real 10 s ladder |
+|---|---|---|---|
+| HOLDOUT-ERA | +0.624 | +0.670 | +0.622 |
+| MIDPOINT | +0.243 | +0.275 | **−1.000** |
+| CALM | +0.301 | +0.323 | **0.000** |
+| SELLOFF | +0.207 | +0.276 | **0.000** |
+
+**EXCLUDING HONEYPOTS BARELY MOVES THE MEDIAN — +3 to +7 POINTS — BECAUSE THEY ARE ONLY ~4% OF
+ENTERED TRADES.** The third column is the finding that matters: **when the exit is restricted
+to a sell printing within 10 seconds of our horizon, which is what the bot's ladder actually
+does, the median in all three recent windows is ZERO or −100%, and the p25 is −1.00000.**
+
+**AND THE HONEST LIMIT OF THAT COLUMN, STATED RATHER THAN LEFT TO FLATTER THE CONCLUSION:
+THE ABSENCE OF SOMEBODY ELSE'S SELL IS NOT PROOF THAT WE COULD NOT SELL.** We would have been
+the seller. A quiet pool and an unsellable one look identical in this data, so the 10 s column
+overstates the loss for every pool that was merely illiquid, exactly as the +300 s column
+overstates the gain by waiting for a pump it did not commit to (median delay 2–9 s past the
+horizon, p90 up to 30 s).
+
+**SO THE REALISABLE RETURN IS A RANGE AND NOT A NUMBER, AND THE DATA ALREADY COLLECTED CANNOT
+NARROW IT:**
+
+```
+recent-era median, entry +15 s, hold +90 s
+   pessimistic   0.000        a quiet pool treated as unsellable
+   optimistic   +0.21 .. +0.30   waiting up to 300 s for somebody else to sell
+   PUBLISHED    +0.134 .. +0.226 (mark-to-market)  --  sits INSIDE the bracket
+```
+
+**THE PUBLISHED FIGURE IS NOT A REALISABLE RETURN, BUT NEITHER IS IT SIMPLY WRONG BY A FACTOR:
+it is a point estimate inside a bracket this corpus cannot close.** Closing it needs our own
+sell simulated at each historical block — which is the 2E machinery, applied backwards, and it
+costs CU rather than nothing.
+
+**WHAT IS CERTAIN AND NEEDS NO BRACKET:** ~4% of entered trades in the recent era are
+unrecoverable total losses, the unsellable rate doubled after the corpus, and **every exit
+figure in section 6 was simulated from a BORROWED holder that had already sold successfully —
+measured, therefore, on the population that could sell.** All costs in section 1 (0.20–5.19%
+slippage, gas) still come off every figure above, which are GROSS.
+
+
+---
 
 ## 7. Rules here the code does not implement
 
