@@ -52,16 +52,26 @@ export const LIVE_PREREQUISITES: readonly Prerequisite[] = [
    * by code and a commented-out entry would either still refuse or quietly stop
    * refusing; LAUNCHBOT.md section 6 carries what it was and what closed it.
    */
+  /*
+   * `approvals-not-executed` WAS HERE AND ITS LITERAL CONDITION IS MET — both setup
+   * transactions were executed on 2026-09-16 (`0x999fdb79…` and `0x178977d3…`, both
+   * status 1). **It is NOT simply closed, because closing it there would have marked the
+   * risk resolved while the thing that actually prevents it stayed unbuilt.**
+   */
   {
-    id: 'approvals-not-executed',
-    what: 'neither setup transaction has ever been executed — token -> Permit2 and '
-      + 'Permit2 -> router',
-    why: 'the sell pulls the token through Permit2, so without both allowances every '
-      + 'exit reverts for a reason that has nothing to do with the pool. Section 6 '
-      + 'measured 9 of 14 dry-run exit reverts as exactly this, on a borrowed holder.',
-    closedBy: '`npm run approve-setup -- --live --commit` once a key exists; it is '
-      + 'deliberately a separate CLI so the first transaction this project signs is a '
-      + 'bounded approval and not a trade',
+    id: 'approvals-not-inline',
+    what: 'the two approvals are proven and are NOT wired into the live loop: nothing '
+      + 'grants them for the token a live buy just acquired',
+    why: 'every token the bot trades is a launch minutes old, so no allowance for it can '
+      + 'predate the buy — it must be granted between the buy and the sell. Without that, '
+      + 'a live trade buys, then `checkSellReadiness` correctly refuses to broadcast the '
+      + 'sell, `ExitUnrecoverableError` halts the mode, and the position is stuck. That is '
+      + 'the buy-without-a-sell outcome `sell-not-broadcast` was closed to prevent, '
+      + 'arriving by a different route.',
+    closedBy: 'calling the approval path from the loop between the buy and the exit, '
+      + 'through the same `buildTokenApprove`/`buildPermit2Approve` and the same allowance '
+      + 'reads `approve-setup` uses — and paying the measured $0.0128 per token per trade, '
+      + 'which is 0.13% of a $10 position',
   },
   {
     id: 'fill-not-modelled',

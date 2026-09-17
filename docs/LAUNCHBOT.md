@@ -101,7 +101,13 @@ slippage bound      1000 bps, changed from 300 on 2026-09-16 on measured
 exit retry ladder   [1000, 1343], two rungs, re-derived at the new bound
 live gate           20 of 20 cases in npm run live-gate-drill; the static gate
                     passes over 132 source files and is proven able to fail
-trades to date      0 REAL. 107 hypothetical rows across every dry-run mode.
+trades to date      0 REAL TRADES. 107+ hypothetical rows across the dry-run modes.
+first real tx       2026-09-16. TWO APPROVALS, both mined, nonces 130 and 131:
+                    0x999fdb79...2669  USDG.approve(Permit2, 1)        block 65,017,856
+                    0x178977d3...55c0  Permit2.approve(USDG, router, 1) block 65,017,859
+                    Total gas $0.0128. NOT a trade -- a bounded approval of one raw
+                    unit of USDG, chosen so the signer could be wrong on a call that
+                    moves nothing. It was wrong twice; see section 6.
 capital approved    $100 total, $10 per position (operator, 2026-09-16), and since
                     2026-09-16 ENFORCED as MAX_DEPLOYED_USD rather than stated here
 ```
@@ -3193,6 +3199,113 @@ kill switch       halted FALSE, reason names what was resolved and how
 `needs_exit` row remains anywhere on the chain, which is why it had to be. It refused
 correctly when tried early.
 
+### THE FIRST REAL TRANSACTIONS — 2026-09-16
+
+**`npm run approve-setup -- --token <USDG> --live --commit`.** Two approvals, both mined.
+The first signatures this project has ever produced, and deliberately **not a trade**:
+
+```
+STEP 1  0x999fdb793e25d2bc71f4889acd5d27e4fca79be60a0ff4496023240985402669
+        USDG.approve(Permit2, 1)              nonce 130  block 65,017,856  status 1
+        type 2   gasUsed 57,892   effectiveGasPrice 50,770,000
+STEP 2  0x178977d39724dd5d4f11415611d9d6bc568549857b8e8ad5a08fa6a664d955c0
+        Permit2.approve(USDG, UniversalRouter, 1, expiry)
+                                              nonce 131  block 65,017,859  status 1
+        type 2   gasUsed 47,554   effectiveGasPrice 49,080,000
+TOTAL   0.00000527312716 ETH = $0.0128        nonce 130 -> 132
+```
+
+**THE AMOUNT IS ONE RAW UNIT OF USDG — 0.000001.** The only token the wallet held, which is
+what section 8 step 5 specified, and the point of it: *if the nonce handling, the gas
+estimation, the chain id or the encoding is wrong, it is wrong on a call that moves
+nothing.* **It was wrong twice, and both times nothing moved.**
+
+#### DEFECT 1: THE SIGNER WAS HANDED THE READ-ONLY TRANSPORT
+
+The first attempt was refused by our own deny-list:
+
+> *eth_sendRawTransaction is refused by ReadOnlyRpc BY NAME, in every mode including live.*
+
+`createBroadcaster(mode, rpc)` was passing a `ReadOnlyRpc`, while a `BroadcastRpc` was
+built beside it and **thrown away with `void sender`**. Nothing was signed and no gas was
+spent.
+
+**THE LAYERED DEFENCE WORKED, AND THE TELL WAS AN UNUSED VARIABLE IN A MONEY PATH.** The
+thing that was supposed to be able to broadcast could not, and it failed loudly rather than
+doing something else. Worth recording that **the identical line is correct in
+`signer-check`**, which hands `createBroadcaster` a read-only transport deliberately so the
+signer it builds cannot send — a feature there and a defect here, which is why the
+transport is now chosen explicitly at each call site instead of being whatever variable was
+in scope.
+
+#### DEFECT 2: A LEGACY TRANSACTION ON A CHAIN WITH A BASE FEE
+
+The second attempt was rejected by the node:
+
+> *max fee per gas less than block base fee: maxFeePerGas 49,556,000 baseFee 49,626,000*
+
+**Two faults in one line.** The signer built a LEGACY (type 0) transaction, and this chain
+has a base fee — so `gasPrice` must be at or above it, and `eth_gasPrice` was **0.14% below
+the base fee** by the time the node saw it. At the measured 100.52 ms block interval the
+base fee moves between the read and the send, so a figure used verbatim loses that race at
+random.
+
+**HEADROOM IS FREE UNDER EIP-1559 AND IS NOT UNDER LEGACY**, which is why the fix was to
+change the transaction TYPE rather than add a margin. A type-2 transaction is charged
+`baseFee + tip` and the remainder of `maxFeePerGas` is never spent; a legacy one is charged
+its whole `gasPrice`, so the same margin would be paid on every transaction for ever.
+**The receipts confirm it**: `maxFeePerGas` 101,040,000 against 50,770,000 actually charged
+— the headroom was carried and not spent.
+
+**`maxPriorityFeePerGas` came back 0** from `eth_maxPriorityFeePerGas`, so this chain has no
+priority market and `effectiveGasPrice` is the base fee. Recorded because a tip of zero is
+a real answer here and would look like a defect anywhere else.
+
+**Nothing landed from either failure and the nonce was not consumed** — still 130 before the
+successful attempt, verified from the chain.
+
+#### THE INCLUSION HALF OF THE RECEIPT TIMEOUT IS NOW MEASURED
+
+`receipt-timing` could measure receipt AVAILABILITY exactly and **could not measure
+inclusion**, because nothing could send. These two transactions are the first measurement
+of it:
+
+```
+STEP 1   receipt_wait_ms 20   receipt_polls 1
+STEP 2   receipt_wait_ms 16   receipt_polls 1
+```
+
+**Both served on the FIRST poll**, and that wait spans submission through inclusion to
+availability. So the 60,000 ms timeout is roughly **3,000x the measured total** — the margin
+this document argued for on asymmetry grounds now has data under it rather than only
+reasoning. `bot_exit_attempts.receipt_wait_ms` captures the same figure for every future
+broadcast.
+
+#### AND THE FIRST GAS FIGURE THIS PROJECT HAS FROM ITS OWN TRANSACTIONS
+
+Every gas cost in this document has come from **other people's receipts**. Section 2
+measured an approval at $0.00751, so $0.015 for the pair.
+
+**Measured on our own: $0.0128.** The external figure was **17% high**, which is close
+enough to leave every costing that rests on it standing — and it is the first time one of
+those figures has been checked against a transaction we actually paid for.
+
+#### `approvals-not-executed` IS MET AND IS NOT SIMPLY CLOSED
+
+Both setup transactions have now been executed, so the prerequisite's literal condition is
+met. **Closing it there would have marked the risk resolved while the thing that actually
+prevents it stayed unbuilt.**
+
+Every token the bot trades is a launch minutes old, so **no allowance for it can predate the
+buy** — it has to be granted between the buy and the sell, and nothing in the loop does
+that. A live trade would buy, `checkSellReadiness` would correctly refuse to broadcast the
+sell, `ExitUnrecoverableError` would halt the mode, and the position would be stuck: the
+buy-without-a-sell outcome that `sell-not-broadcast` was closed to prevent, arriving by a
+different route.
+
+It is therefore replaced by **`approvals-not-inline`**, and the cost is now known rather
+than estimated: **$0.0128 per token per trade, 0.13% of a $10 position.**
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
@@ -3242,8 +3355,10 @@ category C.
 - **The exit's success rate is measured on 17 attempts**, 10 clean. Better than the
   stale-quote baseline's 2 of 7, and both samples are too small to separate the fix from
   noise.
-- **`gas_usd` is null on every row.** The round trip is costed from external
-  measurements, never from this bot's own trades.
+- **`gas_usd` is null on every row.** The round trip is still costed from external
+  measurements — but the APPROVAL half is now measured from our own transactions at
+  $0.0128 for the pair, against the $0.015 those external receipts implied, so that
+  estimate is 17% high and the rest of them are probably close too.
 - **`fill_status` is always the literal `dry-run`.** Nothing models winning the fill
   against competing buyers in the same block.
 - **Every exit is still simulated from a BORROWED holder.** In dry run we hold nothing,
@@ -3255,7 +3370,8 @@ category C.
 - **The impact term has fired twice in 66 live trades.** Effectively inert.
 - **NO EXIT HAS EVER BEEN BROADCAST.** The path exists and its orchestration is drilled,
   but `bot_exit_attempts` contains no row whose detail came from a real receipt — every
-  attempt ever recorded is an `eth_call`.
+  attempt ever recorded is an `eth_call`. `receipt_wait_ms` is NULL on all of them, even
+  though the column now has real figures from the two approvals.
 - **`quoteRefused` and `quoteReadFailed` are 0 across every run.** Both refusal branches
   are unexercised against live data.
 - **The nightly check has never delivered an alert.** Its thresholds have been exercised
@@ -3263,12 +3379,14 @@ category C.
 - **`MAX_CONCURRENT` and `MAX_DAILY_LOSS_USD` have never bound outside the drill.** Dry
   run realises no loss, and `MAX_CONCURRENT` has not been reached because positions close
   within ~105 s of opening.
-- **No transaction has ever been signed or broadcast.** As of 2026-09-16 a signing path
-  EXISTS (`bot/signer.ts`) and is unreachable: live mode is off by default, the
-  prerequisites list refuses to arm, and no key exists. Every figure in this document is
-  still a simulation.
-- **The live broadcast call site has never executed.** `approve-setup` reaches
-  `createBroadcaster` at its real call site and is refused there; nothing has got past it.
+- ~~No transaction has ever been signed or broadcast~~ — **FALSE as of 2026-09-16.** Two
+  approvals were signed and mined, `0x999fdb79…` and `0x178977d3…`, total gas $0.0128.
+  **No TRADE has been signed**, and every return figure in this document is still a
+  simulation.
+- **THE SIGNER IS PROVEN ON APPROVALS ONLY.** Nonce, chain id, EIP-1559 fees, encoding and
+  receipt confirmation have all executed for real — on `approve` calls to a token and to
+  Permit2. The swap calldata has never been signed, and `buildSwap`'s output has only ever
+  been `eth_call`ed.
 
 ### D. Structural, and stated so they are not rediscovered
 
@@ -3456,17 +3574,24 @@ that should be made before step 3, not during it.
 |---|---|---|---|
 | ~~**1**~~ | ~~Resolve the 7 stuck rows~~ | **DONE 2026-09-16** — 137 `closed_unsellable` on proven `actual=0`, the other six `closed_unfilled` by the boot sweep. And the reason it mattered is **gone**: automatic halts are mode-scoped, so a dry run's failure can no longer halt live. | — |
 | ~~**2**~~ | ~~Close `sell-not-broadcast`~~ | **DONE 2026-09-16** — the broadcaster is threaded through `exit-exec` and forwarded by both callers; 10 of 10 in `exit-broadcast-drill`. See 2C. | it was the one remaining code change that had to precede a key, and it is no longer outstanding |
-| **3** | **Supply the key** | `BOT_PRIVATE_KEY`, per the note above | after step 2, so the first thing the signer can be asked to do is already correct |
-| **4** | **Re-run the gates with the key present** | `npm run live-gate-drill` | case 6 becomes vacuous the moment a key exists and the drill SAYS SO. Everything else must still pass, and `--live` must still be refused by the prerequisites. |
-| **5** | **THE FIRST REAL TRANSACTION: a bounded approval** | `npm run approve-setup -- --token <a token already held> --live --commit` | see below |
-| **6** | **Verify the approval from the chain** | the CLI re-reads both allowances; read them again independently | a transaction the node accepted is not an allowance that is set |
+| ~~**3**~~ | ~~Supply the key~~ | **DONE 2026-09-16**, confirmed by `signer-check` to control the expected address on chainId 4663. | — |
+| ~~**4**~~ | ~~Re-run the gates with the key present~~ | **DONE 2026-09-16** — 20 of 20, with case 6 flipping its assertion and reporting that it did. | — |
+| ~~**5**~~ | ~~THE FIRST REAL TRANSACTION: a bounded approval~~ | **DONE 2026-09-16.** `0x999fdb79…` and `0x178977d3…`, both mined, $0.0128. Two defects surfaced on a call that moved nothing, which is exactly what this step was for. | — |
+| ~~**6**~~ | ~~Verify the approval from the chain~~ | **DONE** — the CLI re-read both allowances (1 and 1, expiry set) and an independent process re-read both receipts, nonces and the gas actually paid. | — |
 | **7** | **Clear the prerequisites list** | remove the closed entries from `bot/live-preflight.ts`, deliberately, with evidence | it is data, not a comment, and each removal is an edit somebody signs off |
 | **8** | **One live run, bounded hard** | `npm run launchbot -- --live --minutes <small>` | the rails already bound it: $10 a position, 5 concurrent, $100 deployed, 40 trades a day, $15 daily loss |
 | **9** | **Reconcile from a fresh connection** | rows, allowances, balance, `bot_control` | a clean exit is not evidence; this is the standing rule and it applies hardest here |
 
-### THE FIRST REAL TRANSACTION WILL BE AN APPROVAL, NOT A TRADE
+### THE FIRST REAL TRANSACTION WAS AN APPROVAL, NOT A TRADE — AND IT EARNED ITS PLACE
 
-**Step 5, explicitly**: `token.approve(PERMIT2, <exact amount>)` — one ERC-20 approval, for
+**It ran on 2026-09-16 and it was wrong twice**: the signer was handed a read-only
+transport, and it built a legacy transaction on a chain with a base fee. **Both failures
+cost nothing and consumed no nonce**, which is precisely the argument for choosing an
+approval as the first signature rather than a trade. A trade would have tested the same
+signer plus a quote, a rail, a pool, a bound and an exit, and would have failed
+informatively about none of them.
+
+**The original reasoning, which held:** `token.approve(PERMIT2, <exact amount>)` — one ERC-20 approval, for
 a stated amount, to a named spender, on a token the wallet already holds. Roughly **$0.0075
 of gas**. It is chosen as the first signature because it is the smallest and most
 inspectable thing the signing path can be pointed at: if the nonce handling, the gas
