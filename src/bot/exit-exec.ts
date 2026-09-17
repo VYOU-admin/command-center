@@ -84,6 +84,37 @@ import type { PoolClient } from '../store/db.js';
 const abi = AbiCoder.defaultAbiCoder();
 /** Computed, never typed from memory — a hand-copied selector is a fabricated constant. */
 const V4_TOO_LITTLE = id('V4TooLittleReceived(uint256,uint256)').slice(0, 10);
+/** COMPUTED, never looked up -- a fabricated selector matches nothing and reads clean. */
+const ALLOWANCE_EXPIRED = id('AllowanceExpired(uint256)').slice(0, 10);
+const INSUFFICIENT_ALLOWANCE = id('InsufficientAllowance(uint256)').slice(0, 10);
+const ERROR_STRING = id('Error(string)').slice(0, 10);
+
+/**
+ * IS THIS SIMULATION FAILURE THE MISSING ALLOWANCE RATHER THAN THE POOL?
+ *
+ * The two are completely different facts and the ladder must treat them differently: a
+ * pool that will not pay is answered by a wider bound, and a missing allowance is not.
+ * Matching is on the DECODED payload, never on a substring of a bare message, because
+ * `execution reverted` carries no information and guessing from it is how an unrelated
+ * failure would trigger a grant nobody asked for.
+ */
+function isAllowanceFailure(data: unknown, message: string): boolean {
+  if (typeof data === 'string' && data.startsWith('0x')) {
+    if (data.startsWith(ALLOWANCE_EXPIRED)) return true;
+    if (data.startsWith(INSUFFICIENT_ALLOWANCE)) return true;
+    if (data.startsWith(ERROR_STRING)) {
+      try {
+        const dec = abi.decode(['string'], `0x${data.slice(10)}`) as unknown as string[];
+        const t = String(dec[0]).toUpperCase();
+        return t.includes('TRANSFER_FROM_FAILED') || t.includes('ALLOWANCE');
+      } catch { return false; }
+    }
+    return false;
+  }
+  /* No payload: the ONLY string form trusted is one the transport already decoded. */
+  const t = message.toUpperCase();
+  return t.includes('TRANSFER_FROM_FAILED') || t.includes('ALLOWANCEEXPIRED');
+}
 
 /** Minimal RPC surface, so this module cannot reach a broadcast method at all. */
 export interface ExitRpc { call(method: string, params: unknown[]): Promise<unknown> }
@@ -319,29 +350,77 @@ export async function executeExit(
         deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
       });
 
-      /* ---- STEP 1: SIMULATE. ON BOTH PATHS, ALWAYS. ----------------------- */
-      try {
-        const r = await ctx.rpc.call('eth_call', [{
-          from: pos.sellFrom, to: UNIVERSAL_ROUTER, value: '0x0', data: tx.data,
-        }, 'latest']);
-        if (bcast === null) return `returned ${String(r).slice(0, 18)}`;
-      } catch (err) {
-        /*
-         * DECODE THE REVERT RATHER THAN RECORDING "execution reverted".
-         * A bare message is not a measurement — it is what made the first exit numbers
-         * unreadable until `revert-decode` was written. This is also why the simulation
-         * runs in live mode: a mined failure gives `status: 0` and nothing else.
-         *
-         * An ORDINARY rejection: nothing was sent, so the next rung is safe.
-         */
-        const e = err as Error & { data?: unknown };
-        const d = (e as { data?: unknown }).data;
-        if (typeof d === 'string' && d.startsWith(V4_TOO_LITTLE)) {
-          const [mn, got] = abi.decode(['uint256', 'uint256'],
-            `0x${d.slice(10)}`) as unknown as [bigint, bigint];
-          throw new Error(`V4TooLittleReceived bound=${mn} actual=${got}`);
+      /* ---- STEP 1: SIMULATE — AND GRANT FIRST IF THAT IS WHAT IT IS ------- */
+      /*
+       * THE DEADLOCK THIS CLOSES. The grant used to live only in step 2, AFTER this
+       * simulation returned — but a position whose allowances are missing cannot get a
+       * simulation to return: it reverts `TRANSFER_FROM_FAILED` or `AllowanceExpired`
+       * here and never reaches the grant. **So the one path written to make a failed
+       * inline grant recoverable could never actually run**, and a `needs_exit` row whose
+       * approvals never landed was permanently unsellable — the exact outcome section 2D
+       * claims this executor prevents.
+       *
+       * The fix is not to move the grant earlier unconditionally, which would spend gas
+       * on pools that were never going to pay. It is to let the DECODED reason decide:
+       * an allowance failure grants and retries ONCE; anything else is the pool talking
+       * and the ladder handles it as before.
+       */
+      let granted = false;
+      for (let pass = 0; ; pass += 1) {
+        try {
+          const r = await ctx.rpc.call('eth_call', [{
+            from: pos.sellFrom, to: UNIVERSAL_ROUTER, value: '0x0', data: tx.data,
+          }, 'latest']);
+          if (bcast === null) return `returned ${String(r).slice(0, 18)}`;
+          break;
+        } catch (err) {
+          /*
+           * DECODE THE REVERT RATHER THAN RECORDING "execution reverted".
+           * A bare message is not a measurement — it is what made the first exit numbers
+           * unreadable until `revert-decode` was written. This is also why the simulation
+           * runs in live mode: a mined failure gives `status: 0` and nothing else.
+           */
+          const e = err as Error & { data?: unknown };
+          const d = (e as { data?: unknown }).data;
+          if (typeof d === 'string' && d.startsWith(V4_TOO_LITTLE)) {
+            const [mn, got] = abi.decode(['uint256', 'uint256'],
+              `0x${d.slice(10)}`) as unknown as [bigint, bigint];
+            throw new Error(`V4TooLittleReceived bound=${mn} actual=${got}`);
+          }
+
+          /*
+           * ONE grant, one retry. A second failure after a grant that the chain
+           * confirmed is NOT an allowance problem any more, so it is re-raised rather
+           * than looped on — a retry that can repeat is how a bot spends a ladder on a
+           * question the bound cannot answer.
+           */
+          if (bcast !== null && !granted && pass === 0
+              && isAllowanceFailure(d, e.message)) {
+            log.warn('EXIT SIMULATION FAILED ON THE ALLOWANCE — granting, then retrying', {
+              trade: pos.tradeId, token: pos.token,
+              decoded: typeof d === 'string' ? d.slice(0, 10) : e.message.slice(0, 80),
+            });
+            try {
+              await ensureSellReadiness(
+                {
+                  rpc: ctx.rpc, broadcaster: bcast,
+                  ...(ctx.now ? { now: ctx.now } : {}),
+                  wait: pollWait,
+                  ...(ctx.receiptTimeoutMs !== undefined
+                    ? { receiptTimeoutMs: ctx.receiptTimeoutMs } : {}),
+                },
+                { token: pos.token, owner: bcast.address, amount: pos.amountIn },
+              );
+            } catch (gerr) {
+              throw new ExitUnrecoverableError('CANNOT SELL — the simulation failed on '
+                + 'the allowance and the grant could not be made: '
+                + `${(gerr as Error).message.slice(0, 200)} No SELL was broadcast.`);
+            }
+            granted = true;
+            continue;
+          }
+          throw new Error(e.message.slice(0, 160));
         }
-        throw new Error(e.message.slice(0, 160));
       }
 
       /* ---- STEP 2: THE ALLOWANCES — GRANTED HERE IF THEY ARE SHORT -------- */

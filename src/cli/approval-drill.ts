@@ -115,15 +115,29 @@ function makeRpc(sc: Scripted, trace: Trace): {
 
 function makeBroadcaster(sc: Scripted, trace: Trace): Broadcaster {
   let n = 0;
+  /*
+   * THE DOUBLE TRACKS A NONCE THE SAME WAY THE REAL SIGNER DOES -- invalidated before
+   * the send and set after -- so the trace records the nonce each send used and the
+   * ordering assertion can check them rather than only counting sends.
+   */
+  let nextNonce: number | null = 100;
+  let lastUsed: number | null = null;
   return {
     address: OWNER,
+    resyncNonce(): void { nextNonce = null; },
+    trackedNonce(): number | null { return nextNonce; },
+    lastNonce(): number | null { return lastUsed; },
     async send(tx: UnsignedTx): Promise<string> {
+      const nonce = nextNonce ?? 100;
+      nextNonce = null;
       if (sc.sendThrows) {
         trace.push('SEND may-have-landed, then threw');
         throw new Error('simulated transport failure after the node may have accepted it');
       }
       n += 1;
-      trace.push(`SEND ${tx.to.toLowerCase() === PERMIT2 ? 'permit2' : 'token'}`);
+      nextNonce = nonce + 1;
+      lastUsed = nonce;
+      trace.push(`SEND ${tx.to.toLowerCase() === PERMIT2 ? 'permit2' : 'token'} nonce=${nonce}`);
       return `0x${n.toString(16).padStart(64, '0')}`;
     },
   };

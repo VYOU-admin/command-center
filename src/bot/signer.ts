@@ -30,12 +30,43 @@
  * rather than a trade — so the defect surfaced on a call that moved nothing.
  *
  * ---------------------------------------------------------------------------
- * THE NONCE IS READ FROM THE CHAIN, NEVER CARRIED
+ * THE NONCE IS TRACKED ACROSS A TRADE, AND THE CHAIN SEEDS IT RATHER THAN DECIDING IT
  * ---------------------------------------------------------------------------
  *
- * Section 2 rule 5: a replaced container must not be able to reuse one. `ROBINHOOD.md`
- * records containers being replaced mid-job twice, so a nonce held in memory is a nonce
- * that can be spent twice. It is fetched per transaction, from the chain.
+ * **THIS KILLED THE FIRST LIVE RUN AFTER FOUR MINUTES.** It was read per transaction as
+ * `eth_getTransactionCount(address, 'pending')`, on the reasoning that a replaced
+ * container must not be able to reuse one. That reasoning still holds and is preserved
+ * below. What it got wrong is that **`'pending'` LAGS A RECEIPT WE HAVE ALREADY
+ * CONFIRMED**: on trade 614's STEP 2 the node answered 136 for an account whose state
+ * was already 137, and the send was rejected `nonce too low: tx: 136 state: 137`.
+ *
+ * **A CONFIRMED RECEIPT IS BETTER INFORMATION THAN THE NODE'S MEMPOOL VIEW.** Section 2D
+ * already requires that MINED is the only outcome that permits the next send, so when we
+ * are about to send again we have a mined receipt for nonce N in hand — and the next
+ * nonce is N+1 as a matter of arithmetic, whatever `'pending'` currently says.
+ *
+ * So the chain SEEDS the counter and confirmed sends ADVANCE it:
+ *
+ *   first send of a process   -> read from the chain
+ *   a broadcast we got a hash for -> the next nonce is this one + 1
+ *   a broadcast that THREW    -> INVALIDATE, and re-read from the chain next time
+ *
+ * **THE COUNTER IS INVALIDATED BEFORE THE BROADCAST AND SET AFTER IT, NEVER THE OTHER
+ * WAY ROUND.** A throw is not proof nothing was sent — section 2C's own rule — so after
+ * one we can neither reuse the nonce nor assume it advanced, and the only honest state
+ * is "ask the chain". That is also why the invalidation is not in a `catch`: a throw
+ * between signing and the result being read must leave it invalid too.
+ *
+ * **THE ORIGINAL GUARANTEE IS UNCHANGED.** The counter lives in this closure and dies
+ * with the process, so a replaced container reads the chain on its first send and cannot
+ * reuse anything. What it must not do is survive a container, and it cannot.
+ *
+ * **ONE HAZARD IT DOES NOT REMOVE, STATED RATHER THAN DISCOVERED:** a second process
+ * signing for the same address concurrently. Its sends are invisible here, so our
+ * counter goes stale — exactly as a `'pending'` read would have been raced. That is
+ * recovered rather than ignored: a rejection naming a too-low nonce invalidates the
+ * counter, re-reads the chain and retries ONCE, which is safe precisely because such a
+ * rejection is proof the transaction was NOT accepted.
  */
 import { Wallet } from 'ethers';
 import type { BotMode } from './mode.js';
@@ -61,6 +92,15 @@ export interface Broadcaster {
   readonly address: string;
   /** Signs and sends. Returns the transaction hash. */
   send(tx: UnsignedTx): Promise<string>;
+  /**
+   * Drop the tracked nonce so the next send re-reads it from the chain.
+   * Called by a caller that has reconciled against the chain itself, and by the drill.
+   */
+  resyncNonce(): void;
+  /** The nonce the next send WOULD use without asking the chain, or null. */
+  trackedNonce(): number | null;
+  /** The nonce actually used by the most recent successful send, or null. */
+  lastNonce(): number | null;
 }
 
 /**
@@ -139,96 +179,130 @@ export async function createBroadcaster(
       + 'this key cannot spend.');
   }
 
+  /*
+   * THE TRACKED NONCE. `null` means "ask the chain", which is the state a process starts
+   * in and the state any unresolved broadcast returns it to.
+   */
+  let nextNonce: number | null = null;
+  let lastUsed: number | null = null;
+
+  const readChainNonce = async (): Promise<number> => {
+    const hex = String(await rpc.call('eth_getTransactionCount', [address, 'pending']));
+    const n = Number(BigInt(hex));
+    if (!Number.isFinite(n) || n < 0) {
+      throw new Error(`eth_getTransactionCount returned ${hex}, which is not a nonce`);
+    }
+    return n;
+  };
+
+  /** Build and sign at an EXACT nonce, so a retry can re-sign at a corrected one. */
+  const signAt = async (tx: UnsignedTx, nonce: number): Promise<string> => {
+    const estHex = String(await rpc.call('eth_estimateGas', [{
+      from: address, to: tx.to, value: `0x${tx.value.toString(16)}`, data: tx.data,
+    }]));
+
+    /*
+     * ---------------------------------------------------------------------
+     * EIP-1559, AND THE FIRST REAL TRANSACTION IS WHY
+     * ---------------------------------------------------------------------
+     *
+     * This built a LEGACY (type 0) transaction with `gasPrice` straight from
+     * `eth_gasPrice`, and the first real send was REJECTED BY THE NODE:
+     *
+     *   max fee per gas less than block base fee:
+     *   maxFeePerGas: 49556000  baseFee: 49626000
+     *
+     * Two defects in one line. **This chain has a base fee**, so a legacy transaction
+     * must carry a `gasPrice` at or above it — and `eth_gasPrice` was 0.14% BELOW the
+     * base fee by the time the node saw it. At a measured 100.52 ms block interval the
+     * base fee moves between the read and the send, so a figure used verbatim is a race
+     * this would lose again at random.
+     *
+     * **HEADROOM IS FREE UNDER EIP-1559 AND IS NOT UNDER LEGACY**, which is the reason
+     * to change type rather than just add a margin. A type-2 transaction is charged
+     * `baseFee + tip` and the rest of `maxFeePerGas` is never spent, so a generous
+     * ceiling costs nothing; a legacy transaction is charged its whole `gasPrice`, so
+     * the same margin would be paid on every transaction for ever.
+     *
+     * The fallback is stated rather than assumed: a chain with NO `baseFeePerGas` is
+     * pre-1559 and takes the legacy shape, with a margin, because there is nothing to
+     * be refunded from.
+     */
+    const blk = (await rpc.call('eth_getBlockByNumber', ['latest', false])) as
+      { baseFeePerGas?: string } | null;
+    if (blk === null || blk === undefined) {
+      throw new Error('eth_getBlockByNumber returned no head block, so the fee market '
+        + 'is UNKNOWN. Refusing to guess a gas price for a real transaction.');
+    }
+
+    const gasLimit = BigInt(estHex);
+    const base: Record<string, unknown> = {
+      to: tx.to, data: tx.data, value: tx.value, nonce, gasLimit, chainId: CHAIN_ID,
+    };
+
+    let fees: Record<string, unknown>;
+    if (blk.baseFeePerGas !== undefined) {
+      const baseFee = BigInt(blk.baseFeePerGas);
+      let tip: bigint;
+      try {
+        tip = BigInt(String(await rpc.call('eth_maxPriorityFeePerGas', [])));
+      } catch {
+        const gp = BigInt(String(await rpc.call('eth_gasPrice', [])));
+        tip = gp > baseFee ? gp - baseFee : baseFee / 10n;
+      }
+      fees = { type: 2, maxPriorityFeePerGas: tip, maxFeePerGas: baseFee * 2n + tip };
+    } else {
+      /* PRE-1559: legacy, with a margin, because nothing is refunded here. */
+      const gp = BigInt(String(await rpc.call('eth_gasPrice', [])));
+      fees = { type: 0, gasPrice: gp + gp / 10n };
+    }
+    return wallet.signTransaction({ ...base, ...fees });
+  };
+
+  /**
+   * ONE ATTEMPT AT ONE NONCE.
+   *
+   * The counter is INVALIDATED BEFORE the broadcast and SET AFTER it. A throw anywhere
+   * between the two therefore leaves it invalid, which is the only honest state: section
+   * 2C's rule is that a throw is not proof nothing was sent, so the nonce can neither be
+   * reused nor assumed spent.
+   */
+  const attempt = async (tx: UnsignedTx, nonce: number): Promise<string> => {
+    const signed = await signAt(tx, nonce);
+    nextNonce = null;
+    const hash = await rpc.call('eth_sendRawTransaction', [signed]);
+    if (typeof hash !== 'string' || !hash.startsWith('0x')) {
+      throw new Error(`eth_sendRawTransaction returned ${JSON.stringify(hash)}; the `
+        + 'transaction may or may not be in flight and MUST be reconciled against the '
+        + 'chain before anything else is sent.');
+    }
+    nextNonce = nonce + 1;
+    lastUsed = nonce;
+    return hash;
+  };
+
   return {
     address,
+    resyncNonce(): void { nextNonce = null; },
+    trackedNonce(): number | null { return nextNonce; },
+    lastNonce(): number | null { return lastUsed; },
+
     async send(tx: UnsignedTx): Promise<string> {
-      /* THE NONCE IS READ PER TRANSACTION, NEVER CARRIED. Section 2 rule 5. */
-      const nonceHex = String(await rpc.call('eth_getTransactionCount',
-        [address, 'pending']));
-      const estHex = String(await rpc.call('eth_estimateGas', [{
-        from: address, to: tx.to, value: `0x${tx.value.toString(16)}`, data: tx.data,
-      }]));
-
-      /*
-       * ---------------------------------------------------------------------
-       * EIP-1559, AND THE FIRST REAL TRANSACTION IS WHY
-       * ---------------------------------------------------------------------
-       *
-       * This built a LEGACY (type 0) transaction with `gasPrice` straight from
-       * `eth_gasPrice`, and the first real send was REJECTED BY THE NODE:
-       *
-       *   max fee per gas less than block base fee:
-       *   maxFeePerGas: 49556000  baseFee: 49626000
-       *
-       * Two defects in one line. **This chain has a base fee**, so a legacy transaction
-       * must carry a `gasPrice` at or above it — and `eth_gasPrice` was 0.14% BELOW the
-       * base fee by the time the node saw it. At a measured 100.52 ms block interval the
-       * base fee moves between the read and the send, so a figure used verbatim is a race
-       * this would lose again at random.
-       *
-       * **HEADROOM IS FREE UNDER EIP-1559 AND IS NOT UNDER LEGACY**, which is the reason
-       * to change type rather than just add a margin. A type-2 transaction is charged
-       * `baseFee + tip` and the rest of `maxFeePerGas` is never spent, so a generous
-       * ceiling costs nothing; a legacy transaction is charged its whole `gasPrice`, so
-       * the same margin would be paid on every transaction for ever.
-       *
-       * The fallback is stated rather than assumed: a chain with NO `baseFeePerGas` is
-       * pre-1559 and takes the legacy shape, with a margin, because there is nothing to
-       * be refunded from.
-       */
-      const blk = (await rpc.call('eth_getBlockByNumber', ['latest', false])) as
-        { baseFeePerGas?: string } | null;
-      if (blk === null || blk === undefined) {
-        throw new Error('eth_getBlockByNumber returned no head block, so the fee market '
-          + 'is UNKNOWN. Refusing to guess a gas price for a real transaction.');
-      }
-
-      const gasLimit = BigInt(estHex);
-      const base: Record<string, unknown> = {
-        to: tx.to, data: tx.data, value: tx.value,
-        nonce: Number(BigInt(nonceHex)), gasLimit, chainId: CHAIN_ID,
-      };
-
-      let fees: Record<string, unknown>;
-      if (blk.baseFeePerGas !== undefined) {
-        const baseFee = BigInt(blk.baseFeePerGas);
+      const nonce = nextNonce ?? await readChainNonce();
+      try {
+        return await attempt(tx, nonce);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         /*
-         * THE TIP IS ASKED FOR AND DERIVED ONLY IF THE METHOD IS ABSENT. `eth_gasPrice`
-         * on a 1559 chain is conventionally `baseFee + tip`, so the difference is the
-         * node's own view of the tip — a derivation from a real figure rather than a
-         * number chosen here. A floor applies only if that difference is non-positive.
+         * A REJECTION NAMING A TOO-LOW NONCE IS PROOF THE TRANSACTION WAS NOT ACCEPTED,
+         * which is what makes ONE retry safe here and makes it unsafe for every other
+         * error. It is the recovery for the only hazard tracking introduces: another
+         * process signing for this address while we hold a stale counter.
          */
-        let tip: bigint;
-        try {
-          tip = BigInt(String(await rpc.call('eth_maxPriorityFeePerGas', [])));
-        } catch {
-          const gp = BigInt(String(await rpc.call('eth_gasPrice', [])));
-          tip = gp > baseFee ? gp - baseFee : baseFee / 10n;
-        }
-        /* 2x the base fee plus the tip. Never spent above baseFee+tip, so the headroom
-         * absorbs a rising base fee at no cost. */
-        fees = {
-          type: 2,
-          maxPriorityFeePerGas: tip,
-          maxFeePerGas: baseFee * 2n + tip,
-        };
-      } else {
-        /* PRE-1559: legacy, with a margin, because nothing is refunded here. */
-        const gp = BigInt(String(await rpc.call('eth_gasPrice', [])));
-        fees = { type: 0, gasPrice: gp + gp / 10n };
+        if (!/nonce too low/i.test(msg)) throw err;
+        const fresh = await readChainNonce();
+        return attempt(tx, fresh);
       }
-
-      const signed = await wallet.signTransaction({ ...base, ...fees });
-      const hash = await rpc.call('eth_sendRawTransaction', [signed]);
-      if (typeof hash !== 'string' || !hash.startsWith('0x')) {
-        /* A broadcast whose result cannot be read is NOT a broadcast that failed — the
-         * transaction may well be in flight. It raises so the caller reconciles against
-         * the chain rather than assuming either outcome. */
-        throw new Error(`eth_sendRawTransaction returned ${JSON.stringify(hash)}; the `
-          + 'transaction may or may not be in flight and MUST be reconciled against the '
-          + 'chain before anything else is sent.');
-      }
-      return hash;
     },
   };
 }

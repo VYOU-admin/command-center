@@ -28,6 +28,7 @@
  * IT RUNS ON `chain='drill'` so nothing it writes can reach the live dry run, and every
  * row is deleted and the deletion verified on a fresh connection.
  */
+import { AbiCoder, id } from 'ethers';
 import { bootstrap } from '../bootstrap.js';
 import { errorFields, log } from '../logger.js';
 import { BOT_SCHEMA } from '../bot/state.js';
@@ -71,6 +72,19 @@ interface Script {
   grantLands?: boolean;
   /** Make the broadcast itself reject. */
   sendRejects?: boolean;
+  /**
+   * THE DEADLOCK. Make the SWAP SIMULATION revert `Error("TRANSFER_FROM_FAILED")` until a
+   * grant has landed, which is what a real missing allowance does. Before 2026-09-17 this
+   * was unrecoverable by construction: the grant lived only AFTER the simulation, and the
+   * simulation could not pass without the grant.
+   */
+  simFailsUntilGranted?: boolean;
+}
+
+/** COMPUTED, never looked up. */
+const ERROR_STRING_SELECTOR = id('Error(string)').slice(0, 10);
+function abiString(t: string): string {
+  return AbiCoder.defaultAbiCoder().encode(['string'], [t]);
 }
 
 function fakeRpc(script: Script): { rpc: ExitRpc; calls: string[] } {
@@ -113,6 +127,13 @@ function fakeRpc(script: Script): { rpc: ExitRpc; calls: string[] } {
           return `0x${amt.toString(16).padStart(64, '0')}`;
         }
         /* The swap simulation against the router. */
+        if (script.simFailsUntilGranted && !granted) {
+          const err = new Error('execution reverted') as Error & { data?: string };
+          /* Error(string) selector + an ABI-encoded "TRANSFER_FROM_FAILED". */
+          err.data = ERROR_STRING_SELECTOR
+            + abiString('TRANSFER_FROM_FAILED').slice(2);
+          throw err;
+        }
         if (script.simulationFails) {
           const err = new Error('execution reverted') as Error & { data?: string };
           /* keccak('V4TooLittleReceived(uint256,uint256)')[0:4] + two words. */
@@ -133,13 +154,23 @@ function fakeBroadcaster(script: Script, address = OURS): {
   b: Broadcaster; sent: UnsignedTx[];
 } {
   const sent: UnsignedTx[] = [];
+  /* Mirrors the real signer: invalidated before the send, set after. */
+  let nextNonce: number | null = 200;
+  let lastUsed: number | null = null;
   return {
     sent,
     b: {
       address,
+      resyncNonce(): void { nextNonce = null; },
+      trackedNonce(): number | null { return nextNonce; },
+      lastNonce(): number | null { return lastUsed; },
       async send(tx: UnsignedTx): Promise<string> {
+        const nonce = nextNonce ?? 200;
+        nextNonce = null;
         sent.push(tx);
         if (script.sendRejects) throw new Error('transport exploded after submission');
+        nextNonce = nonce + 1;
+        lastUsed = nonce;
         return `0x${'cd'.repeat(32)}`;
       },
     },
@@ -279,6 +310,70 @@ async function main(): Promise<void> {
         + 'was sent)',
       err instanceof ExitUnrecoverableError && sent.length === 1,
       `type=${(err as Error)?.name} attempted_sends=${sent.length}`);
+    }
+
+    /* ---- 6b. THE DEADLOCK: SIMULATION FAILS ON THE ALLOWANCE ------------ */
+    /*
+     * THE CASE THAT COULD NOT PASS BEFORE 2026-09-17. The allowances are short, so the
+     * SIMULATION reverts `TRANSFER_FROM_FAILED` — and the grant used to live only after
+     * the simulation returned, so it was never reached. The exit path could never
+     * self-heal a missing approval, which is the one thing section 2D says it exists to
+     * do. Here the grant must fire FROM the simulation's own failure, the simulation must
+     * be retried, and exactly ONE sell must follow.
+     */
+    {
+      const s: Script = {
+        receipts: [{ status: '0x1', blockNumber: '0x3e8' }],
+        allowanceOk: false, grantLands: true, simFailsUntilGranted: true,
+      };
+      const { rpc } = fakeRpc(s);
+      const { b, sent } = fakeBroadcaster(s);
+      let raised = '';
+      try { await executeExit({ ...ctxBase, rpc, broadcaster: b }, base); }
+      catch (e) { raised = (e as Error).message; }
+      const approvals = sent.filter((t) => t.to.toLowerCase() !== UNIVERSAL_ROUTER).length;
+      const sells = sent.filter((t) => t.to.toLowerCase() === UNIVERSAL_ROUTER).length;
+      record('DEADLOCK: simulation fails on the ALLOWANCE -> grant fires, simulation '
+        + 'RETRIED, ONE sell sent',
+      approvals === 2 && sells === 1 && raised === '',
+      `approvals=${approvals} sells=${sells} raised="${raised.slice(0, 50)}"`);
+    }
+
+    /* ---- 6c. THE SAME, BUT THE GRANT CANNOT BE MADE ---------------------- */
+    {
+      const s: Script = {
+        receipts: [{ status: '0x0', blockNumber: '0x3e8' }],
+        allowanceOk: false, grantLands: false, simFailsUntilGranted: true,
+      };
+      const { rpc } = fakeRpc(s);
+      const { b, sent } = fakeBroadcaster(s);
+      let err: unknown = null;
+      try { await executeExit({ ...ctxBase, rpc, broadcaster: b }, base); }
+      catch (e) { err = e; }
+      const sells = sent.filter((t) => t.to.toLowerCase() === UNIVERSAL_ROUTER).length;
+      record('DEADLOCK: the grant cannot be made -> UNRECOVERABLE, NO SELL sent',
+        err instanceof ExitUnrecoverableError && sells === 0,
+        `type=${(err as Error)?.name} sells=${sells}`);
+    }
+
+    /* ---- 6d. THE CONTROL: A POOL PROBLEM MUST NOT TRIGGER A GRANT -------- */
+    /*
+     * **THIS IS THE CASE THAT MAKES 6b MEAN SOMETHING.** A fix that granted on every
+     * simulation failure would pass 6b and would spend gas on approvals for pools that
+     * were never going to pay — the exact thing section 2D's ordering exists to avoid. So
+     * the predicate must DISCRIMINATE: `V4TooLittleReceived` is the pool talking, the
+     * allowances are short, and NOTHING may be granted.
+     */
+    {
+      const s: Script = { receipts: [], simulationFails: true, allowanceOk: false };
+      const { rpc } = fakeRpc(s);
+      const { b, sent } = fakeBroadcaster(s);
+      let raised = '';
+      try { await executeExit({ ...ctxBase, rpc, broadcaster: b }, base); }
+      catch (e) { raised = (e as Error).message; }
+      record('CONTROL: V4TooLittleReceived with allowances short -> NO grant attempted',
+        sent.length === 0 && raised.includes('EXIT EXHAUSTED'),
+        `sent=${sent.length} (a grant here would be gas on a pool that pays nothing)`);
     }
 
     /* ---- 7. LIVE, ALLOWANCES SHORT AND UNGRANTABLE: NO SELL IS SENT ----- */

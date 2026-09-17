@@ -39,6 +39,7 @@ import {
   RECEIPT_TIMEOUT_MS, ROUND_TRIP_GAS_USD, SLIPPAGE_BPS,
 } from '../bot/config.js';
 import { buildSwap } from '../bot/calldata.js';
+import { checkSellable } from '../bot/sellability.js';
 import { ensureSellReadiness, plannedSends } from '../bot/approvals.js';
 import { readTokenBalance } from '../bot/allowance.js';
 import { awaitReceipt } from '../bot/receipt.js';
@@ -296,6 +297,7 @@ async function main(): Promise<void> {
   const stats = {
     ticks: 0, initializes: 0, candidates: 0, qualified: 0,
     simulated: 0, simClean: 0, simReverted: 0, skippedRail: 0,
+    sellChecked: 0, sellOk: 0, sellDisqualified: 0, sellNotRun: 0,
     exitClean: 0, exitReverted: 0, exitNotAttempted: 0,
     quoteRefused: 0, quoteReadFailed: 0,
     quoteBasis: {} as Record<string, number>,
@@ -310,6 +312,8 @@ async function main(): Promise<void> {
   const exitFails: string[] = [];
   const refusals: string[] = [];
   const reverts: string[] = [];
+  /** Reason -> count, so a disqualification rate is auditable rather than a total. */
+  const sellReasons = new Map<string, number>();
   let consecutiveReverts = 0;
   const railBlocks: string[] = [];
 
@@ -662,6 +666,58 @@ async function main(): Promise<void> {
           }
 
           /*
+           * =====================================================================
+           * THE PRE-BUY SELLABILITY CHECK — LAUNCHBOT.md section 2E
+           * =====================================================================
+           *
+           * CME's buy succeeded and its sell could never have. Nothing in the entry rule
+           * had ever asked the second question, and $10 is what that cost. This asks it
+           * BEFORE the buy is broadcast, by simulating our own sell from our own address
+           * at the full position size with the balance and both allowances supplied by
+           * state override.
+           *
+           * **IT RUNS ONLY ON A CANDIDATE WHOSE BUY ALREADY SIMULATES CLEAN**, so it is
+           * charged on the trades we would actually take rather than on every candidate.
+           *
+           * **IT RUNS IN DRY RUN TOO**, and blocks there as well, so the qualifying rate
+           * a dry run reports is the rate live would get. A check exercised only on the
+           * live path is a check nobody has run.
+           */
+          let sellOk = true;
+          let sellNote = 'not-run';
+          let sellDetail: string | null = null;
+          if (simOk) {
+            const owner = process.env['BOT_WALLET_ADDRESS']?.trim().toLowerCase();
+            if (owner === undefined || owner === '') {
+              /* REPORTED AS NOT RUN, NEVER AS A PASS. */
+              stats.sellNotRun += 1;
+              sellNote = 'NOT RUN — BOT_WALLET_ADDRESS is unset, so there is no address '
+                + 'to simulate our sell from';
+            } else {
+              stats.sellChecked += 1;
+              const v = await checkSellable(rpc, {
+                pool: { currency0: p.init.currency0, currency1: p.init.currency1,
+                  fee: p.init.fee, tickSpacing: p.init.tickSpacing, hooks: p.init.hooks },
+                token: p.token, owner, amountInWei: size,
+                zeroForOneBuy: p.zeroIsPricing,
+              });
+              sellOk = v.sellable;
+              sellNote = v.reason;
+              sellDetail = v.detail;
+              if (v.sellable) stats.sellOk += 1;
+              else {
+                stats.sellDisqualified += 1;
+                sellReasons.set(v.reason, (sellReasons.get(v.reason) ?? 0) + 1);
+                log.warn('DISQUALIFIED — WE COULD NOT HAVE SOLD IT', {
+                  pool: pid, token: p.token, reason: v.reason, detail: v.detail,
+                  tokens_the_buy_would_give: v.tokensOut?.toString() ?? null,
+                  code_bytes: v.codeBytes, calls: v.calls,
+                });
+              }
+            }
+          }
+
+          /*
            * THE EXIT IS NO LONGER SIMULATED AT ENTRY TIME. The position is OPENED here
            * and closed later, when its horizon actually arrives, by the same
            * `executeExit` the boot path uses.
@@ -725,7 +781,7 @@ async function main(): Promise<void> {
            * `intent` is already in `NON_TERMINAL`, so boot reconciliation resolves it
            * against the wallet's balance without anything further being added.
            */
-          const liveEntry = broadcaster !== null && simOk;
+          const liveEntry = broadcaster !== null && simOk && sellOk;
           const ins = await c.query<{ id: string }>(
             `insert into bot_trades (chain,mode,pool_id,token,counter,launchpad,fee,
                tick_spacing,hooks,status,init_block,first_swap_block,age_blocks_at_entry,
@@ -738,19 +794,23 @@ async function main(): Promise<void> {
              returning id::text`,
             [CHAIN, MODE, pid, p.token, p.counter, p.launchpad, p.init.fee,
               p.init.tickSpacing, p.init.hooks,
-              simOk ? (liveEntry ? 'intent' : 'holding') : 'sim_reverted',
+              !simOk ? 'sim_reverted'
+                : !sellOk ? 'unsellable_prebuy'
+                : (liveEntry ? 'intent' : 'holding'),
               p.init.blockNumber, firstSwapBlock,
               firstSwapBlock - p.init.blockNumber,
               (firstSwapBlock - p.init.blockNumber) / BLOCKS_PER_SECOND,
               size.toString(), RAILS.MAX_POSITION_USD, quoted.toString(), bound.toString(),
-              rate, buy.data, sell.data, liveEntry ? 'live-pending' : 'dry-run', simNote,
-              simOk ? 'pending' : 'entry_reverted',
+              rate, buy.data, sell.data, liveEntry ? 'live-pending' : 'dry-run',
+              sellOk ? simNote : `PRE-BUY SELLABILITY: ${sellNote}`
+                + `${sellDetail === null ? '' : ` — ${sellDetail}`}`,
+              !simOk ? 'entry_reverted' : !sellOk ? 'prebuy_unsellable' : 'pending',
               /* A LIVE POSITION IS OURS AND CARRIES NO BORROWED HOLDER. `exit_sim_from`
                * is the dry-run fixture; writing one on a live row would tell boot
                * reconciliation to read somebody else's balance to decide whether WE hold
                * the token. */
               liveEntry ? null : exitFrom, px,
-              simOk ? exitDue : null, quoteBasis]);
+              simOk && sellOk ? exitDue : null, quoteBasis]);
           if ((ins.rowCount ?? 0) === 0) {
             stats.rowsNotStored += 1;
             log.warn('INSERT STORED NOTHING', {
@@ -1079,6 +1139,11 @@ async function main(): Promise<void> {
     mode: MODE, minutes, ...stats, cu_spent: rpc.cuSpent,
     usd: ((rpc.cuSpent * 0.45) / 1e6).toFixed(5),
     revert_samples: reverts,
+    /* Reasons, not just a total: a disqualification for want of evidence and one
+     * on evidence mean different things about the population. */
+    sellability_disqualifications: Object.fromEntries(sellReasons),
+    sellability_qualifying_rate: stats.sellChecked > 0
+      ? `${((100 * stats.sellOk) / stats.sellChecked).toFixed(1)}%` : 'NOT RUN',
     rail_blocks: railBlocks,
     quote_refusals: refusals,
     exit_failures: exitFails,
