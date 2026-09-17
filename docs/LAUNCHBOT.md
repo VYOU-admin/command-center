@@ -4648,6 +4648,92 @@ construction and deploys no capital — nothing was bought — and no sweep will
 it. The qualifying rate and the reason breakdown are reported by the run itself.
 
 
+### THE UNATTENDED RUN LOST $120 AGAINST A $50 LIMIT — 2026-09-17
+
+**ONE DEFECT BLINDED ALL THREE CAPITAL RAILS AT ONCE, AND THE BOT KEPT BUYING BECAUSE IT
+BELIEVED IT HELD NOTHING.** Anyone reading this document for what the bot does must read
+this section before any return figure in it.
+
+```
+live trades today          13        wallet  $107.98 -> $7.71
+realised loss             -$120      approved daily limit  $50
+pools that paid ANYTHING    0 of 13  every one actual=0 at every rung
+positions recovered         0        all resolved closed_unsellable
+```
+
+#### THE MECHANISM, WHICH IS ONE LINE IN THE WRONG ORDER
+
+The per-tick exit sweep checked `exit_sim_from` for NULL **before** resolving who the
+seller is:
+
+```
+if (!d.exit_sim_from) { status = 'closed_unsimulatable'; continue; }   <- ran FIRST
+const seller = broadcaster === null ? d.exit_sim_from : broadcaster.address;
+```
+
+**LIVE ROWS CARRY `exit_sim_from = NULL` BY DESIGN.** Section 2D writes it null precisely
+so boot reconciliation reads OUR balance rather than a borrowed holder's. **So every live
+position reached that branch and was closed without one exit attempt, while the wallet
+still held every token** — verified on chain afterwards, five balances all non-zero.
+
+The line that computes the seller was always correct. It simply ran after the check that
+made it unreachable.
+
+#### WHY IT COST $120 RATHER THAN $10: THE STATUS IS IN NO SET
+
+`closed_unsimulatable` is in neither `NON_TERMINAL` nor `HELD`. So an abandoned position
+left, simultaneously:
+
+| rail | what it reads | what it saw |
+|---|---|---|
+| `MAX_CONCURRENT` | `NON_TERMINAL` | **0 open** — so it kept opening more |
+| `MAX_DEPLOYED_USD` | `HELD` | **$0 deployed** — never bound |
+| `MAX_DAILY_LOSS_USD` | `sum(net_pnl_usd)` | **$0** — and the rows carried NULL anyway |
+| boot reconciliation | `NON_TERMINAL` | nothing to reconcile |
+| the `needs_exit` sweep | `needs_exit` | nothing to sweep |
+
+**THE BOT OPENED THIRTEEN POSITIONS BECAUSE IT BELIEVED IT HAD NONE.** This is the
+"stranded in a status nothing sweeps" shape this document already records for
+`exit_exhausted` — and that entry called it a consequence rather than a hazard. **It is a
+hazard, it recurred on live money, and it recurred while unattended.**
+
+#### AND THE DAILY-LOSS RAIL COULD NOT HAVE FIRED EITHER WAY
+
+`net_pnl_usd` has been NULL on every row ever written, so `MAX_DAILY_LOSS_USD` summed to
+exactly $0 over four real total losses before this run even started. **Raising it from $15
+to $50 changed nothing until `resolve-unsellable` was made to write the loss.** Section 7D
+recorded this as "expected for a dry run"; on a live path it is the rail not existing.
+
+#### THE PRE-BUY CHECK WORKED AND IT WAS NOT THE PROBLEM
+
+`sellChecked 2, sellOk 2, disqualified 0` on the first run, and every one of the 13 tokens
+**transfers freely** — `Error("blacklisted")` appeared nowhere. Every loss was a pool that
+**paid at buy time and paid nothing ninety seconds later.** 2E answers *can this token be
+sold*; it does not and cannot answer *will this pool still exist at the horizon*, and
+`realised-backtest` already measured that dead pools outnumber honeypots four-to-forty
+times. **The check is working as specified and the specification does not cover this.**
+
+#### WHAT ELSE THIS SURFACED
+
+- **THE ARMING GATE BLOCKS ITS OWN RECOVERY.** At $7.71 the boot refuses — balance below
+  `MAX_CONCURRENT x MAX_POSITION_USD` — and the refusal happens BEFORE `clearNeedsExit`.
+  **A wallet drained by its own open positions cannot boot to sell them.** The guard that
+  stops new trades also stops the recovery of existing ones, which is the same shape as
+  the defect above. `resolve-unsellable` now accepts a LIVE `holding` row past its horizon
+  as the way out; the ordering itself is NOT fixed and is in section 7.
+- **A transient receipt poll ended the FIRST launch after ninety seconds** — fixed, drilled
+  15/15, and confirmed working in production at `receipt_wait_ms 1037` against the usual
+  15-23 ms.
+- **The nonce fix held throughout.** Thirteen buys and twenty-six approvals, every receipt
+  on the first or second poll, no replacement, no `nonce too low`.
+
+#### WHAT WAS NOT LOST, AND IT IS THE ONLY GOOD NEWS
+
+**Every position was recovered to a truthful terminal state rather than left open**: 0
+HELD rows, $0 deployed, `net_pnl_usd` now -$120 and readable by the rail that should have
+stopped it. The chain-wide halt is SET.
+
+
 ---
 
 ## 7. Rules here the code does not implement
@@ -4765,6 +4851,20 @@ category C.
   for those, and they were sent by a CLI rather than by the loop.
 
 ### D. Structural, and stated so they are not rediscovered
+
+- **A TERMINAL STATUS IN NO SET IS A CAPITAL RAIL SWITCHED OFF.** `closed_unsimulatable`
+  is in neither `NON_TERMINAL` nor `HELD`, and writing a live position into it blinded
+  `MAX_CONCURRENT`, `MAX_DEPLOYED_USD`, `MAX_DAILY_LOSS_USD`, boot reconciliation and the
+  needs_exit sweep at once — $120 of loss against a $50 limit. **Every status the code can
+  write must be checked against both sets before it ships**, and nothing enforces that.
+- **THE ARMING GATE BLOCKS ITS OWN RECOVERY, AND THIS IS NOT FIXED.** The wallet gate runs
+  BEFORE `clearNeedsExit`, so a wallet drained by its own open positions refuses to boot
+  and therefore cannot sell them. The recovery path is `resolve-unsellable` by hand. The
+  gate should refuse to ARM while still permitting the sweep that closes existing
+  positions.
+- **`net_pnl_usd` IS WRITTEN ONLY BY `resolve-unsellable`.** A filled exit still records
+  no PnL, so `MAX_DAILY_LOSS_USD` sees losses only once a position is written off and
+  never sees a completed round trip.
 
 - **`bot_horizon_prices` and `bot_exit_attempts` accumulate and nothing prunes them.**
 - ~~An automatic halt is chain-wide when it should be mode-scoped~~ — **FIXED 2026-09-16,
