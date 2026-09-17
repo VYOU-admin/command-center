@@ -93,9 +93,28 @@ async function main(): Promise<void> {
   await probe(`${LIVE_FLAG} combined with --run-label`, 'REFUSED',
     () => resolveMode([LIVE_FLAG, '--run-label', 'x'], {}));
 
-  /* ---- 6. LIVE WITH NO KEY REFUSES AT STARTUP, NOT MID-TRADE -------------- */
-  const keyWasSet = process.env[KEY_ENV] !== undefined;
-  await probe(`createBroadcaster in LIVE mode with ${KEY_ENV} unset`, 'REFUSED',
+  /* ---- 6. LIVE + KEY: THE CASE WHOSE PREMISE THE WORLD CHANGES ------------- */
+  /*
+   * **THIS CASE'S EXPECTATION FLIPS WHEN A KEY EXISTS, AND THAT IS NOT THE TEST BEING
+   * WEAKENED.** It was written to prove that live mode refuses AT STARTUP rather than
+   * mid-trade when the key is missing, and LAUNCHBOT.md section 8 step 4 predicted in
+   * advance that it "becomes vacuous the moment a key exists and the drill SAYS SO".
+   *
+   * A key is now set, so asserting REFUSED would fail for the right reason — the premise
+   * is gone. Asserting the opposite is not a softer test, it is a DIFFERENT and equally
+   * real one: with a key present, live mode must construct a signer rather than refuse,
+   * which is the only way to tell "the gate is off" from "the feature is missing".
+   *
+   * The expectation therefore follows the world, and the drill reports WHICH assertion it
+   * made so nobody reads a pass here as proof of the other.
+   */
+  const keyWasSet = (process.env[KEY_ENV] ?? '').trim() !== '';
+  await probe(
+    keyWasSet
+      ? `createBroadcaster in LIVE mode WITH ${KEY_ENV} set -> constructs (the no-key `
+        + 'refusal is no longer demonstrable: the premise is gone)'
+      : `createBroadcaster in LIVE mode with ${KEY_ENV} unset -> refuses at startup`,
+    keyWasSet ? 'ALLOWED' : 'REFUSED',
     () => createBroadcaster(live, { call: async () => '0x1237' }));
 
   /* ---- 7. THE PATH EXISTS: IN LIVE MODE THE CLIENT CONSTRUCTS ------------- */
@@ -140,9 +159,12 @@ async function main(): Promise<void> {
     key_env_var: KEY_ENV,
     key_present_in_this_process: keyWasSet,
     note: keyWasSet
-      ? `${KEY_ENV} IS SET in this process — case 6 proved nothing and this run is not a `
-        + 'valid demonstration of the no-key refusal'
-      : `${KEY_ENV} is NOT set, so case 6 is a real demonstration`,
+      ? `${KEY_ENV} IS SET in this process, so the no-key refusal is NOT demonstrated by `
+        + 'this run. Case 6 asserted the opposite instead — that live mode with a key '
+        + 'CONSTRUCTS a signer — which distinguishes "the gate is off" from "the feature '
+        + 'was never built". The no-key refusal was demonstrated before the key arrived '
+        + 'and is recorded in LAUNCHBOT.md section 2A.'
+      : `${KEY_ENV} is NOT set, so case 6 is a real demonstration of the no-key refusal`,
     results: results.map((r) => `${r.got === r.expect ? 'PASS' : 'FAIL'}  `
       + `[${r.expect}] ${r.name}\n        -> ${r.detail}`),
   });
