@@ -60,7 +60,8 @@
     "nightly-check": "node dist/cli/nightly-check.js",
     "quote-check": "node dist/cli/quote-check.js",
     "seed-stuck": "node dist/cli/seed-stuck.js",
-    "wallet-probe": "node dist/cli/wallet-probe.js"
+    "wallet-probe": "node dist/cli/wallet-probe.js",
+    "migrate-stuck-status": "node dist/cli/migrate-stuck-status.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
