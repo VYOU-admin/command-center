@@ -1354,7 +1354,7 @@ database value is editable by anything with a connection.
 | max concurrent | 5 | $50 of $100 at risk, leaving headroom for a stuck exit |
 | **max deployed** | **$100** | **the hard capital cap — the wallet is personal and the bot is not entitled to all of it. See below.** |
 | max trades/day | 40 | ~8% of the 485/day available in the SELLOFF window |
-| max daily loss | $15 | 15% of capital |
+| max daily loss | **$50** | **raised from $15 on 2026-09-17, operator-approved, on the measured loss distribution — $15 halted 33.3% of bootstrapped days. See section 6.** |
 | consecutive simulation reverts | 3 | a broken calldata shape must stop at once |
 | kill switch | a Postgres row, re-read on a fresh connection every tick | a memory flag dies with the container and cannot be set from outside |
 
@@ -4501,6 +4501,153 @@ pools paying zero rather than a modelling artefact.
   rather than dropped.
 
 
+### FOUR FIXES BEFORE AN UNATTENDED RUN — 2026-09-17
+
+The operator raised `MAX_DAILY_LOSS_USD`, asked for the two defects that killed the first
+live run to be fixed and exercised, and for 2E to be built. **Every one is exercised
+rather than asserted, and two of the exercises are real transactions.**
+
+#### 1. `MAX_DAILY_LOSS_USD` 15 -> 50, AND THE OLD VALUE WAS FIRING ON A THIRD OF DAYS
+
+**$15 was an arithmetic relationship to another rail — "15% of the $100 capital" — chosen
+before the loss distribution existed.** It is 1.5 positions, so two total losses breach
+it, against a total-loss rate `exit-simulate` measured at 13.3%-29.0% by window.
+
+`daily-loss-derive` bootstraps 20,000 days of `MAX_TRADES_PER_DAY` draws from the 1,046
+measured round trips and asks what fraction of days each candidate halts. **It is the
+RUNNING minimum that matters, not the day's close** — a day ending at +$40 having passed
+through -$55 was halted at -$55.
+
+| threshold | POOLED | MIDPOINT | CALM | SELLOFF |
+|---|---|---|---|---|
+| **$15** | **33.3%** | 11.5% | 25.1% | **45.5%** |
+| $25 | 19.0% | 3.8% | 12.2% | 30.1% |
+| $40 | 7.7% | 0.7% | 4.1% | 15.5% |
+| **$50** | **4.0%** | **0.2%** | **2.0%** | **9.9%** |
+| $75 | 0.7% | 0.0% | 0.3% | 2.7% |
+
+**THE DATA OFFERS NO NATURAL BREAK.** The curve runs smoothly from 33% to 0.1%, so $50 is
+an operator preference informed by the rate rather than a value the distribution
+identifies — the same standing this document gives `top_percent`. What the measurement
+settles is the direction: **a rail that stops a positive-expectation mode on one day in
+three is mistaking an ordinary day for a bad one.**
+
+**EVERY FIGURE IS A FLOOR.** The bootstrap draws independently and real launches
+correlate — one launchpad shipping a bad template produces a run of losses more readily
+than independence implies — so the true rate at any threshold is at least the one shown.
+
+**`MAX_DEPLOYED_USD` WAS NOT RAISED WITH IT, AND IT SHADOWS THE NEW RAIL.** `deployed` is
+open basis plus realised losses, so with concurrency full ($50 open) only **$40** of
+losses is admitted before the cap blocks — below the $50 rail. The operator approved a
+larger daily loss, not a larger total exposure. **The worst case of a run is therefore
+still ~$100, not $50**, against a wallet holding $126.90.
+
+**rail-drill: 32 of 32 at the new value**, every case derived from the constant rather
+than typed, so raising it could not silently make a case breach two rails at once and
+pass its expectation while proving nothing about which fired.
+
+#### 2. THE NONCE IS TRACKED, AND THE PROOF IS THREE REAL TRANSACTIONS
+
+**`eth_getTransactionCount('pending')` LAGS A RECEIPT WE HAVE ALREADY CONFIRMED.** Trade
+614's STEP 2 was rejected `nonce too low: tx: 136 state: 137`. The chain now SEEDS the
+counter and confirmed sends ADVANCE it; a broadcast that threw INVALIDATES it.
+
+**IT IS INVALIDATED BEFORE THE BROADCAST AND SET AFTER, NEVER THE OTHER WAY ROUND**, so a
+throw anywhere between leaves it invalid — the only honest state, since a throw is not
+proof nothing was sent.
+
+**A DRILL AGAINST A TEST DOUBLE WOULD HAVE TESTED THE DOUBLE'S ARITHMETIC**, so
+`nonce-drill` sends three bounded USDG approvals of one raw unit — the shape section 8
+step 5 chose for the first transaction this project ever signed, for the same reason: if
+the nonce handling is wrong it is wrong on a call that moves nothing.
+
+```
+send 1  0xd1ad8b91…  nonce 138   tracked null (seeded from the chain)   23 ms, 1 poll
+send 2  0x33d73839…  nonce 139   tracked 139                            23 ms, 1 poll
+send 3  0x8c683f4d…  nonce 140   tracked 140                            21 ms, 1 poll
+
+PASS  a fresh signer tracks NOTHING and must seed from the chain
+PASS  every send was MINED
+PASS  the nonces READ BACK FROM THE CHAIN are strictly consecutive   138 -> 139 -> 140
+PASS  the nonce the signer TRACKED equals the one the chain recorded
+PASS  between any two SENDs there is a RECEIPT
+PASS  resyncNonce() drops the tracked value                          before=141 after=null
+6 of 6, 990 CU
+```
+
+**`'pending'` DID NOT LAG ON THIS RUN, AND THAT IS REPORTED AS NO LAG RATHER THAN AS
+PROOF.** All three sends agreed with the chain. The lag is intermittent — it fired once,
+on trade 614, and cost the run — so its absence here says nothing about whether the old
+code was safe. **What IS proven is the property the fix needed**: the tracked value equals
+the nonce the chain recorded, on every send, and no second transaction is ever in flight.
+
+**THE COMPILER FOUND BOTH TEST DOUBLES** when the three new members were made required
+rather than optional, which is the same result making `mode` required produced for
+`state.halt()`. Both now mirror the invalidate-then-set discipline.
+
+#### 3. THE APPROVAL DEADLOCK, AND THE CONTROL IS WHAT MAKES THE FIX MEAN ANYTHING
+
+`exit-exec` granted the Permit2 approval only AFTER the rung's simulation returned — and
+a position with missing allowances **cannot get a simulation to return**: it reverts
+`TRANSFER_FROM_FAILED` or `AllowanceExpired` first. So the one path written to make a
+failed inline grant recoverable could never run, and a `needs_exit` row whose approvals
+never landed was permanently unsellable.
+
+**THE FIX LETS THE DECODED REASON DECIDE**, rather than moving the grant earlier
+unconditionally — which would spend gas on pools that were never going to pay. Matching is
+on the decoded payload, never a substring of a bare message: `execution reverted` carries
+no information and guessing from it is how an unrelated failure triggers a grant nobody
+asked for.
+
+```
+PASS  DEADLOCK: simulation fails on the ALLOWANCE -> grant fires, simulation RETRIED,
+      ONE sell sent                                     approvals=2 sells=1 raised=""
+PASS  DEADLOCK: the grant cannot be made -> UNRECOVERABLE, NO SELL sent
+PASS  CONTROL: V4TooLittleReceived with allowances short -> NO grant attempted   sent=0
+exit-broadcast-drill 14 of 14
+```
+
+**THE CONTROL IS THE CASE THAT MATTERS.** A fix that granted on every simulation failure
+would pass the first case and would spend gas on approvals for dead pools. The third case
+is what proves the predicate discriminates between the token refusing us and the pool
+declining to pay.
+
+**THE BEFORE-STATE IS ESTABLISHED BY CONSTRUCTION RATHER THAN BY RUNNING THE OLD CODE**,
+and that is stated rather than glossed: with the grant reachable only after a simulation
+that throws, case 6b's input produced `EXIT EXHAUSTED` with zero approvals and zero sells.
+The old code was not re-run to watch it fail.
+
+#### 4. THE PRE-BUY SELLABILITY CHECK IS BUILT — AND A THIN POOL DOES NOT DISQUALIFY
+
+2E as specified, using the override machinery `exit-simulate` proved over 2,092 historical
+round trips: our own sell, from our own address, at the full position size, before the buy
+is broadcast, with the balance and both allowances supplied by state override and **every
+override verified by reading it back through the contract's own view.**
+
+**IT RUNS ONLY ON A CANDIDATE WHOSE BUY ALREADY SIMULATES CLEAN**, so it is charged on
+trades we would actually take. **It runs in dry run too, and blocks there**, so a dry run's
+qualifying rate is the rate live would get.
+
+**A THIN POOL IS NOT A HONEYPOT, AND THAT NARROWS 2E's DRAFT DELIBERATELY.** The draft
+disqualified on an extreme tax and on proxy-ness; neither survives contact with the
+measurement. `Error("blacklisted")` appeared **ZERO times in 2,092 simulated sells**, so
+the unrecoverable case is rare while thin pools are most of the population — and refusing
+them would repeat the `revert-economics` mistake of selecting against pools where anything
+is happening. **Proxy-ness is recorded on the row and does not disqualify**: it is a proxy
+for the risk where the sell simulation is the direct test of it.
+
+```
+DISQUALIFY   the sell REVERTS, decoded          the token refuses us
+DISQUALIFY   the sell pays EXACTLY ZERO         a dead pool
+DISQUALIFY   the storage slots cannot be found  UNKNOWN -- fails closed, counted apart
+PASSES       the sell pays LITTLE but non-zero  thinness is the bound's business
+```
+
+**`unsellable_prebuy` SITS OUTSIDE `NON_TERMINAL` AND `HELD`**, so it is terminal by
+construction and deploys no capital — nothing was bought — and no sweep will ever look for
+it. The qualifying rate and the reason breakdown are reported by the run itself.
+
+
 ---
 
 ## 7. Rules here the code does not implement
@@ -4571,18 +4718,19 @@ category C.
 
 ### C. Paths that exist and have never executed
 
-- **THE PRE-BUY SELLABILITY CHECK (2E) IS SPECIFIED AND DOES NOT EXIST.** Nothing in
-  the loop asks whether a token can be sold before buying it. Its feasibility was
-  measured — state overrides are honoured and the storage slots are discoverable — but
-  no code, no drill and no measured qualifying rate exist. **Until it is built the rule
-  buys honeypots**, and that is the single largest known defect in this document.
-- **THE POST-BUY RE-CHECK (2E-2) IS SPECIFIED AND DOES NOT EXIST.** A position that
-  becomes unsellable after entry still waits out the full +90 s horizon.
-- **THE `exit-exec` ALLOWANCE DEADLOCK IS UNFIXED.** The Permit2 grant is attempted
-  only AFTER the rung simulation passes, and the simulation cannot pass without the
-  grant, so the exit path can never self-heal a missing approval.
-- **THE NONCE IS STILL RE-READ PER TRANSACTION.** `eth_getTransactionCount(pending)`
-  lagged a receipt already confirmed and killed the first live run at trade 614.
+- ~~**THE PRE-BUY SELLABILITY CHECK (2E) DOES NOT EXIST**~~ — **BUILT 2026-09-17**,
+  `bot/sellability.ts`, wired into the loop before the buy and blocking in dry run too.
+  **Its qualifying rate against live launches is still unmeasured** until a run reports
+  one, and a thin pool deliberately does not disqualify.
+- **THE POST-BUY RE-CHECK (2E-2) IS SPECIFIED AND STILL DOES NOT EXIST.** A position that
+  becomes unsellable after entry still waits out the full +90 s horizon. The pre-buy check
+  cannot see an owner who flips a switch after we are in, and this is the half that would.
+- ~~**THE `exit-exec` ALLOWANCE DEADLOCK IS UNFIXED**~~ — **FIXED 2026-09-17.** A
+  simulation failure decoding to an allowance error grants and retries once; a control
+  case proves `V4TooLittleReceived` with short allowances attempts NO grant.
+- ~~**THE NONCE IS STILL RE-READ PER TRANSACTION**~~ — **FIXED AND EXERCISED ON THREE
+  REAL TRANSACTIONS 2026-09-17**, nonces 138 -> 139 -> 140. `'pending'` did not lag on
+  that run, which is reported as no lag rather than as proof.
 - **The impact term has fired twice in 66 live trades.** Effectively inert.
 - **NO EXIT HAS EVER BEEN BROADCAST.** The path exists and its orchestration is drilled,
   but `bot_exit_attempts` contains no row whose detail came from a real receipt — every
