@@ -75,6 +75,7 @@ import { ExitUnrecoverableError, boundForAttempt, boundedMinOut, exitWithRetry }
 import type { ExitAttempt, ExitOutcome, ExitQuote, SendResult } from './exit.js';
 import { POOL_MANAGER, UNIVERSAL_ROUTER } from './config.js';
 import { checkSellReadiness } from './allowance.js';
+import { awaitReceipt } from './receipt.js';
 import type { Broadcaster } from './signer.js';
 import { TOPICS } from '../adapters/token-updates/decode.js';
 import { log } from '../logger.js';
@@ -387,52 +388,52 @@ export async function executeExit(
       });
 
       /* ---- STEP 4: THE RECEIPT DECIDES, AND AN ABSENT ONE IS NOT A FAILURE - */
-      const waitStart = nowMs();
-      const deadline = waitStart + (ctx.receiptTimeoutMs ?? RECEIPT_TIMEOUT_MS);
-      let polls = 0;
-      for (;;) {
-        polls += 1;
-        const rec = (await ctx.rpc.call('eth_getTransactionReceipt', [hash])) as
-          { status?: string; blockNumber?: string } | null;
-        if (rec !== null && rec !== undefined && rec.status !== undefined) {
-          const status = Number(BigInt(rec.status));
-          if (status === 1) {
-            /*
-             * THE TIMING IS RETURNED, NOT JUST LOGGED. `receipt-timing` could measure the
-             * availability half of this wait and NOT the inclusion half, because nothing
-             * here can send. These two figures are the first real measurement of it, and
-             * they land in columns rather than in a text field because
-             * `bot_exit_attempts` is a measurement table rather than a log.
-             */
-            return {
-              detail: `BROADCAST FILLED ${hash} in block `
-                + `${rec.blockNumber === undefined ? '?' : Number(BigInt(rec.blockNumber))}`,
-              receiptWaitMs: nowMs() - waitStart,
-              receiptPolls: polls,
-            };
-          }
-          /*
-           * MINED AND REVERTED. This IS an ordinary failure: the transaction is settled,
-           * nothing is in flight, and the next rung is safe to try. The price moved
-           * between the call and the broadcast, which is the race this design accepts.
-           */
-          throw new Error(`broadcast ${hash} MINED AND REVERTED (status 0) — the pool `
-            + 'moved between the simulation and the send');
-        }
-        if (nowMs() >= deadline) {
-          /*
-           * NO RECEIPT. The transaction is neither confirmed nor known to have failed, so
-           * the position's state is UNKNOWN. This must not advance the ladder and must
-           * not be recorded as a failure — both would be a plausible value on an error
-           * path, and the second would send another sell.
-           */
-          throw new ExitUnrecoverableError(`NO RECEIPT for ${hash} after `
-            + `${ctx.receiptTimeoutMs ?? RECEIPT_TIMEOUT_MS} ms. THE POSITION STATE IS `
-            + 'UNKNOWN: the sell may still land. The ladder has STOPPED and no second '
-            + 'transaction was sent. Boot reconciliation against the chain settles this.');
-        }
-        await pollWait(RECEIPT_POLL_MS);
+      /*
+       * THE WAIT ITSELF LIVES IN `bot/receipt.ts`, shared with `approve-setup`. It returns
+       * the outcome rather than throwing, because `mined`, `reverted` and `unknown` are
+       * three different facts and each caller reacts differently — here a revert advances
+       * the ladder and an absent receipt stops it.
+       */
+      const rec = await awaitReceipt(ctx.rpc, hash, {
+        timeoutMs: ctx.receiptTimeoutMs ?? RECEIPT_TIMEOUT_MS,
+        pollMs: RECEIPT_POLL_MS,
+        wait: pollWait,
+        ...(ctx.now ? { now: ctx.now } : {}),
+      });
+
+      if (rec.outcome === 'mined') {
+        /*
+         * THE TIMING IS RETURNED, NOT JUST LOGGED. `receipt-timing` could measure the
+         * availability half of this wait and NOT the inclusion half, because nothing
+         * here can send. These two figures are the first real measurement of it, and
+         * they land in columns rather than in a text field because `bot_exit_attempts`
+         * is a measurement table rather than a log.
+         */
+        return {
+          detail: `BROADCAST FILLED ${hash} in block ${rec.blockNumber ?? '?'}`,
+          receiptWaitMs: rec.waitMs,
+          receiptPolls: rec.polls,
+        };
       }
+      if (rec.outcome === 'reverted') {
+        /*
+         * MINED AND REVERTED. This IS an ordinary failure: the transaction is settled,
+         * nothing is in flight, and the next rung is safe to try. The price moved
+         * between the call and the broadcast, which is the race this design accepts.
+         */
+        throw new Error(`broadcast ${hash} MINED AND REVERTED (status 0) — the pool `
+          + 'moved between the simulation and the send');
+      }
+      /*
+       * NO RECEIPT. The transaction is neither confirmed nor known to have failed, so
+       * the position's state is UNKNOWN. This must not advance the ladder and must not
+       * be recorded as a failure — both would be a plausible value on an error path,
+       * and the second would send another sell.
+       */
+      throw new ExitUnrecoverableError(`NO RECEIPT for ${hash} after ${rec.waitMs} ms `
+        + `(${rec.polls} polls). THE POSITION STATE IS UNKNOWN: the sell may still land. `
+        + 'The ladder has STOPPED and no second transaction was sent. Boot reconciliation '
+        + 'against the chain settles this.');
     },
 
     record: async (a: ExitAttempt): Promise<void> => {

@@ -73,9 +73,15 @@ import { createBroadcaster } from '../bot/signer.js';
 import { buildPermit2Approve, buildTokenApprove } from '../bot/calldata.js';
 import { PERMIT2, RAILS, UNIVERSAL_ROUTER } from '../bot/config.js';
 import { configuredWallet } from '../bot/wallet.js';
+import { awaitReceipt } from '../bot/receipt.js';
 
 const abi = AbiCoder.defaultAbiCoder();
 const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
+/* The same figures exit-exec uses, and derived there: receipt availability measured at
+ * 60 of 60 on the first ask with a 36 ms maximum, against an inclusion half that could
+ * not be measured without sending. These transactions are what measure it. */
+const RECEIPT_TIMEOUT_MS = 60_000;
+const RECEIPT_POLL_MS = 1_000;
 
 /** Selectors COMPUTED from keccak, never transcribed. A wrong one returns `0x`. */
 const ERC20_ALLOWANCE = id('allowance(address,address)').slice(0, 10);
@@ -243,20 +249,51 @@ async function main(): Promise<void> {
   const sender = new BroadcastRpc(inner, mode);
   const sent: string[] = [];
 
-  if (step1Needed === 'SEND') {
-    const tx = buildTokenApprove(token, amount);
+  /*
+   * EACH STEP IS CONFIRMED BEFORE THE NEXT IS SENT, AND THAT IS NOT CAUTION FOR ITS OWN
+   * SAKE — IT IS A NONCE HAZARD.
+   *
+   * `signer.send` reads the nonce per transaction as `'pending'`, deliberately, so a
+   * replaced container cannot reuse one. On a node that does not track the mempool,
+   * `'pending'` equals `'latest'` — and then sending step 2 before step 1 is mined gives
+   * BOTH THE SAME NONCE, so the second either replaces the first or is refused as a
+   * duplicate. Step 1 would silently never happen while the run reported two broadcasts.
+   *
+   * So: send, wait for the receipt, and only continue if it MINED. The wait is
+   * `bot/receipt.ts`, shared with `exit-exec` rather than copied.
+   */
+  const send = async (label: string, tx: { to: string; data: string; value: bigint;
+    description: string }): Promise<void> => {
     const hash = await bcast.send({ to: tx.to, data: tx.data, value: tx.value,
       description: tx.description });
-    sent.push(`step 1 ${hash}`);
-    log.warn('STEP 1 BROADCAST', { hash, what: tx.description });
-  }
+    log.warn(`${label} BROADCAST`, { hash, what: tx.description });
+    const rec = await awaitReceipt(rpc, hash, {
+      timeoutMs: RECEIPT_TIMEOUT_MS, pollMs: RECEIPT_POLL_MS,
+    });
+    log.info(`${label} RECEIPT`, {
+      hash, outcome: rec.outcome, block: rec.blockNumber,
+      receipt_wait_ms: rec.waitMs, receipt_polls: rec.polls,
+      note: 'the first real measurement of the inclusion half of the receipt wait — '
+        + 'receipt-timing could only measure availability, because nothing could send',
+    });
+    sent.push(`${label} ${hash} ${rec.outcome} in block ${rec.blockNumber ?? '?'} `
+      + `after ${rec.waitMs} ms / ${rec.polls} polls`);
+    if (rec.outcome === 'reverted') {
+      throw new Error(`${label} was MINED AND REVERTED (${hash}). Nothing further is `
+        + 'sent: the allowance is not in place and a second transaction would be built '
+        + 'against a state that does not exist.');
+    }
+    if (rec.outcome === 'unknown') {
+      throw new Error(`${label} produced NO RECEIPT in ${rec.waitMs} ms (${hash}). It may `
+        + 'still land, so NOTHING FURTHER IS SENT — a second transaction now could reuse '
+        + 'its nonce and replace it. Read the allowances from the chain before retrying.');
+    }
+  };
+
+  if (step1Needed === 'SEND') await send('STEP 1 token -> Permit2', buildTokenApprove(token, amount));
   if (step2Needed === 'SEND') {
-    const expiry = now + 3600;
-    const tx = buildPermit2Approve(token, amount, expiry);
-    const hash = await bcast.send({ to: tx.to, data: tx.data, value: tx.value,
-      description: tx.description });
-    sent.push(`step 2 ${hash}`);
-    log.warn('STEP 2 BROADCAST', { hash, what: tx.description, expiry });
+    await send('STEP 2 Permit2 -> router',
+      buildPermit2Approve(token, amount, now + 3600));
   }
   void sender;
 
