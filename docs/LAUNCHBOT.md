@@ -2840,6 +2840,100 @@ of anything.** It is recorded because it is the first live data point in the dir
 offline measurement predicted, and the figure to watch on the next full run is the revert
 rate against that 7%.
 
+### THE RECEIPT TIMEOUT, MEASURED — 2026-09-16
+
+`npm run receipt-timing --samples 60`, 2,970 CU. It runs **the same poll loop `exit-exec`
+runs after a broadcast**, against the same endpoint, the instant a block appears at head —
+so the figure is the one that matters rather than a proxy for it.
+
+#### THE TIMEOUT COVERS TWO THINGS AND ONLY ONE IS MEASURABLE WITHOUT A KEY
+
+| | | |
+|---|---|---|
+| **B. RECEIPT AVAILABILITY** | **MEASURED** | **60 of 60 served on the FIRST ask.** median 20 ms, p90 24 ms, max 36 ms, 0 reached the cap |
+| **A. INCLUSION** | **NOT MEASURED** | nothing here can send, and another party's submission time is in no available method |
+
+**There is effectively no indexing lag on this endpoint**: once a block is at head, its
+receipts are queryable immediately. That is the half the loop was written to survive, and
+it turns out to cost nothing.
+
+**A IS THE DOMINANT TERM AND IT IS BOUNDED RATHER THAN MEASURED.** Observing somebody
+else's transaction cannot substitute: a transaction in a block carries no record of when it
+was offered, and the mempool is in none of these methods. What the run does bound it with:
+
+```
+block interval        100.52 ms   6,936 ms of wall clock over 69 blocks
+congestion            gas used median 1.27 M, max 9.55 M, against a 2^50 nominal limit
+tx per block          median 8, max 48
+head retreats         0 observed
+```
+
+**THE BLOCK INTERVAL INDEPENDENTLY REPRODUCES `ROBINHOOD.md`'S ~101 ms BY A DIFFERENT
+METHOD.** That document measured it from chain timestamps over 935,564 blocks and 94,548 s;
+this measured wall clock through the Alchemy endpoint over 69 blocks. **Two methods, two
+orders of magnitude apart in sample size, agreeing to half a percent** — which is worth
+more than either alone, and is the first confirmation of that constant from outside its own
+derivation.
+
+**Congestion is not a factor**, so a fee-paying transaction should be included in the next
+block or two — an inference from the gas figures, not an observation of our own
+transaction, and labelled as such.
+
+#### THE VALUE STAYS AT 60 s, AND IS NOW JUSTIFIED RATHER THAN ARBITRARY
+
+The expected total is **~250 ms**, so the constant is **240x it**. That margin is deliberate:
+
+- **THE ASYMMETRY IS SEVERE.** Firing early raises `ExitUnrecoverableError`, stops the
+  ladder at one transaction, and leaves a position for a human to reconcile against the
+  chain. Firing late only makes the bot wait on a $10 position.
+- **THE DOMINANT TERM IS UNMEASURED.** Tightening towards a figure whose largest component
+  has never been observed would be deriving precision from the half that happens to be
+  measurable — a bound of one's own presented as a fact, which is the failure this document
+  keeps recording.
+
+**WHAT NO TIMEOUT COVERS:** a transaction never included at all — underpriced or dropped.
+Nothing distinguishes that from a slow one, which is exactly why reaching this bound raises
+UNRECOVERABLE rather than counting as a failed attempt.
+
+#### IT IS NOW INSTRUMENTED, SO THE UNMEASURED HALF MEASURES ITSELF
+
+`bot_exit_attempts` gains **`receipt_wait_ms`** and **`receipt_polls`**, written on every
+broadcast attempt. **The first real exits therefore measure the inclusion half that this
+pass could not**, from our own transactions rather than from other people's blocks, and the
+timeout is re-derived from that rather than staying a margin for ever.
+
+Verified on a fresh connection: both columns exist, and **0 of 43 attempt rows carry a
+timing — because no exit has ever been broadcast.** That zero is the honest state of it.
+
+#### TWO DEFECTS THIS MEASUREMENT FOUND IN ITSELF, AND ONE IN THE SCHEMA
+
+**THE FIRST RUN REPORTED A 155 ms BLOCK INTERVAL, AND IT WAS MEASURING MY OWN POLL RATE.**
+Against `ROBINHOOD.md`'s ~101 ms, 53% high. The cause: at a ~115 ms effective poll period
+head sometimes advances TWO blocks between observations, and the tool counted that as one
+gap. **10 of 59 observations did exactly that.** The fix is to record how many blocks head
+advanced and divide elapsed by BLOCKS, which is immune to the poll rate — and the corrected
+figure is the 100.52 ms above.
+
+**This is the third instance of one shape in this document**: `surv_1h` reading 0.02%
+because it measured its own window cap, the +600 s horizon reading exactly 0.00000 because
+it asked for a trade after its own last tick, and now a block interval reading the
+sampler's period. **A figure that disagrees with an established constant by tens of percent
+is the tell**, and the established constant is what caught it.
+
+**THE FIRST RUN ALSO REPORTED CONGESTION AS 0% AT BOTH THE MEDIAN AND THE MAX**, which
+tells a reader nothing and is indistinguishable from a statistic never computed. The raw
+figures are now reported beside it — and they are the interesting part: the gas limit is
+`2^50`, a nominal value, so the percentage was always going to be meaningless and the
+absolute gas used is the only informative number.
+
+**AND THE SCHEMA CHANGE HAD TWO BUGS, ONE OF WHICH ANNOUNCED ITSELF.** The `alter table`
+statements were first written ABOVE the `create table if not exists` they alter — which
+would have worked on this container, where the table already exists, **and failed on a
+rebuild**, since an alter on a missing table is an error that aborts the whole statement.
+That is the shape `ROBINHOOD.md` records for `token_swap_logs`. The second bug was louder:
+the comment explaining the first used backticks to quote SQL identifiers, and `BOT_SCHEMA`
+is a backtick template literal, so it terminated the string and broke the build instantly.
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
@@ -2944,11 +3038,14 @@ category C.
   rung, a receipt deciding, an unconfirmed send stopping the ladder. **It proves nothing
   about signing, gas estimation, nonce handling or the chain accepting our bytes.** No line
   of `signer.ts` has run against a real key.
-- **THE RECEIPT TIMEOUT IS 60 SECONDS AND IS NOT MEASURED.** It is a bound chosen so the
-  poll terminates, not a figure derived from how long this chain takes to mine. At ~0.1 s
-  blocks it is many blocks, but the right value is whatever makes a false "no receipt"
-  rare, and that has never been measured. A false timeout is expensive: it stops the ladder
-  and leaves a position whose state must be reconciled by hand.
+- ~~The receipt timeout is 60 seconds and is not measured~~ — **MEASURED 2026-09-16, and
+  KEPT at 60 s with its reasoning.** The receipt-availability half is measured exactly (60
+  of 60 on the first ask, max 36 ms); the inclusion half **cannot be measured without
+  sending** and is bounded from a 100.52 ms block interval and absent congestion. The
+  constant is 240x the ~250 ms expected total, deliberately, because firing early is far
+  more expensive than firing late and the dominant term is unobserved. **What remains open
+  is the inclusion half itself** — `bot_exit_attempts.receipt_wait_ms` and `receipt_polls`
+  now capture it, and are NULL on all 43 rows because no exit has ever been broadcast.
 - **The +450 s peak on the bot's own trades contradicts the offline holdout**, where
   +450 s is exactly 0.00000 in every window and both halves. Unresolved.
 - **THE REFUSED-TRADE MOMENTUM PATTERN IS A HYPOTHESIS.** Within the bot's 29 refused
