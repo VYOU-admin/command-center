@@ -38,6 +38,7 @@
  *
  * Dry by default. Counts before, counts after, on a fresh connection.
  */
+import { AbiCoder, id } from 'ethers';
 import { bootstrap } from '../bootstrap.js';
 import { errorFields, log } from '../logger.js';
 import { RpcClient } from '../adapters/token-updates/rpc.js';
@@ -68,6 +69,51 @@ async function stuckCount(c: PoolClient): Promise<number> {
  * of the one that had to exist there. This file resolves positions; `halt-control`
  * changes the kill switch.
  */
+/** COMPUTED, never looked up. */
+const ERROR_STRING = id('Error(string)').slice(0, 10);
+const BURN = '0x000000000000000000000000000000000000dead';
+
+/**
+ * CAN THE HOLDER MOVE THIS TOKEN AT ALL?
+ *
+ * **A SECOND PREMISE FOR "UNSELLABLE", AND IT IS STRONGER THAN THE FIRST.** `resolveOne`
+ * accepted only `actual=0` — the pool offering nothing at any rung. CME is unsellable for
+ * a different and worse reason: **the TOKEN refuses the transfer.** Every route reverts
+ * `Error("blacklisted")` for an ordinary holder while the PoolManager can move it, so
+ * buys succeed and no buyer can ever leave. No bound, no ladder and no pool state makes
+ * that sellable, where a pool paying zero today might pay tomorrow.
+ *
+ * It asks the question directly and about US: simulate `transfer(0x…dead, OUR WHOLE
+ * BALANCE)` from the holder's own address. A revert here is not an inference from a
+ * router failure — `TRANSFER_FROM_FAILED` through the router names the symptom, and this
+ * names the cause.
+ *
+ * **A SUCCESS IS THE ANSWER TOO, AND IT REFUSES THE RESOLUTION.** If the token moves, the
+ * position is not unsellable-by-the-token and must go back through the ladder.
+ */
+async function probeTransferRefusal(
+  rpc: ReadOnlyRpc, token: string, holder: string, amount: bigint,
+): Promise<string | null> {
+  const data = `0xa9059cbb${BURN.slice(2).padStart(64, '0')}`
+    + amount.toString(16).padStart(64, '0');
+  try {
+    await rpc.call('eth_call', [{ from: holder, to: token, data }, 'latest']);
+    return null;
+  } catch (err) {
+    const e = err as Error & { data?: unknown };
+    const d = e.data;
+    if (typeof d === 'string' && d.startsWith(ERROR_STRING)) {
+      try {
+        const dec = AbiCoder.defaultAbiCoder()
+          .decode(['string'], `0x${d.slice(10)}`) as unknown as string[];
+        return `Error("${String(dec[0]).slice(0, 80)}")`;
+      } catch { /* fall through to the raw form */ }
+    }
+    return typeof d === 'string' && d.length >= 10
+      ? `custom ${d.slice(0, 10)}` : e.message.slice(0, 120);
+  }
+}
+
 async function resolveOne(
   c: PoolClient, rpc: ReadOnlyRpc, tradeId: string, commit: boolean,
 ): Promise<void> {
@@ -174,14 +220,31 @@ async function resolveOne(
    * nothing at all, or merely less than the widest rung?
    */
   const paysNothing = /actual=0(?![0-9])/.test(detail);
-  if (!paysNothing) {
+
+  /*
+   * THE SECOND PREMISE. Asked ALWAYS, not only when the first fails, so the evidence for
+   * every resolution records both answers rather than whichever one happened to be
+   * reached first.
+   */
+  const refusal = await probeTransferRefusal(rpc, row.token, holder, bal);
+  log.info('CAN THE HOLDER MOVE THIS TOKEN AT ALL?', {
+    trade: tradeId, holder, amount_raw: bal.toString(),
+    transfer_to_burn: refusal === null ? 'SUCCEEDS — the token is movable' : refusal,
+    note: refusal === null
+      ? 'so any unsellability is the POOL, not the token'
+      : 'the TOKEN refuses the transfer. No bound, ladder or pool state fixes that.',
+  });
+
+  if (!paysNothing && refusal === null) {
     throw new Error(`trade ${tradeId} exhausted the ladder but the pool did NOT report `
-      + `paying zero. Last reason: ${detail.slice(0, 200)}\n`
+      + `paying zero AND the token moves freely. Last reason: ${detail.slice(0, 200)}\n`
       + 'That is a MISPRICED QUOTE or a bound too tight, not a dead pool — the position '
       + 'is sellable at some price and marking it unsellable would hide that. Refusing.');
   }
 
-  log.info('ESTABLISHED: THE POOL PAYS NOTHING AT ANY RUNG', {
+  log.info(paysNothing
+    ? 'ESTABLISHED: THE POOL PAYS NOTHING AT ANY RUNG'
+    : 'ESTABLISHED: THE TOKEN ITSELF REFUSES THE TRANSFER', {
     trade: tradeId,
     evidence: detail.slice(0, 200),
     rungs_tried: EXIT_RETRY.BOUND_BPS,
@@ -201,11 +264,13 @@ async function resolveOne(
     `update bot_trades
         set status = 'closed_unsellable',
             note = coalesce(note || ' | ', '')
-                   || 'resolve-unsellable: pool pays 0 at every rung ('
+                   || 'resolve-unsellable: ' || $5 || ' ('
                    || $3 || '); ' || $4,
             updated_at = now()
       where chain = $1 and id = $2 and status = 'needs_exit'`,
-    [CHAIN, tradeId, EXIT_RETRY.BOUND_BPS.join('/') + ' bps', detail.slice(0, 120)]);
+    [CHAIN, tradeId, `${EXIT_RETRY.BOUND_BPS.join('/')} bps`, detail.slice(0, 120),
+      paysNothing ? 'pool pays 0 at every rung'
+        : `the TOKEN refuses our transfer: ${refusal ?? ''}`]);
   if ((upd.rowCount ?? 0) !== 1) {
     throw new Error(`the update touched ${upd.rowCount} rows where 1 was expected; the `
       + 'row may have changed status underneath this run');
