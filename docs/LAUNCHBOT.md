@@ -50,10 +50,15 @@ as a GUESS. No figure gets in without one or the other.**
 *Updated on every change of state. This is the first thing a session needs.*
 
 ```
-STATUS              BUILT, DRY RUN ONLY. It cannot broadcast: no private key is
-                    read anywhere, and src/bot/rpc.ts refuses
-                    eth_sendRawTransaction and every signing method BY NAME.
-mode                dry-run (the only mode that exists)
+STATUS              BUILT. LIVE MODE EXISTS AND IS PROVABLY OFF (2026-09-16).
+                    It cannot broadcast: live is off unless an explicit --live
+                    flag is passed, the prerequisites list in
+                    bot/live-preflight.ts refuses to arm while anything is
+                    outstanding, NO PRIVATE KEY EXISTS OR IS READ, and
+                    src/bot/rpc.ts refuses eth_sendRawTransaction and every
+                    signing method BY NAME in every mode INCLUDING live.
+                    scripts/check-live-gate.mjs fails the BUILD if any file but
+                    bot/signer.ts reads a key or constructs a signer.
 first dry run       2026-09-16, 65 minutes, 24 hypothetical trades recorded
 wallet address      0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a  (supplied by the
                     operator 2026-09-16; ADDRESS ONLY -- no key, no signing path)
@@ -70,17 +75,30 @@ arming              PASSES BOTH. $126.73 against MAX_CONCURRENT 5 x $10 = $50
                     path armed for the first time on 2026-09-16 (mode
                     dry-run-capgate) -- every earlier run either had no wallet or
                     refused, so the ALLOW direction had never been observed.
-mode                dry-run only. Five runs to date; see section 6.
+mode                dry-run by default and five dry runs to date (section 6).
+                    'live' EXISTS as of 2026-09-16 and CANNOT ARM: it needs an
+                    explicit --live flag, an empty prerequisites list and a key,
+                    and it has none of the three. There was a duplicate 'mode'
+                    line here saying "the only mode that exists"; it was already
+                    false and is now merged into this one.
 limits              the six rails of section 4, all enforced in bot/rails.ts and
                     all exercised by npm run rail-drill (26 of 26)
+slippage bound      1000 bps, changed from 300 on 2026-09-16 on measured
+                    evidence -- section 4
+exit retry ladder   [1000, 1343], two rungs, re-derived at the new bound
+live gate           20 of 20 cases in npm run live-gate-drill; the static gate
+                    passes over 132 source files and is proven able to fail
 trades to date      0 REAL. 107 hypothetical rows across every dry-run mode.
 capital approved    $100 total, $10 per position (operator, 2026-09-16), and since
                     2026-09-16 ENFORCED as MAX_DEPLOYED_USD rather than stated here
 ```
 
-**Nothing in this repository has ever written to a chain.** Verified 2026-09-16:
-no `eth_sendRawTransaction`, no transaction signing, no private-key handling anywhere
-under `src/`.
+**NOTHING IN THIS REPOSITORY HAS EVER WRITTEN TO A CHAIN.** Still true on 2026-09-16
+after live mode was built. What changed is that the path now EXISTS and is gated rather
+than being absent: `eth_sendRawTransaction` is named in exactly two files — `bot/rpc.ts`
+to refuse it and gate the broadcast client, and `bot/signer.ts` as its one caller — and
+private-key handling exists in `bot/signer.ts` alone, where the build gate confines it.
+**No key is set, so the signer has never been constructed.**
 
 ---
 
@@ -459,6 +477,239 @@ adjudicator.**
 5. **The nonce is read from the chain on boot, never carried in memory**, so a replaced
    container cannot reuse one.
 
+### 2A. LIVE MODE — BUILT 2026-09-16, DEFAULTING OFF, AND PROVEN OFF
+
+**IT EXISTS AND IT CANNOT ARM.** The operator's requirement was that live mode be built
+and provably off *before* any key is added, so that when the key arrives there is nothing
+for it to do wrong. Nothing in this section has signed or broadcast anything.
+
+#### FOUR INDEPENDENT GATES, AND EACH ONE ALONE IS SUFFICIENT
+
+| gate | where | what it refuses |
+|---|---|---|
+| 1. the mode | `bot/mode.ts` | live requires an explicit `--live`. Never a config file, never an env var, never a default. |
+| 2. the prerequisites | `bot/live-preflight.ts` | refuses to ARM while any listed item is outstanding. Four are. |
+| 3. the key | `bot/signer.ts` | the ONLY file that may read a key or construct a signer. None is set. |
+| 4. the transport | `bot/rpc.ts` | `ReadOnlyRpc` refuses every signing method BY NAME in every mode; `BroadcastRpc` cannot be CONSTRUCTED outside live. |
+
+**AN ENVIRONMENT VARIABLE THAT LOOKS LIKE AN ATTEMPT TO GO LIVE RAISES RATHER THAN BEING
+IGNORED.** `BOT_LIVE`, `LAUNCHBOT_LIVE`, `BOT_MODE`, `LIVE` and `BOT_GO_LIVE` are all
+named in `mode.ts` in order to refuse them — and they raise **even alongside the real
+flag**, so nobody can come away believing the variable is the control. Silently ignoring
+one would leave an operator thinking the bot is live when it is not, which is the
+`bridge_assets` failure this document already records: an option accepted and doing
+nothing is worse than one refused.
+
+**THE FLAG CANNOT BE COMBINED WITH `--run-label`.** A label grants a run its own
+`MAX_TRADES_PER_DAY` budget, which is exactly the wrong thing to hand a live run: two live
+runs must share one day's allowance rather than each getting a fresh one.
+
+#### `BroadcastRpc` CANNOT BE CONSTRUCTED, WHICH IS STRONGER THAN A REFUSED CALL
+
+The obvious design is one client that permits broadcasting when `mode.live`. **That is
+exactly wrong**, and the reason generalises: it would mean every existing call site — the
+dry run, every drill, every measurement CLI, `wallet-probe` — silently gains the ability
+to broadcast the moment something hands it a live mode, and the guarantee would rest on
+none of them ever being handed one by accident.
+
+So **`ReadOnlyRpc` refuses forever, in every mode including live**, and a live path must
+reach for `BroadcastRpc` explicitly and by name. **Broadcasting is opt-in per call site,
+not a property the process acquires.** In every non-live mode there is no object in the
+process that can reach the broadcast at all.
+
+`BroadcastRpc` also **still refuses the node-side signing methods even in live mode**: this
+bot signs locally with its own key and never asks a node to sign for it, so a node-side
+signing method is either a misconfiguration or an unlocked account.
+
+#### THE PROOF IS TWO CHECKS THAT ANSWER DIFFERENT QUESTIONS
+
+**THE STATIC GATE IS THE STRONGER ONE, AND IT RUNS ON EVERY BUILD.**
+`scripts/check-live-gate.mjs` is wired into `npm run build`, so a commit that starts
+reading a key from a second place, constructs a signer elsewhere, or names the broadcast
+outside the two files allowed to, **cannot be built and therefore cannot be deployed**.
+
+```
+live-gate: 132 source files checked, 2 permitted mention(s) in comments
+  OK  the private-key environment variable: confined to [src/bot/signer.ts]
+  OK  ethers' signing primitives:          confined to [src/bot/signer.ts]
+  OK  eth_sendRawTransaction:              confined to [src/bot/rpc.ts, src/bot/signer.ts]
+  OK  eth_sendTransaction:                 confined to [src/bot/rpc.ts]
+  OK  live mode from an environment variable: confined to [src/bot/mode.ts]
+live-gate: PASS
+```
+
+**IT IS KNOWN TO BE ABLE TO FAIL.** A probe file containing
+`process.env['BOT_PRIVATE_KEY']` was added to `src/bot/` and the gate failed with exit 1,
+naming the file and line; removing it passed again. A gate nobody has made fail is not a
+gate — this document's own standard, applied to itself.
+
+**Two refinements it forced, both worth recording.** It first failed on two *doc comments*
+describing the refusal, which cannot execute — so comment mentions are permitted **and
+counted** (`2 permitted mention(s)`) rather than silently stripped, because a filter that
+quietly declines to look at text is the shape this project calls a clean pass over
+nothing. And it carries a **stale-rule check**: if a rule's pattern matches nothing
+anywhere in `src/`, the capability was renamed or deleted and the rule now guards nothing,
+so it FAILS rather than passing forever.
+
+**THE RUNTIME DRILL IS THE WEAKER ONE AND SAYS SO.** `npm run live-gate-drill` proves the
+refusals fire on the paths it exercises; it cannot prove no other path exists, which is
+the actual requirement. **20 of 20 cases**, spending nothing and touching nothing:
+
+```
+createBroadcaster in dry-run                         REFUSED  no key read, no signer built
+createBroadcaster in a LABELLED dry-run              REFUSED
+new BroadcastRpc in dry-run / labelled dry-run       REFUSED  cannot be constructed
+ReadOnlyRpc.call(...) for all 8 forbidden methods    REFUSED  by name
+BOT_LIVE=1 with no flag                              REFUSED  raises, not ignored
+LAUNCHBOT_LIVE=true with no flag                     REFUSED
+BOT_MODE=live WITH --live                            REFUSED  the var raises anyway
+--live combined with --run-label                     REFUSED
+createBroadcaster LIVE with no key                   REFUSED  at startup, not mid-trade
+new BroadcastRpc in LIVE mode                        ALLOWED  <- the path EXISTS
+ReadOnlyRpc still refuses the broadcast in LIVE      REFUSED  per call site, not per process
+BroadcastRpc refuses eth_sign in LIVE                REFUSED  we sign locally
+```
+
+**THE ONE `ALLOWED` CASE IS THE IMPORTANT ONE.** A gate that refuses because the
+capability was never written is indistinguishable from one that refuses because it is off.
+That case proves the build is not simply missing the feature.
+
+**The drill takes the broadcast method's name from `FORBIDDEN_METHODS` rather than typing
+it**, for two reasons: the build gate refused this file when it was typed, correctly, and
+widening the allow-list to admit a test would have weakened a static guarantee for
+convenience — and a drill that types its own copy of the deny-list is testing its copy.
+
+#### LIVE WITH NO KEY REFUSES AT STARTUP, NOT MID-TRADE
+
+Explicitly required, and the order inside `createBroadcaster` is the mechanism: **not live
+→ refuse before the key is even looked for.** A non-live process must not so much as read
+the variable, because "we read it and did not use it" is weaker than "the read is
+unreachable", and a key in a process's memory is a key that can reach a crash dump or a
+log line. Only when live does it look, and then a missing key raises immediately:
+
+```
+LIVE MODE REQUIRES BOT_PRIVATE_KEY AND IT IS NOT SET. Refusing to start rather than
+failing mid-trade: a bot that arms, finds a launch and only then discovers it cannot
+sign has spent the compute units and may hold a position.
+```
+
+Three further startup refusals sit behind it, none of which can be reached today: a
+**malformed** key raises distinctly from a missing one; the **chain id is confirmed**
+before anything can be signed for it, because a correctly signed transaction for the wrong
+chain is a perfectly valid transaction somewhere else; and the key's address must **equal
+`BOT_WALLET_ADDRESS`**, or every rail, balance read and reconciliation would be about one
+account while the signing was about another.
+
+#### ONE IMPLEMENTATION — WHERE EACH RULE LIVES, AND NOTHING FORKS FOR LIVE
+
+**The mode decides whether a broadcaster exists and NOTHING else.** Every rule below is
+the same object on both paths:
+
+| rule | the one place it lives | forks for live? |
+|---|---|---|
+| the mode itself | `bot/mode.ts` — `resolveMode` | n/a, it IS the decision |
+| the quote | `bot/quote.ts` — `quote()` | **no** |
+| the rails | `bot/rails.ts` — `checkRails`, `evaluateRails`, `deployedUsd` | **no** |
+| the entry rule and sizing | `bot/rule.ts` — `qualifies`, `positionWei`, `minOut` | **no** |
+| the calldata | `bot/calldata.ts` — `buildSwap`, `buildTokenApprove`, `buildPermit2Approve` | **no** |
+| the exit executor | `bot/exit-exec.ts` — `executeExit`, used by the loop AND the boot sweep | **no** |
+| the retry ladder | `bot/exit.ts` — `exitWithRetry` | **no** |
+| reconciliation | `bot/reconcile.ts` — `reconcileOnBoot`, `clearNeedsExit` | **no** |
+| the price conventions | `bot/price.ts` | **no** |
+| "is this mode hypothetical" | `bot/mode.ts` — `isDryRunMode` | **no** |
+
+**TWO THINGS MOVED TO KEEP THAT TRUE, AND THEY ARE THE INTERESTING PART OF THIS PASS.**
+
+`launchbot.ts` **used to parse `--run-label` and build its own mode string.** Adding live
+mode beside it would have created a second place deciding whether the bot is about to
+spend real money — the two-implementations trap with money attached. It now calls
+`resolveMode` and holds no mode logic.
+
+`isDryRunMode` **already existed in `src/web/trades-page.ts`**, and writing the same
+two-line test into the mode module was the obvious move. That would have put the page's
+idea of "is this real money" and the bot's idea of it in two places that can drift — and
+the `/trades` banner has already announced "THIS PAGE CONTAINS LIVE TRADES" over 34
+hypothetical rows once, because a caller re-implemented this as an equality check. It now
+lives in `bot/mode.ts` and the page re-exports it.
+
+#### THE PREREQUISITES THAT REFUSE TO ARM, AS DATA RATHER THAN A COMMENT
+
+`bot/live-preflight.ts` carries the list, and live mode raises while it is non-empty. **A
+`TODO` in a source file does not stop a process; this does.** The dangerous shape is not a
+missing feature but a PARTIAL one — a live loop whose buy broadcasts and whose sell does
+not would open real positions it cannot close, which is the single worst outcome available
+to this bot.
+
+| id | what is missing | why arming anyway is unsafe |
+|---|---|---|
+| `sell-not-broadcast` | `exit-exec` simulates; no broadcaster is threaded through it | a live buy with a simulated sell opens positions the bot cannot close |
+| `approvals-not-executed` | neither setup transaction has ever run | without both allowances every exit reverts for a reason unrelated to the pool |
+| `fill-not-modelled` | `fill_status` is the literal `dry-run` | every return figure is mark-to-market; a live fill competes for the same block |
+| `stuck-rows-can-halt` | 7 `needs_exit` rows in `dry-run-r5` | the kill switch is chain-wide, so a dry-run boot failure would halt live trading |
+
+**An empty list does not mean the bot is safe**, and it is not a substitute for the
+operator's judgement — it means the things known to be missing are no longer missing.
+Section 7's categories B and C stay open regardless.
+
+### 2B. THE TWO SETUP TRANSACTIONS — `npm run approve-setup`
+
+Section 2 established that a sell pulls the token through Permit2 and needs two grants:
+`token.approve(PERMIT2, amount)` then `Permit2.approve(token, ROUTER, amount, expiry)`.
+Both were measured over 40 real sells, **40 of 40 had a prior approval, and neither has
+ever been executed by this project.**
+
+**IT IS A SEPARATE CLI SO THAT THE FIRST TRANSACTION THIS PROJECT EVER SIGNS IS A BOUNDED
+APPROVAL AND NOT A TRADE.** An approval for a stated amount to a named spender is the
+smallest, most inspectable thing the signing path can be pointed at. A trade commits
+capital and depends on a quote, a rail, a pool and an exit. **If the signer is wrong, this
+is where it should be wrong.**
+
+#### EXACT AMOUNT, NOT UNLIMITED — AND THE MEASUREMENT CUTS THE OTHER WAY
+
+Section 2 measured **46 approvals to a router for a FINITE amount against 19 to Permit2
+for `uint256` MAX**, so unlimited is the norm for the Permit2 route specifically. That is
+what Permit2 is for: approve once, unlimited, and let the per-spender allowance carry the
+bound and the expiry.
+
+**This approves an EXACT AMOUNT anyway, and not because the measurement is wrong.** It
+describes traders whose position size is unbounded and whose token set is stable. This
+bot's position is bounded at `MAX_POSITION_USD` = $10, and **every token it touches is a
+launch minutes old from a launchpad it does not control** — a contract nobody has read,
+which may carry a transfer hook, a blacklist or an owner-mint. An unlimited allowance on
+such a token is an open-ended claim on whatever balance the wallet ever holds of it,
+granted to a spender chosen by whoever deployed it. **The cost of being wrong is bounded by
+the allowance, so the allowance is bounded.**
+
+**The price is stated rather than hidden:** an exact amount means one pair of approvals per
+token per trade, measured at $0.00751 each — **$0.015 per round trip, about 0.15% of a $10
+position**, inside the 1.8–1.9% round trip already recorded and changing no decision.
+
+#### WHAT IT DOES BEFORE IT DOES ANYTHING
+
+- **Reads both allowances from the chain first** and SKIPS what already covers the amount —
+  reported as `SKIP`, never as done. An approval already in place is a different fact from
+  one this run granted.
+- **An unreadable allowance is UNKNOWN and REFUSES**, never treated as absent. `0x` is not
+  zero; sending an approval against a state that could not be established is the
+  plausible-value-on-an-error-path failure with a signature attached.
+- **Honours Permit2's EXPIRY.** A non-zero amount whose expiration has passed is worthless
+  and must not read as already granted — the one way this differs from a plain ERC-20
+  allowance, and the one a check written from the ERC-20 shape would miss.
+- **Sizes the amount from the BALANCE read from the chain**, not from the stored quote —
+  the same rule the exit executor already follows. An allowance below the balance leaves
+  part of the position unsellable.
+- **Refuses to size against a zero balance** rather than approving zero, which would grant
+  nothing while reporting success.
+- **Dry by default**, and `--commit` alone is not enough: broadcasting also needs `--live`
+  and a key.
+- **Re-reads both allowances from the chain afterwards** and raises if they do not cover the
+  amount. A transaction the node accepted is not an allowance that is set — the
+  fresh-connection rule in its on-chain form.
+
+**ITS WRITE HALF HAS NEVER RUN AND CANNOT RUN IN THIS BUILD.** It reaches
+`createBroadcaster` at a real call site and is refused there. The read half works and is
+exercised below.
+
 ### RPC cost of running the bot
 
 **The read side is priced. The write side is not.**
@@ -505,6 +756,56 @@ database value is editable by anything with a connection.
 
 **A kill-switch READ FAILURE halts.** An unreachable database is not permission to keep
 trading.
+
+### THE KILL SWITCH IS CHAIN-WIDE, AND IT STAYS THAT WAY — decided 2026-09-16
+
+**NOTHING WAS CHANGED.** `bot_control` is keyed on `chain` alone, so one row halts every
+mode on `robinhood` — including live. The question is whether that is right, and the answer
+is yes for the reason it exists and no for one specific consequence, so both are recorded.
+
+**WHY CHAIN-WIDE IS RIGHT.** The kill switch's whole purpose is *stop everything now, from
+outside, without a deploy*. An operator reaching for it is not in a position to know which
+modes are running, and a switch that required naming the right one would fail exactly when
+it is needed. A mode-scoped emergency stop is not an emergency stop.
+
+**THE CONSEQUENCE, STATED PLAINLY: ONE STUCK DRY-RUN ROW CAN HALT LIVE TRADING.** The
+automatic halts — an unresolvable position at boot, a breached daily loss, a run of
+reverts — call the same `halt()`. So a dry run that cannot clear a `needs_exit` row would
+stop a live run that has nothing to do with it. **This is live today**: 7 `needs_exit` rows
+sit in mode `dry-run-r5`, and the next boot of that mode will act on them.
+
+**AND THAT IS THE WRONG SCOPE FOR AN AUTOMATIC HALT, WHICH IS A REAL DEFECT AND NOT A
+DESIGN CHOICE.** A dry run holds nothing and risks nothing, so its inability to close a
+hypothetical position is not a statement about live exposure. The correct design is
+**manual halts chain-wide, automatic halts scoped to the mode that raised them** — a single
+boolean row keyed on `chain` cannot express both.
+
+**IT WAS NOT CHANGED IN THIS PASS, DELIBERATELY.** The kill switch is an exercised rail —
+`rail-drill` trips it in both directions — and re-keying it is a change to what a tested
+safety mechanism means, which is an operator's decision rather than a side effect of
+building live mode. It is carried in section 7 category D with the proposed fix, and
+section 8 mitigates it procedurally instead: **resolve the stuck rows before the first live
+run**, so the condition cannot arise.
+
+**WHAT CLEARS IT, AND WHO.** Only a human, from outside the bot, with counts reconciled:
+
+```sql
+-- READ FIRST. Never clear a halt without reading why it was set.
+select chain, halted, reason, updated_at from bot_control where chain = 'robinhood';
+
+-- CLEAR. Scoped to one chain, and the reason is kept for the record.
+update bot_control set halted = false, reason = 'cleared by <operator>: <why>',
+       updated_at = now()
+ where chain = 'robinhood';
+```
+
+**The bot cannot clear its own halt and must never be given a path to.** A process that can
+switch off the thing that switched it off has no kill switch. `halt()` only ever sets; the
+only clearing path is a human with a database connection — which is also why the switch is
+a row rather than a flag: it can be set and cleared while the bot is mid-flight, without a
+deploy. Both directions were exercised in `rail-drill` (*kill switch set by an outside
+writer* → BLOCK, *cleared* → ALLOW), and one real halt has been set and cleared this way:
+the boot-exit fixture on 2026-09-16, with counts reconciled before and after.
 
 ### THE HARD CAPITAL CAP — `MAX_DEPLOYED_USD = 100`, added 2026-09-16
 
@@ -572,13 +873,103 @@ path. A dry run over different code proves nothing about the live path.
 | position sizing | `src/bot/rule.ts` — `positionWei()` |
 | slippage bound | `src/bot/rule.ts` — `minOut()`, constant in `config.ts` |
 
-**The slippage bound is 300 bps and it is OURS.** The 9 of 9 native-ETH buys observed on
-this chain set `amountOutMinimum` to 0 and take no protection; that is not copied.
-Derived from p90 round-trip slippage at $10 (1.085% / 0.350% / 0.549% across the three
-windows), halved per leg, plus three ticks of the observed ~0.8% per-tick drift to cover
-the 5 s detection latency: 0.54% + 2.4% ≈ 2.94%. **`buildSwap` REFUSES a non-positive
-bound rather than defaulting it.** It is a first value to be re-derived from logged live
-slippage, not a measurement of itself.
+### THE BOUND MOVED: 300 → 1000 bps — 2026-09-16, operator-approved
+
+| | |
+|---|---|
+| **was** | `SLIPPAGE_BPS = 300` — derived before any trade existed |
+| **is** | `SLIPPAGE_BPS = 1000` |
+| **decided** | 2026-09-16, by the operator, on the `revert-economics` evidence in section 6 |
+| **decided by** | a measurement, NOT a tuned constant — see what that means below |
+
+**WHAT THE OLD VALUE WAS AND WHY IT WAS ALWAYS PROVISIONAL.** 300 bps came from p90
+round-trip slippage at $10 (1.085% / 0.350% / 0.549% across three windows), halved per
+leg, plus three ticks of the observed ~0.8% per-tick drift for the 5 s detection latency:
+0.54% + 2.4% ≈ 2.94%. That derivation was sound and it answered the wrong question — it
+sized the bound against how much the price MOVES, and never asked what refusing a trade
+COSTS.
+
+**WHAT THE MEASUREMENT FOUND.** Section 6 carries it in full. In one line: **the trades
+the 300 bps bound admitted had a median return of 0.000 in the recent era and the ones it
+refused had +0.439**, and refused trades had BETTER exit availability in all four
+historical windows. The bound fires when a pool's price moved away from our quote, and a
+pool whose price is moving is a pool that is trading — so it was selecting, with some
+precision, for pools where nothing was happening. Banded, it refused **34 tradeable
+launches to avoid 3 dead ones.**
+
+**WHY 1,000 AND NOT THE ARGMAX.** The objective the operator specified — maximise median
+return over every qualifying launch — is FLAT from 1,350 to 9,400 bps, so it does not
+identify a value; and its answer is arithmetic rather than economic, because over half of
+launches score zero and the median jumps when that mass crosses the 50th percentile. The
+binding constraint is the one this document already derived for the retry ladder: **above
+roughly 1,600 bps the accepted haircut exceeds the recent-era median gross return of
++0.157–0.180**, at which point a filled trade loses more than the trade makes. That makes
+the defensible range **1,000–1,600 bps**, and **1,000 is its conservative end** — taken
+for the same reason +90 s was taken over +180 s for the exit horizon.
+
+**WHY THIS IS A DECISION ON EVIDENCE AND NOT A TUNED CONSTANT**, stated so a future reader
+can check rather than trust:
+
+- The entry price of every refused trade is **exact, not modelled**: an unreachable
+  `amountOutMinimum` makes the router report its own output, so what a refused trade would
+  have filled at is read from the chain rather than estimated.
+- **Every launch was probed the same way**, accepted and refused alike, so nothing branches
+  on the outcome being measured.
+- The result **replicates on two disjoint populations with two different methods** — 100
+  oracle-priced launches and 25,367 modelled ones, whose block ranges do not overlap at
+  all.
+- **The failures are recorded beside it.** MIDPOINT is flat at every bound and no bound
+  rescues it; the argmax is a plateau; the objective's own 34% answer is rejected as an
+  artefact; and the whole pass is biased toward widening by the `no-exit = 0` convention,
+  which was re-run at `−1` and changed nothing.
+- **The individual records were checked**, with counter-examples: the three refused trades
+  that LOST carry the three smallest shortfalls in the set.
+
+**WHAT DOES NOT CHANGE.** The bound is still OURS and not theirs — the 9 of 9 native-ETH
+buys observed on this chain set `amountOutMinimum` to 0 and take no protection whatever,
+and that is still not copied. **`buildSwap` still REFUSES a non-positive bound rather than
+defaulting it.**
+
+**WHAT WOULD MOVE IT AGAIN: logged LIVE slippage, which does not exist.** Every figure
+behind 1,000 bps is a simulation against historical state, and the quantity that would
+re-derive it — what our own fills actually cost — has never been observed.
+
+#### THE RETRY LADDER IS RE-DERIVED, AND IT GOT SHORTER RATHER THAN RESCALED
+
+`EXIT_RETRY.BOUND_BPS` was `[300, 449, 608, 1343]` — the shortfall quantiles over the
+launches a 300 bps first rung missed. **That set is a function of the first rung**, so at
+1,000 bps the old ladder was answering a question the bot no longer asks, and two of its
+rungs now sit below the entry bound and are subsumed by it.
+
+**IT IS NOW `[1000, 1343]`, TWO RUNGS, AND THE SECOND IS A NATURAL BREAK RATHER THAN A
+QUANTILE.** At a 1,000 bps first rung exactly **7 of 100** oracle-priced launches still
+miss, and they split perfectly:
+
+```
+4 launches need EXACTLY 1343 bps   -> all four HAVE an exit, all return +138.4%
+3 launches need 6067 / 6401 / 8445 -> all three have NO EXIT AT ALL
+```
+
+**The gap between 1,343 and 6,067 bps coincides exactly with the dead-pool boundary.**
+Every launch a third rung could reach is a pool nothing will buy at any price — which is
+the finding the retry drill and the boot fixture both produced from the other direction:
+*a retry ladder rescues a mispriced quote, not a dead pool.*
+
+**THE NAIVE QUANTILES WOULD HAVE SHIPPED A DEFECT.** At n=7 the p25 and the median are
+both 1,343, so the mechanical derivation gives `[1000, 1343, 1343, 6234]` — a **duplicate
+rung**, which `exitWithRetry`'s own contract calls one attempt logged twice, plus a final
+rung of 62% against a median gross return of 16–18%. **Reading the individual launches
+instead of an interpolated quantile is what caught it**, and it is the same lesson the
+`1/n_pumps` metric taught in `ROBINHOOD.md`: a value landing on a round function of a
+configured count is a property of the arithmetic.
+
+**THE STOPPING RULE IS UNCHANGED IN INTENT AND SHARPER IN EFFECT.** It stopped at the p75
+because a rung past it accepts a haircut larger than the position's whole expected gain.
+Here the p75 is 6,234 bps, so **the p75 rule and the economic rule now disagree, and the
+economic rule wins** — it is the reason the p75 rule existed.
+
+**n IS 4 FOR THE SECOND RUNG**, thinner than the 11 the old ladder rested on, and stated
+rather than buried.
 
 ---
 
@@ -2031,9 +2422,11 @@ from a passing drill.
 
 ### ARE THE REVERTS OPPORTUNITY OR PROTECTION? — MEASURED 2026-09-16
 
-**THEY ARE OPPORTUNITY. The bound is costing money, and it is costing it by ADVERSE
-SELECTION rather than by being slightly tight.** `npm run revert-economics`. The bound is
-NOT changed in this pass; this is the evidence for the operator to decide on.
+**THEY ARE OPPORTUNITY. The bound was costing money, and it was costing it by ADVERSE
+SELECTION rather than by being slightly tight.** `npm run revert-economics`. **The bound
+was 300 bps when this was measured and is 1000 bps as of 2026-09-16 on this evidence** —
+see *THE BOUND MOVED* in section 4. Read the figures here as the case for that change, not as a
+description of the current configuration.
 
 #### THE METHOD, AND WHY THE ENTRY PRICE OF A REFUSED TRADE IS EXACT
 
@@ -2275,19 +2668,19 @@ category C.
 
 ### B. Unmeasured, so no figure here is a profit figure
 
-- **A 2–3% RESIDUAL OVER-QUOTE IS BOUNDED AND NOT IDENTIFIED**, and it is still the
-  revert mechanism: our 300 bps bound sits on top of it. **The "drift" in the revert rate
+- **A 2–3% RESIDUAL OVER-QUOTE IS BOUNDED AND NOT IDENTIFIED.** It WAS the revert
+  mechanism when the bound was 300 bps and sat on top of it; at 1000 bps the bound clears
+  the residual with room, which is why the measured revert rate falls to 7%. The residual
+  itself is still unexplained and would matter again at any tighter bound. **The "drift" in the revert rate
   is CLOSED — it was never a trend.** 29.2 / 31.3 / 32.4 / 40.6% are all within 0.8
   standard errors of the pooled 34.0% at n=16–34, and re-quoted under one implementation
   the rate is flat at 35.9 / 40.0 / 36.7%. What remains open is the residual itself, not
   its movement.
-- **THE 300 bps BOUND IS COSTING MONEY AND HAS NOT BEEN CHANGED.** Measured 2026-09-16 over
-  100 oracle-priced launches and 25,367 modelled ones: in the recent era the trades the
-  bound ADMITS have a median return of 0.000 and the ones it REFUSES have +0.439, and
-  refused trades have BETTER exit availability in all four historical windows. The
-  defensible range is **1,000–1,600 bps** — above the marginal and mid shortfall bands,
-  below the recent-era median gross return that makes a wider bound self-defeating.
-  **The operator decides; nothing in the code was touched.**
+- ~~The 300 bps bound is costing money~~ — **CHANGED TO 1000 bps, 2026-09-16,
+  operator-approved.** Measured over 100 oracle-priced launches and 25,367 modelled ones.
+  The conservative end of the defensible 1,000–1,600 range was taken. **What remains open
+  is that every figure behind it is a simulation**: no live trade has produced a realised
+  slippage, so the number that would re-derive this does not exist yet.
 - **The exit's success rate is measured on 17 attempts**, 10 clean. Better than the
   stale-quote baseline's 2 of 7, and both samples are too small to separate the fix from
   noise.
@@ -2309,12 +2702,36 @@ category C.
 - **`MAX_CONCURRENT` and `MAX_DAILY_LOSS_USD` have never bound outside the drill.** Dry
   run realises no loss, and `MAX_CONCURRENT` has not been reached because positions close
   within ~105 s of opening.
-- **No transaction has ever been signed or broadcast.** There is no signing path, and
-  every figure in this document is a simulation.
+- **No transaction has ever been signed or broadcast.** As of 2026-09-16 a signing path
+  EXISTS (`bot/signer.ts`) and is unreachable: live mode is off by default, the
+  prerequisites list refuses to arm, and no key exists. Every figure in this document is
+  still a simulation.
+- **The live broadcast call site has never executed.** `approve-setup` reaches
+  `createBroadcaster` at its real call site and is refused there; nothing has got past it.
 
 ### D. Structural, and stated so they are not rediscovered
 
 - **`bot_horizon_prices` and `bot_exit_attempts` accumulate and nothing prunes them.**
+- **AN AUTOMATIC HALT IS CHAIN-WIDE WHEN IT SHOULD BE MODE-SCOPED.** `bot_control` is
+  keyed on `chain`, which is RIGHT for a manual emergency stop — an operator reaching for
+  it cannot be required to name the right mode — and WRONG for the automatic halts, which
+  call the same `halt()`. A dry run holds nothing, so its inability to clear a hypothetical
+  position is not a statement about live exposure, yet it would stop a live run.
+  **Decided 2026-09-16 to leave it unchanged**: re-keying an exercised rail is an
+  operator's decision, not a side effect of building live mode. The proposed fix is manual
+  halts chain-wide and automatic halts scoped to the mode that raised them, which one
+  boolean row keyed on `chain` cannot express. Section 8 step 1 mitigates it procedurally
+  instead. See section 4 for the full decision and the clearing procedure.
+- **THE LIVE BROADCAST CALL SITE EXISTS AND HAS NEVER EXECUTED.** `approve-setup` reaches
+  `createBroadcaster` at a real call site and is refused there; the signer has never been
+  constructed because no key is set. The refusals are demonstrated (`live-gate-drill`, 20
+  of 20) and confined statically (`check-live-gate`, over 132 files, proven able to fail),
+  but **no line of the signing or broadcasting code has ever run against a real key**, and
+  that stays true until section 8 step 5.
+- **`exit-exec` SIMULATES AND DOES NOT SEND, SO THE LIVE PATH IS DELIBERATELY INCOMPLETE.**
+  It is the single remaining code change that must precede a key (section 8 step 2), and
+  `bot/live-preflight.ts` refuses to arm while it is outstanding rather than leaving it to
+  a reader to notice.
 - **The +450 s peak on the bot's own trades contradicts the offline holdout**, where
   +450 s is exactly 0.00000 in every window and both halves. Unresolved.
 - **THE REFUSED-TRADE MOMENTUM PATTERN IS A HYPOTHESIS.** Within the bot's 29 refused
@@ -2410,3 +2827,75 @@ estimate applies, and refuses to spend at all if the two counts differ.
 The rule: **price the work you are about to do, not a subset of it.** If an estimate and
 a loop derive their sets separately, they will disagree, and the disagreement will
 surface as a spend rather than as an error.
+
+---
+
+## 8. WHAT STILL HAS TO HAPPEN BEFORE THE FIRST REAL TRADE
+
+*Written 2026-09-16, before any of it has started. The sequence is here so it can be
+reviewed in advance rather than reconstructed afterwards.*
+
+**NOTHING IN THIS LIST HAS BEEN DONE.** Live mode exists and is refused by four independent
+gates; the bot cannot arm and no key exists.
+
+### WHAT THE OPERATOR SUPPLIES — two things, and only the first is secret
+
+1. **A private key for `0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a`**, as
+   `BOT_PRIVATE_KEY`, 32 bytes of hex. `bot/signer.ts` is the only file that may read it
+   and the build gate enforces that. **It must be the key for that exact address** — the
+   signer refuses if it derives anything else, because every rail, balance read and
+   reconciliation is about the configured address.
+2. **A decision on the kill-switch scope** (section 4). Either accept that a dry-run halt
+   can stop live trading and rely on step 1 below, or approve re-keying automatic halts to
+   the mode that raised them. **No code change is proposed without that decision.**
+
+**A NOTE ON WHERE THE KEY GOES, WHICH IS NOT DECIDED HERE.** `ROBINHOOD.md` records that
+setting a Railway service variable **replaces the container**, so putting a key there while
+anything is running destroys it — and a key in a service variable is readable by anything
+with access to the project. Whether the key lives as a service variable, is passed per
+command over SSH, or the live run happens somewhere else entirely is an operator decision
+that should be made before step 3, not during it.
+
+### THE ORDERED SEQUENCE
+
+| # | step | what it is | why it is here and not later |
+|---|---|---|---|
+| **1** | **Resolve the 7 stuck rows** | `dry-run-r5`'s `needs_exit` rows, via a boot of that mode or a scoped resolution | the kill switch is chain-wide: leave them and the first live run can be halted by a dry run's failure. Costs nothing and removes a whole class of confusion. |
+| **2** | **Close `sell-not-broadcast`** | thread the broadcaster through `exit-exec.ts` and `exit.ts` so the ladder SENDS | a live buy with a simulated sell opens positions the bot cannot close. **This is the one remaining code change that must precede a key**, and it must reuse the same executor the boot sweep uses. |
+| **3** | **Supply the key** | `BOT_PRIVATE_KEY`, per the note above | after step 2, so the first thing the signer can be asked to do is already correct |
+| **4** | **Re-run the gates with the key present** | `npm run live-gate-drill` | case 6 becomes vacuous the moment a key exists and the drill SAYS SO. Everything else must still pass, and `--live` must still be refused by the prerequisites. |
+| **5** | **THE FIRST REAL TRANSACTION: a bounded approval** | `npm run approve-setup -- --token <a token already held> --live --commit` | see below |
+| **6** | **Verify the approval from the chain** | the CLI re-reads both allowances; read them again independently | a transaction the node accepted is not an allowance that is set |
+| **7** | **Clear the prerequisites list** | remove the closed entries from `bot/live-preflight.ts`, deliberately, with evidence | it is data, not a comment, and each removal is an edit somebody signs off |
+| **8** | **One live run, bounded hard** | `npm run launchbot -- --live --minutes <small>` | the rails already bound it: $10 a position, 5 concurrent, $100 deployed, 40 trades a day, $15 daily loss |
+| **9** | **Reconcile from a fresh connection** | rows, allowances, balance, `bot_control` | a clean exit is not evidence; this is the standing rule and it applies hardest here |
+
+### THE FIRST REAL TRANSACTION WILL BE AN APPROVAL, NOT A TRADE
+
+**Step 5, explicitly**: `token.approve(PERMIT2, <exact amount>)` — one ERC-20 approval, for
+a stated amount, to a named spender, on a token the wallet already holds. Roughly **$0.0075
+of gas**. It is chosen as the first signature because it is the smallest and most
+inspectable thing the signing path can be pointed at: if the nonce handling, the gas
+estimation, the chain id or the encoding is wrong, **it is wrong on a call that moves
+nothing.**
+
+A trade would test the same signer plus a quote, a rail, a pool, a bound and an exit, and
+would fail informatively about none of them.
+
+**The second transaction is the matching `Permit2.approve(...)`.** Only after both have
+landed and been re-read from the chain does anything in step 8 have a working sell path.
+
+### WHAT WILL STILL BE UNKNOWN AFTER ALL NINE STEPS
+
+Stated here so the list is not mistaken for a safety proof:
+
+- **No live fill has been won.** Every return figure in this document is mark-to-market
+  against a later trade in the pool. `fill-not-modelled` is accepted as a known unknown,
+  not closed.
+- **The 1000 bps bound rests entirely on simulation.** The quantity that would re-derive
+  it — what our own fills actually cost — does not exist until step 8 produces some.
+- **The exit's success rate is measured on 17 borrowed-holder attempts.** The first real
+  exit is the first honest data point.
+- **The second ladder rung rests on n=4.**
+- **`gas_usd` is null on every row**; the round trip is costed from external measurements,
+  never from this bot's own trades.
