@@ -45,6 +45,7 @@ import { ReadOnlyRpc } from '../bot/rpc.js';
 import { executeExit } from '../bot/exit-exec.js';
 import { readTokenBalance } from '../bot/allowance.js';
 import { isDryRunMode } from '../bot/mode.js';
+import { configuredWallet } from '../bot/wallet.js';
 import { EXIT_RETRY } from '../bot/config.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -85,17 +86,43 @@ async function resolveOne(
       + 'resolves a position the boot sweep could not sell; anything else is a different '
       + 'question and must not be marked unsellable.');
   }
-  if (row.exit_sim_from === null) {
-    throw new Error(`trade ${tradeId} carries no address to sell from, so nothing can be `
-      + 'simulated and its sellability cannot be established.');
+  /*
+   * WHOSE POSITION IS IT? A LIVE ROW CARRIES NO `exit_sim_from` AND THAT IS DELIBERATE.
+   *
+   * **THIS RAISED ON THE FIRST LIVE STUCK POSITION AND COULD NOT RESOLVE IT AT ALL.** The
+   * text here was *"trade N carries no address to sell from"* — written when every row was
+   * a dry run and `exit_sim_from` was always the borrowed first-swap sender. A live
+   * position is OURS, so the loop writes NULL there on purpose: telling boot reconciliation
+   * to read somebody else's balance to decide whether WE hold a token is the opposite of
+   * what it must do.
+   *
+   * `reconcileOnBoot` already had the fallback (`r.exit_sim_from ?? wallet`) and so did
+   * `clearNeedsExit` (`ctx.broadcaster?.address ?? r.exit_sim_from`). **This tool — the one
+   * an operator reaches for precisely when a position is stuck — had neither**, so the
+   * moment live rows existed it refused the only rows it was needed for, and it refused
+   * while a dead position blocked the boot sweep from reaching a live one.
+   *
+   * A tool written when only one kind of row existed, whose assumption stops holding the
+   * day the other kind arrives, failing at the worst possible moment.
+   */
+  const holder = row.exit_sim_from ?? configuredWallet();
+  if (holder === null) {
+    throw new Error(`trade ${tradeId} carries no exit_sim_from and BOT_WALLET_ADDRESS is `
+      + 'not set, so there is no address whose balance could establish whether this '
+      + 'position is sellable. Set BOT_WALLET_ADDRESS: a live position is OURS and it is '
+      + 'our balance that decides.');
   }
+  const isOurs = row.exit_sim_from === null;
 
   /* THE BALANCE FIRST. A zero balance is not unsellable — it is GONE, and the boot
    * sweep resolves that as `closed_unfilled` without any of this. */
-  const bal = await readTokenBalance(rpc, row.token, row.exit_sim_from);
+  const bal = await readTokenBalance(rpc, row.token, holder);
   log.info('THE POSITION, AND WHAT IS BEING ESTABLISHED', {
     trade: tradeId, mode: row.mode, pool: row.pool_id,
-    token: row.token, holder: row.exit_sim_from,
+    token: row.token, holder,
+    holder_is: isOurs ? 'OUR OWN WALLET — a LIVE position, so this balance is the position'
+      : 'the BORROWED first-swap sender — a dry-run fixture, and its balance is evidence '
+        + 'about IT rather than about us',
     holder_balance_raw: bal.toString(),
     position_usd: row.position_usd,
     ladder: EXIT_RETRY.BOUND_BPS,
@@ -120,7 +147,7 @@ async function resolveOne(
         tradeId, poolId: row.pool_id, token: row.token, counter: row.counter,
         fee: row.fee, tickSpacing: row.tick_spacing, hooks: row.hooks,
         amountIn: bal, firstSwapBlock: Number(row.first_swap_block),
-        sellFrom: row.exit_sim_from,
+        sellFrom: holder,
       },
     );
     filled = out.filled;
