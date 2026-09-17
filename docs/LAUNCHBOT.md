@@ -187,6 +187,12 @@ enter at the first trade after +15 s, exit at the first trade after +45 s:
 > sold by anybody**, and ~4% of trades the rule actually ENTERS in the recent era are
 > unrecoverable total losses. See "THE BACKTEST WAS MARK-TO-MARKET" in section 6 before
 > relying on any number in this table.
+>
+> **AND THE BRACKET THAT LEFT IS NOW CLOSED.** Simulating OUR OWN round trip at every
+> historical entry and exit block — 1,046 launches, 169,322 CU — the realisable median NET
+> of gas at $10 and the shipped +90 s horizon is **+0.246 MIDPOINT / +0.323 CALM / +0.174
+> SELLOFF**, with the mean agreeing in sign. Our sell would have executed on **71–77%** of
+> launches. See "THE BRACKET IS CLOSED" in section 6.
 
 **Costs, all measured, none assumed.** Median round-trip slippage from realised impact
 (see `ROBINHOOD.md` for the method): 0.52% / 0.20% / 0.26% at $10 across HOLDOUT / CALM
@@ -4327,6 +4333,172 @@ unrecoverable total losses, the unsellable rate doubled after the corpus, and **
 figure in section 6 was simulated from a BORROWED holder that had already sold successfully —
 measured, therefore, on the population that could sell.** All costs in section 1 (0.20–5.19%
 slippage, gas) still come off every figure above, which are GROSS.
+
+
+### THE BRACKET IS CLOSED: OUR OWN SELL, SIMULATED AT EVERY HORIZON BLOCK — 2026-09-17
+
+**`realised-backtest` left a range because it inferred our exit from whether SOMEBODY ELSE
+sold.** Bounded to the bot's real 10 s ladder the recent-era median was 0.000; allowed to
+wait 300 s for another trader it was +0.21–0.30. **Neither was the question.** This replaces
+the inference with a simulation of OUR OWN round trip, from OUR address, at OUR size, at the
+historical entry and exit blocks — and it produces a number rather than a range.
+
+```
+1,046 rule-qualifying launches  x  2 position sizes  =  2,092 simulated round trips
+169,322 CU in 34 seconds        against a 600,000 ceiling set before the first call
+```
+
+**COST: 169,322 CU.** At this project's own measured rate — CASHCAT's 327,660 CU billed at
+$0.147 — that is **$0.076**. The rate is derived from our records and is NOT read from the
+provider, which `ROBINHOOD.md` section 7 requires be said rather than implied.
+
+#### THE METHOD, AND WHAT WAS MEASURED BEFORE ANY OF IT WAS BUILT
+
+**An unreachable `amountOutMinimum` makes the router revert `V4TooLittleReceived(min,
+actual)`**, so a 26-CU `eth_call` reads exactly what the swap would have paid at our size
+and at that block, with no modelling anywhere. The selector is computed by keccak.
+
+**THREE THINGS HAD TO BE TRUE AND ALL THREE WERE MEASURED FIRST:**
+
+```
+the archive block is served at 52.5M                          YES
+eth_call WITH a state override at a HISTORICAL block          YES  <- previously untested
+the buy leg reports its own output                            YES  379,080 tokens / 0.004 ETH
+```
+
+The middle line is the one that decided feasibility: section 2E proved overrides work at
+`latest` and section 2 proved `eth_call` works historically, and **their combination had
+never been exercised.**
+
+**FOUR OVERRIDES, EACH VERIFIED RATHER THAN ASSUMED.** Pre-buy we hold nothing, so the sell
+needs a balance and two allowances. Permit2's slot 1 is read back through its own
+`allowance()` once per run; the token's balance and allowance slots are DISCOVERED per token
+and verified by reading the contract's own view back. **A slot written at the wrong index is
+not an error — it is a silent no-op that leaves the real value in place**, and the sell would
+then fail for want of a balance and be recorded as a pool that would not pay.
+
+**SIX DISTINCT STORAGE LAYOUTS APPEARED** — balance slots {0,5,2,4,3,8} against allowance
+{1,6,3,5,4,9}, always adjacent — which is why discovery is a loop rather than a constant, and
+why trying the already-seen indices first collapsed the cost from a 1.41M-CU worst case to
+169,322.
+
+**OUR ETH BALANCE IS OVERRIDDEN DELIBERATELY.** The wallet's real balance at a block in
+2026-08 is a fact about the operator's spending, not about the pool.
+
+#### WHAT IS ALREADY INSIDE THE NUMBER, SO IT IS NOT SUBTRACTED TWICE
+
+**The router's reported output is what the pool would actually have paid**, so it is already
+net of the LP fee on that leg and already net of our own price impact at our own size.
+**Subtracting section 1's measured slippage or the fee tier on top of these figures would
+double-count both.** The only cost left to take off is GAS, which is charged in ETH outside
+the swap: **$0.0967 a round trip** — buy $0.0405 and sell $0.04339 from other traders'
+receipts, and the two approvals at **$0.0128 measured on our own**.
+
+#### 2. WOULD OUR SELL HAVE EXECUTED — AND MOSTLY, YES
+
+| window | launches | **our sell EXECUTED** | pool pays ZERO | sell REVERTED | buy reverted | slots unknown |
+|---|---|---|---|---|---|---|
+| MIDPOINT | 253 | **195 — 77.1%** | 22 | 0 | 35 | 1 |
+| CALM | 231 | **174 — 75.3%** | 37 | 0 | 18 | 2 |
+| SELLOFF | 562 | **400 — 71.2%** | 123 | 14 | 24 | 1 |
+
+**THE FAILURES ARE OVERWHELMINGLY DEAD POOLS, NOT TOKENS THAT REFUSED US.** Decoded by
+frequency over all 2,092 round trips:
+
+```
+pays_zero                   364 rows / 182 launches   the pool would have paid NOTHING
+not attempted, buy failed   154 rows /  77 launches   we could never have entered
+custom 0x90bfb865            26 rows /  13 launches   UNIDENTIFIED
+slots not found               8 rows /   4 launches   UNKNOWN, counted on its own line
+custom 0x7c9c6e8f             2 rows /   1 launch     UNIDENTIFIED
+```
+
+**`0x90bfb865` AND `0x7c9c6e8f` ARE UNIDENTIFIED AND ARE RECORDED AS SUCH.** 56 candidate
+signatures were hashed by keccak — every v4, Universal Router and Permit2 error this project
+could name — and **none matched**. They are carried as known unknowns exactly as `w3` and
+`0xc1120e3d` are, rather than guessed at. **`0x90bfb865` appears on BOTH legs** — 36 buys and
+26 sells — and a selector that blocks both directions is far more likely to be a pool
+condition than a token refusing us.
+
+**NOT ONE SELL REVERTED WITH A BLACKLIST STRING.** `Error("blacklisted")` — the literal
+payload CME returns — appears **ZERO times in 2,092 simulated sells**, and that zero is
+stated rather than omitted. The honeypot rate `realised-backtest` measured at 3.5–3.7% of
+ENTERED trades does not show up here as a refused transfer, because those pools mostly fail
+the buy leg or pay zero first.
+
+#### 3. THE NUMBER, AT BOTH SIZES, NET OF GAS
+
+Denominator every rule-qualifying launch. A buy that could not execute scores **0** — no
+position was taken, so no money was lost. A sell that reverts or pays zero scores **−1.0**.
+
+| window | n | p25 | **GROSS median** | p75 | **NET of gas, $10** | **NET of gas, $5** | % positive |
+|---|---|---|---|---|---|---|---|
+| MIDPOINT | 253 | 0.00000 | **+0.25591** | +0.560 | **+0.24624** | +0.23825 | 67.2% |
+| CALM | 231 | −0.00087 | **+0.33262** | +0.588 | **+0.32295** | +0.31415 | 67.1% |
+| SELLOFF | 562 | −0.99952 | **+0.18378** | +0.600 | **+0.17411** | +0.16567 | 61.4% |
+
+**THE MEAN AGREES WITH THE MEDIAN IN SIGN AND IN MAGNITUDE, WHICH A BARBELL NEED NOT DO AND
+IS THE CHECK THAT MATTERS.** Medians are what the operator asked for, but a median hides a
+distribution with −100% in it, so the mean is reported beside it as the test of whether the
+losses eat the winners. **They do not:**
+
+| window | mean NET at $10 | launches at −100% | share | p90 | best |
+|---|---|---|---|---|---|
+| MIDPOINT | **+0.208** | 29 | 11.5% | +0.81 | +2.36 |
+| CALM | **+0.302** | 45 | 19.5% | +0.81 | +9.78 |
+| SELLOFF | **+0.174** | 156 | 27.8% | +1.35 | +5.75 |
+
+**$10 BEATS $5 NET, AND THE REASON IS GAS RATHER THAN IMPACT.** Gross, the smaller position
+is very slightly BETTER — +0.33349 against +0.33262 in CALM — which is our own price impact,
+and it measures **0.09% of the position at $10.** That is the first direct measurement of
+our marginal impact at trade size on this chain, and it confirms what the loop already
+suggested when its impact term fired twice in 66 trades: **impact is not a binding constraint
+at these sizes.** Gas is: $0.0967 is 0.97% of $10 and **1.93% of $5**, so halving the
+position doubles the cost share and nothing else improves.
+
+#### THE CROSS-CHECK THAT MATTERS MOST, AND IT IS INDEPENDENT
+
+`realised-backtest`'s generous column — exit at the first sell by ANYBODY within 300 s of the
+horizon — gave **+0.243 / +0.301 / +0.207** at +90 s. This binary, which never looks at
+anybody else's trade and asks the pool directly, gives **+0.256 / +0.333 / +0.184** gross.
+
+**TWO METHODS WITH NOTHING IN COMMON BUT THE LAUNCH SET AGREE WITHIN 1 TO 3 POINTS.** The
+optimistic end of the bracket was the right end, and **the pessimistic end was an artefact of
+treating a quiet pool as an unsellable one** — exactly the limitation that column was
+labelled with when it was published.
+
+#### VALIDATED ON INDIVIDUAL RECORDS, PER DECILE
+
+SELLOFF at $10, one launch per decile, every row a real ETH-in against a real ETH-out:
+
+```
+d1   0x01cdf4260af9de3123c5   0.004086 -> 0.0000000   -1.0000   the pool pays nothing
+d2   0x04f64a44e80468eb2b30   0.004086 -> 0.0000000   -1.0000
+d4   0x004ab3b9ee40fa3fee37   0.004086 -> 0.0034540   -0.1547
+d6   0x04de29f229bd854b8842   0.004086 -> 0.0052197   +0.2774
+d8   0x0038940b35614fca11a0   0.004086 -> 0.0065027   +0.5913
+d9   0x0070339fb9c5b036d82e   0.004086 -> 0.0071920   +0.7600
+d10  0x0092ee81d15c725591ad   0.004086 -> 0.0156288   +2.8247
+```
+
+**A smooth two-sided spread with no degenerate values**, and the whole of the loss side is
+pools paying zero rather than a modelling artefact.
+
+#### WHAT THIS STILL DOES NOT SETTLE, STATED RATHER THAN LEFT TO BE INFERRED
+
+- **`fill-not-modelled` IS UNCHANGED AND IS THE LARGEST REMAINING UNKNOWN.** Every figure
+  above assumes we are in the trade. A live buy competes for the same block as everyone else
+  who saw the same launch, and nothing here models winning that race.
+- **OUR OWN BUY IS NOT IN THE EXIT STATE, AND THAT MAKES THIS CONSERVATIVE.** The buy pays
+  its price impact on the way in, and the price support it would have left in the pool is not
+  received on the way out. The size of that error is our impact, measured above at **0.09%**,
+  so the direction is safe and the magnitude is negligible.
+- **THE p25 IS −0.99952 IN SELLOFF.** The median is positive and **more than a quarter of
+  SELLOFF launches are near-total losses.** This is a strategy whose expectation rests on a
+  long right tail, not on most trades working.
+- **Four launches could not be simulated at all** (slots not found) and are scored −1.0 in
+  the headline. They are 0.4% of the population and move no figure, but they are counted
+  rather than dropped.
 
 
 ---
