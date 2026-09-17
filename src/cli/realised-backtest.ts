@@ -217,6 +217,28 @@ async function main(): Promise<void> {
           max(n_buys) filter (where n_sells=0)::int as most_buys_with_zero_sells
         from lau`);
 
+      /*
+       * VALIDATION ON INDIVIDUAL RECORDS, BEFORE THE RATE ABOVE IS REPORTED ANYWHERE.
+       *
+       * An aggregate saying "N% never sellable" is a hypothesis. These are the actual
+       * pools with their token addresses and a buy transaction that can be opened, so
+       * the claim "people kept buying and nobody ever sold" is checkable per row rather
+       * than taken on trust. The buy hash is the LAST buy into the pool, which is the
+       * most damning one available: somebody bought after everybody before them was
+       * already stuck.
+       */
+      await show(`${w.name} 2b. NAMED RECORDS: rule pools with the most buys and ZERO sells ever`, `
+        select l.pool_id,
+               case when l.c0_is_counter then i.currency1 else i.currency0 end as token,
+               l.n_buys::int, l.n_sells::int, l.fee,
+               (l.last_swap - l.first_swap)::int as traded_over_blocks,
+               (select s.tx_hash from v4_swaps_all s
+                 where s.pool_id = l.pool_id and s.amount0 <> 0 and s.amount1 <> 0
+                 order by s.block_number desc limit 1) as last_buy_tx
+          from lau l join v4_pool_init i on i.pool_id = l.pool_id
+         where l.n_sells = 0
+         order by l.n_buys desc limit 8`);
+
       /* Swaps in the observation span, priced and directed. */
       await c.query('drop table if exists sw');
       const MAXOFF = ENTRY_OFF + Math.max(...HOLDS) + Math.max(...SELL_WINDOWS);
@@ -296,7 +318,16 @@ async function main(): Promise<void> {
               round(percentile_cont(0.50) within group (order by delay_blocks)::numeric/${BPS},1)::text
                                                                                 as exit_delay_MEDIAN_s,
               round(percentile_cont(0.90) within group (order by delay_blocks)::numeric/${BPS},1)::text
-                                                                                as exit_delay_p90_s
+                                                                                as exit_delay_p90_s,
+              -- THE POPULATION A WORKING PRE-BUY CHECK WOULD LEAVE US: honeypots removed,
+              -- dead pools still included, because 2E cannot see a pool that dies later.
+              count(*) filter (where n_sells > 0)::int                          as SELLABLE_ONLY_n,
+              round(percentile_cont(0.25) within group (order by ret)
+                    filter (where n_sells > 0)::numeric,5)::text                as SELLABLE_ONLY_p25,
+              round(percentile_cont(0.50) within group (order by ret)
+                    filter (where n_sells > 0)::numeric,5)::text                as SELLABLE_ONLY_median,
+              round(100.0*count(*) filter (where n_sells > 0 and ret > 0)
+                    /nullif(count(*) filter (where n_sells > 0),0),2)::text     as SELLABLE_ONLY_pct_pos
             from r`);
         }
       }
