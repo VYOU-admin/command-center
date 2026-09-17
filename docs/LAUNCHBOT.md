@@ -115,6 +115,16 @@ the trade           FOUR transactions since 2026-09-16: BUY -> APPROVE -> PERMIT
                     the next is sent. Section 2D. The BUY was never broadcast at all
                     before that pass -- the broadcaster reached only the exit paths.
 trades to date      0 REAL TRADES. 107+ hypothetical rows across the dry-run modes.
+live boot           EXERCISED 2026-09-16 with --minutes 0: the whole boot sequence ran
+                    and the loop never ticked. Broadcaster address matched, wallet gate
+                    ALLOWED in live mode for the first time ($126.90 vs $50), reconcile
+                    and the needs_exit sweep both found nothing, "launchbot starting
+                    live TRUE". Zero transactions; verified on a fresh connection that
+                    mode live holds no rows and entry_tx is null everywhere.
+                    THE LOOP'S LIVE PATH HAS STILL NEVER EXECUTED.
+stored rows         117, counted: dry-run 40, r3 34, stuck 1, r5 32, gate 3, send 1,
+                    approvals 6. fill_status is 'dry-run' on 117 of 117 and gas_usd is
+                    non-null on 0, which is the evidence no live row has been written.
 first real tx       2026-09-16. TWO APPROVALS, both mined, nonces 130 and 131:
                     0x999fdb79...2669  USDG.approve(Permit2, 1)        block 65,017,856
                     0x178977d3...55c0  Permit2.approve(USDG, router, 1) block 65,017,859
@@ -3613,7 +3623,7 @@ Reported by the run itself rather than only by this document:
 | **TOTAL** | **$0.1773 – $0.1899** | **1.75%–1.88% of a $10 position** |
 
 **ONE OF THE FOUR GAS LEGS IS OURS AND THREE QUARTERS OF THE GAS IS STILL SOMEBODY
-ELSE'S.** `gas_usd` is NULL on all 113 stored rows. The figure moved by a tenth of a cent
+ELSE'S.** `gas_usd` is NULL on all **117** stored rows, counted rather than inferred. The figure moved by a tenth of a cent
 against the previous table and the conclusion did not move at all — **costs are still not
 the binding constraint** against a median gross of +0.374 at +90 s.
 
@@ -3707,7 +3717,7 @@ npm run launchbot -- --live   NO LONGER REFUSES AT THE PREFLIGHT
 #### WHAT WAS ACCEPTED, STATED PRECISELY RATHER THAN AS A LABEL
 
 **Every return figure in this document is MARK-TO-MARKET against a later trade in the
-pool.** `fill_status` has been the literal `dry-run` on all 113 rows. The entry price is
+pool.** `fill_status` has been the literal `dry-run` on all **117** rows — measured, and it is 117 of 117 rather than "every live row so far", because no live row has ever been written. The entry price is
 what a real trade got at our entry mark and the exit price is the first trade strictly after
 the horizon — both real prices from real trades, and **neither is a trade of ours.**
 
@@ -3783,7 +3793,7 @@ Accepting it does not make it known, and the columns that will answer it already
 |---|---|
 | did we fill, and what did we get | `bot_trades.executed_out` against `quoted_out`, and `BUY FILLED`'s `fill_vs_quote` |
 | how long inclusion took | `bot_trades.entry_block` against the block we decided in |
-| the realised entry slippage | `realised_slippage_entry`, NULL on all 113 rows today |
+| the realised entry slippage | `realised_slippage_entry`, NULL on all 117 rows today |
 | our own no-fill rate | a mined-and-reverted buy is `closed_unfilled` with `fill_status='live-reverted'` |
 
 **The figure to watch is `fill_vs_quote` on the first live buy**, because it is the first
@@ -3802,6 +3812,79 @@ when it starts mattering:
 **Section 7's categories B, C and D stay open in full.** No buy or sell of ours has ever
 been broadcast, every exit attempt to date was simulated from a borrowed holder, `gas_usd`
 is NULL on every row, and the inline approval path is proven only against a test double.
+
+#### THE LIVE BOOT RAN END TO END FOR THE FIRST TIME, AND TRADED NOTHING
+
+Every gate in the live boot sequence had only ever been observed REFUSING. With the list
+empty they can all be observed passing, and `--minutes 0` is how: the boot runs in full and
+`while (Date.now() < until)` is false on the first test, so the loop never ticks.
+
+**Checked before running it, not after:** `bot_trades` for mode `live` **RETURNED NO
+ROWS**, HELD rows anywhere on the chain **RETURNED NO ROWS**, and the kill switch clear —
+so `reconcileOnBoot` and `clearNeedsExit` had nothing to act on and could not sell
+anything. That mattered, because on a live path those two now sell for real.
+
+```
+npm run launchbot -- --live --minutes 0                             EXIT=0
+
+LIVE MODE REQUESTED
+LIVE BROADCASTER CONSTRUCTED   0x4ab56f6a15b7b17948c624c68462c2b825d2cb4a
+                               transport: BroadcastRpc
+WALLET BALANCE, READ FROM THE CHAIN
+   balance_usd 126.90   required_usd 50   can_arm TRUE   covers_cap TRUE
+boot reconciliation: no non-terminal rows          examined 0
+boot: no needs_exit positions                      found 0
+launchbot starting   live TRUE   broadcast "POSSIBLE -- a live broadcaster exists"
+VERIFIED ON A FRESH CONNECTION   rows_in_this_mode 0
+launchbot LIVE run complete   qualified 0  simulated 0  buysBroadcast 0
+```
+
+**FIVE THINGS RAN FOR THE FIRST TIME AND EVERY ONE IS THE ALLOW DIRECTION:**
+
+| | never run before because |
+|---|---|
+| `assertLiveReady` PASSING | the list had never been empty |
+| `createBroadcaster` from **`launchbot`** | it refused for want of a key, then for want of a preflight |
+| the broadcaster over a **`BroadcastRpc`** | the line was fixed in this pass — it had been handing the signer the read-only transport |
+| the wallet gate's **ALLOW in LIVE mode** | live had never got past gate 2. It was proven in dry run and in the refuse direction only |
+| `launchbot starting` with `live: true` | — |
+
+**THE ADDRESS ON THE BROADCASTER IS THE FIRST THING TO CHECK AND IT MATCHES.**
+`0x4ab56f6a…cb4a` is the configured wallet, derived from the key by `ethers` and compared
+inside `createBroadcaster` against `BOT_WALLET_ADDRESS`. That guard was inert until the
+variable was set and is now doing work on the live path.
+
+**NOTHING WAS WRITTEN AND NOTHING WAS SENT, VERIFIED ON A FRESH CONNECTION AFTERWARDS:**
+
+```
+rows in mode live, ANY status                RETURNED NO ROWS
+entry_tx or exit_tx set anywhere             0
+HELD rows anywhere                           RETURNED NO ROWS
+deployed capital                             $0.00 over 0 positions
+fill_status across all 117 rows              dry-run, 117 of 117
+gas_usd non-null                             0
+bot_exit_attempts with a receipt timing      0
+```
+
+**AND THE REMAINING GATES WERE RE-CHECKED RATHER THAN ASSUMED TO HAVE SURVIVED.** Removing
+a gate is exactly when to confirm the others still refuse:
+
+```
+BOT_LIVE=1                        EXIT=1    raises; does NOT quietly give a dry run
+LAUNCHBOT_LIVE=true               EXIT=1
+BOT_MODE=live WITH --live         EXIT=1    the var raises even beside the real flag
+--live --run-label x              EXIT=1    a label grants its own daily budget
+live-gate-drill                   20 of 20
+approval-drill                    13 of 13
+rail-drill                        32 of 32
+exit-broadcast-drill              11 of 11
+```
+
+**WHAT IT DOES NOT PROVE, AND IT IS THE LARGER HALF.** Zero ticks means no candidate was
+qualified, no buy was signed, no approval was granted and no exit was attempted. **The
+loop's live path — everything after `launchbot starting` — has still never executed.** What
+this establishes is that the boot no longer refuses and that arming does not write or send
+anything by itself, which is the precondition for step 8 rather than a substitute for it.
 
 #### FOUR CLAIMS IN THE CODE AND THREE IN THIS DOCUMENT WERE STALE BEFORE THIS CHANGE
 
@@ -3828,6 +3911,33 @@ first time one of them has come due here.
 
 **A claim about state has to be re-checked against the state whenever the state changes** —
 `ROBINHOOD.md`'s own rule, applied to a document that had drifted three ways at once.
+
+#### AND I MADE THE SAME MISTAKE IN THE SAME PASS: 113 ROWS WAS ARITHMETIC, NOT A COUNT
+
+The entry above and section 7 both said `gas_usd` is NULL on **113** rows. **The real
+figure is 117**, and it reconciles exactly:
+
+```
+dry-run            40      dry-run-gate        3
+dry-run-r3         34      dry-run-send        1
+dry-run-stuck       1      dry-run-approvals   6
+dry-run-r5         32                        ---
+                                              117
+```
+
+**113 came from adding this run's 6 rows to a 107 this document recorded at the
+`migrate-stuck-status` stop.** 107 was correct when it was measured and stopped being
+correct twice before I reused it — `dry-run-gate` wrote 3 rows and `dry-run-send` wrote 1
+in between. **A total derived by arithmetic on a stale figure is not a measurement**, and
+the rule it breaks is the one `ROBINHOOD.md` states for findings sections: *a snapshot
+written into a findings section is stale the next hour; current counts live in section 0
+and nowhere else.*
+
+**What the count DID confirm is worth more than the count**: `fill_status` is `dry-run` on
+**117 of 117**, so none of the new `live-pending` / `live-filled` / `live-unknown` values
+this pass introduced has ever been written, and `gas_usd` is non-null on **0**. Those two
+are the evidence that the live entry path has never run, and they were measured rather
+than reasoned about.
 
 ## 7. Rules here the code does not implement
 
@@ -3882,7 +3992,7 @@ category C.
   measurements — but the APPROVAL half is now measured from our own transactions at
   $0.0128 for the pair, against the $0.015 those external receipts implied, so that
   estimate is 17% high and the rest of them are probably close too.
-- **`fill_status` is the literal `dry-run` on all 113 rows, and nothing models winning the
+- **`fill_status` is the literal `dry-run` on all 117 rows, and nothing models winning the
   fill against competing buyers in the same block.** ~~It is a live prerequisite~~ —
   **ACCEPTED BY THE OPERATOR 2026-09-16** and removed from `bot/live-preflight.ts`. It stays
   here because accepting it did not measure it: what is unmodelled is winning the fill and
