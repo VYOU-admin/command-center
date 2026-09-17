@@ -70,7 +70,8 @@
     "purge-orphan-attempts": "node dist/cli/purge-orphan-attempts.js",
     "receipt-timing": "node dist/cli/receipt-timing.js",
     "signer-check": "node dist/cli/signer-check.js",
-    "resolve-unsellable": "node dist/cli/resolve-unsellable.js"
+    "resolve-unsellable": "node dist/cli/resolve-unsellable.js",
+    "halt-control": "node dist/cli/halt-control.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

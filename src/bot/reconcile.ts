@@ -49,7 +49,8 @@ export async function reconcileOnBoot(
      * Without a wallet the balance cannot be read, so nothing can be adjudicated. That
      * is a halt, not a shrug -- exactly the case this routine exists for.
      */
-    await halt(c, chain, 'boot reconciliation found open rows but no wallet is configured');
+    await halt(c, chain, mode,
+      'boot reconciliation found open rows but no wallet is configured');
     out.unresolved = out.examined;
     return out;
   }
@@ -84,7 +85,7 @@ export async function reconcileOnBoot(
       }
     } catch (err) {
       out.unresolved += 1;
-      await halt(c, chain, `boot reconciliation could not resolve trade ${r.id}: `
+      await halt(c, chain, mode, `boot reconciliation could not resolve trade ${r.id}: `
         + (err as Error).message);
     }
   }
@@ -158,7 +159,7 @@ export async function clearNeedsExit(
     const sellFrom = ctx.broadcaster?.address ?? r.exit_sim_from;
     if (!sellFrom) {
       /* No address to sell as is not a reason to skip — it is a reason to stop. */
-      await halt(c, chain, `needs_exit trade ${r.id} has no address to exit from`);
+      await halt(c, chain, mode, `needs_exit trade ${r.id} has no address to exit from`);
       throw new Error(`BOOT EXIT IMPOSSIBLE: trade ${r.id} is needs_exit and carries no `
         + 'address to sell from. THE POSITION IS STILL OPEN and the bot has not armed.');
     }
@@ -190,7 +191,7 @@ export async function clearNeedsExit(
        * THE LADDER EXHAUSTED. Halt and RAISE — the bot must not arm with an open
        * position it cannot close.
        */
-      await halt(c, chain, `boot exit exhausted on trade ${r.id}: `
+      await halt(c, chain, mode, `boot exit exhausted on trade ${r.id}: `
         + (err as Error).message.slice(0, 160));
       await c.query(
         `update bot_trades set note = $2, updated_at = now() where id = $1`,

@@ -73,22 +73,15 @@ export const LIVE_PREREQUISITES: readonly Prerequisite[] = [
     closedBy: 'accepted as a known unknown by the operator, or measured from the first '
       + 'live fills',
   },
-  {
-    id: 'dry-run-boot-halts-the-chain',
-    what: 'ANY dry run that ends with an open position leaves a row that halts the '
-      + 'CHAIN-WIDE kill switch at the next boot of its mode',
-    why: 'this replaced "7 needs_exit rows in dry-run-r5", which was RESOLVED on '
-      + '2026-09-16 — and resolving it demonstrated the hazard is not those seven rows '
-      + 'but the dry-run lifecycle. reconcileOnBoot reads the BORROWED holder\'s balance '
-      + '(deliberately, so hypothetical positions are not all reported closed), that '
-      + 'holder usually still holds, so the row becomes needs_exit; the sweep then tries '
-      + 'to sell a dead launch pool as somebody else, exhausts, and halts. It recurred '
-      + 'within minutes of the first cleanup, on rows a verification run had left.',
-    closedBy: 'an operator decision on section 4\'s open item — automatic halts scoped '
-      + 'to the mode that raised them, with manual halts staying chain-wide. Until then '
-      + 'every dry run must be left with no open position, and `resolve-unsellable` is '
-      + 'the way out when one is stuck',
-  },
+  /*
+   * `dry-run-boot-halts-the-chain` WAS HERE AND IS CLOSED — 2026-09-16, by operator
+   * decision: AUTOMATIC halts are now scoped to the mode that raised them and MANUAL
+   * halts stay chain-wide. A dry run that ends with an open position still halts ITS OWN
+   * mode at the next boot — which is correct, it has an unresolved position — and no
+   * longer touches live.
+   *
+   * Removed rather than struck through, because this list is read by code.
+   */
 ];
 
 /**

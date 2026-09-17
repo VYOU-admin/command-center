@@ -8,9 +8,10 @@
  * in config.ts that no code read, and the kill switch had only ever been evaluated
  * against an empty `bot_control`.
  *
- * IT RUNS ON chain='drill', NOT 'robinhood'. `bot_control` is keyed on chain, so
- * tripping the real kill switch to test it would halt the live dry run -- a test that
- * breaks the thing it is testing. Every row this writes carries chain='drill' and is
+ * IT RUNS ON chain='drill', NOT 'robinhood'. `bot_control` is keyed (chain, mode) as of
+ * 2026-09-16, and a CHAIN-WIDE halt still stops every mode on its chain -- so tripping
+ * the real kill switch to test it would halt the live dry run, a test that breaks the
+ * thing it is testing. Every row this writes carries chain='drill' and is
  * deleted at the end, and the deletion is verified on a fresh connection rather than
  * inferred from the script exiting cleanly.
  *
@@ -20,7 +21,7 @@
  */
 import { bootstrap } from '../bootstrap.js';
 import { errorFields, log } from '../logger.js';
-import { BOT_SCHEMA, halt } from '../bot/state.js';
+import { ALL_MODES, BOT_SCHEMA, halt } from '../bot/state.js';
 import { RAILS } from '../bot/config.js';
 import { checkRails, deployedCapIsTerminal, deployedUsd } from '../bot/rails.js';
 import type { RailState } from '../bot/rails.js';
@@ -206,12 +207,82 @@ async function main(): Promise<void> {
     await run(`MAX_TRADES_PER_DAY at ${RAILS.MAX_TRADES_PER_DAY}`, 'BLOCK');
     await wipe(c);
 
-    /* --- THE KILL SWITCH --------------------------------------------------- */
+    /* --- THE KILL SWITCH, AND ITS TWO SCOPES ------------------------------- */
+    /*
+     * THE SCOPES ARE THE WHOLE POINT OF THE 2026-09-16 CHANGE, SO THEY ARE EXERCISED
+     * AGAINST TWO MODES RATHER THAN ONE.
+     *
+     * A drill on a single mode can show that a halt blocks — which the old cases did —
+     * and CANNOT show the property that was actually bought: that one mode's automatic
+     * halt leaves another mode alone. Testing it needs a second mode, and the case that
+     * matters is the one expecting ALLOW.
+     */
+    const OTHER = 'drill-other';
+    const runIn = async (
+      mode: string, name: string, expect: 'ALLOW' | 'BLOCK',
+    ): Promise<void> => {
+      const v = await checkRails(c, CHAIN, mode);
+      const got = v.allowed ? 'ALLOW' : 'BLOCK';
+      results.push({ name, expect, got, blocked: v.blocked, pass: got === expect });
+      log.info(`RAIL CASE: ${name}`, { mode, expect, got, blocked: v.blocked });
+    };
+
     await run('kill switch not set', 'ALLOW');
-    await halt(c, CHAIN, 'rail drill');
-    await run('kill switch set by an outside writer', 'BLOCK');
+
+    /* ---- AN AUTOMATIC HALT IS MODE-SCOPED -------------------------------- */
+    await halt(c, CHAIN, MODE, 'rail drill: automatic, mode-scoped');
+    await runIn(MODE, `AUTOMATIC halt on '${MODE}' blocks '${MODE}'`, 'BLOCK');
+    await runIn(OTHER,
+      `AUTOMATIC halt on '${MODE}' does NOT block '${OTHER}' — THE POINT OF THE CHANGE`,
+      'ALLOW');
+    await c.query('delete from bot_control where chain = $1', [CHAIN]);
+    await runIn(MODE, 'mode halt cleared', 'ALLOW');
+
+    /* ---- A MANUAL HALT IS CHAIN-WIDE ------------------------------------- */
+    /*
+     * Written with the sentinel directly, because that is what `halt-control` writes and
+     * what `state.halt()` REFUSES. The refusal is its own case below.
+     */
+    await c.query(
+      `insert into bot_control (chain, mode, halted, reason) values ($1, $2, true, $3)
+       on conflict (chain, mode) do update set halted = true, reason = $3`,
+      [CHAIN, ALL_MODES, 'rail drill: manual, chain-wide']);
+    await runIn(MODE, `MANUAL chain-wide halt blocks '${MODE}'`, 'BLOCK');
+    await runIn(OTHER, `MANUAL chain-wide halt ALSO blocks '${OTHER}'`, 'BLOCK');
+
+    /* ---- AND IT IS REPORTED AS CHAIN-WIDE, NOT AS THE MODE'S OWN --------- */
+    {
+      const v = await checkRails(c, CHAIN, MODE);
+      const saysChainWide = v.blocked.some((b) => b.includes('CHAIN-WIDE'));
+      results.push({
+        name: 'a chain-wide halt is REPORTED as chain-wide, not as the mode\'s own',
+        expect: 'BLOCK', got: saysChainWide ? 'BLOCK' : 'ALLOW',
+        blocked: v.blocked, pass: saysChainWide,
+      });
+      log.info('RAIL CASE: chain-wide halt is labelled as such', { blocked: v.blocked });
+    }
+    await c.query('delete from bot_control where chain = $1', [CHAIN]);
+    await runIn(MODE, 'chain-wide halt cleared', 'ALLOW');
+
+    /* ---- THE BOT CANNOT RAISE A CHAIN-WIDE HALT -------------------------- */
+    /*
+     * The one guarantee that keeps the two scopes meaningful: `state.halt()` is the
+     * AUTOMATIC path and refuses the sentinel, so no amount of bot misbehaviour can stop
+     * every mode. A default parameter is exactly how every automatic halt was chain-wide
+     * before, so the refusal is asserted rather than assumed.
+     */
+    {
+      let refused = false; let msg = '';
+      try {
+        await halt(c, CHAIN, ALL_MODES, 'the bot trying to stop everything');
+      } catch (e) { refused = true; msg = (e as Error).message.slice(0, 120); }
+      results.push({
+        name: 'state.halt() REFUSES the chain-wide sentinel (the bot cannot stop every mode)',
+        expect: 'BLOCK', got: refused ? 'BLOCK' : 'ALLOW', blocked: [msg], pass: refused,
+      });
+      log.info('RAIL CASE: halt() refuses the sentinel', { refused, msg });
+    }
     await wipe(c);
-    await run('kill switch cleared', 'ALLOW');
 
     /* --- DOES A BREACHED CAP HALT THE DAY, OR SKIP ONE LAUNCH? ------------- */
     /*

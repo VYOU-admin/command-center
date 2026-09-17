@@ -61,6 +61,40 @@ create table if not exists bot_control (
   updated_at timestamptz not null default now()
 );
 
+-- THE KILL SWITCH IS KEYED (chain, mode) AS OF 2026-09-16, AND MIGRATED IN PLACE.
+--
+-- It was keyed on CHAIN alone, which made every halt chain-wide -- right for a manual
+-- emergency stop and WRONG for an automatic one. A dry run holds nothing, so its
+-- inability to clear a hypothetical position said nothing about live exposure, and yet
+-- it stopped live trading. That was demonstrated twice in one afternoon.
+--
+-- mode = '*' (ALL_MODES) means CHAIN-WIDE, which is what a manual halt writes.
+-- mode = a real mode means that mode only, which is what an automatic halt writes.
+--
+-- EXISTING ROWS BACKFILL TO THE SENTINEL because they WERE chain-wide by construction --
+-- there was no other kind. The one extant row is already cleared, so the backfill changes
+-- no behaviour; it only labels history with the scope it actually had.
+alter table bot_control add column if not exists mode text;
+update bot_control set mode = '*' where mode is null;
+
+-- THE PRIMARY KEY IS REPLACED ONCE AND THE GUARD IS THE COLUMN COUNT.
+-- This schema runs on EVERY boot, so 'drop then add' unguarded would fail the second
+-- time and take the whole statement -- and every boot -- with it. Testing conkey's
+-- length means the branch is false once the key is already (chain, mode), so it is
+-- genuinely idempotent rather than merely surviving.
+do $do$
+begin
+  if exists (
+    select 1 from pg_constraint
+     where conname = 'bot_control_pkey' and array_length(conkey, 1) = 1
+  ) then
+    alter table bot_control drop constraint bot_control_pkey;
+    -- Postgres sets NOT NULL on a primary-key column, so mode needs no separate alter.
+    alter table bot_control add primary key (chain, mode);
+  end if;
+end
+$do$;
+
 -- EVERY NEW COLUMN NEEDS ITS OWN ALTER. A 'create table if not exists' is a NO-OP on an
 -- existing table, so a column added to the literal above reaches a fresh database and
 -- never reaches this one. That is rule one of ROBINHOOD.md section 7, and it has
@@ -141,28 +175,97 @@ export const NON_TERMINAL = ['intent', 'entry_sent', 'holding', 'exit_sent'];
 export const HELD = [...NON_TERMINAL, 'needs_exit', 'exit_exhausted'];
 
 /**
+ * THE SENTINEL MODE MEANING "EVERY MODE ON THIS CHAIN".
+ *
+ * It cannot collide with a real mode: `resolveMode` only ever produces `'live'` or a
+ * `'dry-run'`-prefixed label, and `'*'` is neither. Exported so no caller writes the
+ * literal, which is how a sentinel quietly becomes two sentinels.
+ */
+export const ALL_MODES = '*';
+
+export interface HaltState {
+  halted: boolean;
+  reason: string;
+  /** Which row stopped it: 'chain' for a manual chain-wide halt, 'mode', or '' when clear. */
+  scope: 'chain' | 'mode' | '';
+}
+
+/**
  * THE KILL SWITCH IS A ROW, RE-READ ON A FRESH CONNECTION BEFORE EVERY TRADE.
  *
  * A flag in memory dies with the container and cannot be set from outside it. A row can
  * be set by anyone with a database connection while the bot is mid-flight, which is the
  * entire point: stopping it must not require a deploy.
  *
+ * ---------------------------------------------------------------------------
+ * TWO SCOPES, DECIDED 2026-09-16 BY THE OPERATOR
+ * ---------------------------------------------------------------------------
+ *
+ * **A MANUAL HALT IS CHAIN-WIDE. AN AUTOMATIC HALT IS SCOPED TO THE MODE THAT RAISED IT.**
+ *
+ * The scopes are not a refinement of one idea, they answer different questions:
+ *
+ *   - A human reaching for the switch wants EVERYTHING to stop and cannot be required to
+ *     know which modes are running. A mode-scoped emergency stop is not an emergency stop.
+ *   - An automatic halt is a statement about the run that raised it. A dry run holds
+ *     nothing and risks nothing, so its inability to close a hypothetical position says
+ *     nothing about live exposure — and it used to stop live trading anyway. That was
+ *     demonstrated twice in one afternoon: a dry-run boot halted the chain, and the
+ *     cleanup for it halted the chain again.
+ *
+ * **A CHAIN-WIDE HALT WINS AND IS REPORTED AS SUCH.** Both rows are read; the chain-wide
+ * one is checked first, so a manual stop is never masked by a mode's own state, and the
+ * scope is returned so a log line says which row stopped the bot rather than only that
+ * something did.
+ *
  * A read that FAILS halts. An unreachable database is not permission to keep trading.
  */
-export async function isHalted(c: PoolClient, chain: string): Promise<{ halted: boolean; reason: string }> {
+export async function isHalted(
+  c: PoolClient, chain: string, mode: string,
+): Promise<HaltState> {
   try {
-    const r = await c.query<{ halted: boolean; reason: string | null }>(
-      'select halted, reason from bot_control where chain = $1', [chain]);
-    if (r.rowCount === 0) return { halted: false, reason: '' };
-    return { halted: r.rows[0]!.halted, reason: r.rows[0]!.reason ?? '' };
+    const r = await c.query<{ mode: string; halted: boolean; reason: string | null }>(
+      `select mode, halted, reason from bot_control
+        where chain = $1 and mode in ($2, $3)`, [chain, ALL_MODES, mode]);
+    /* CHAIN-WIDE FIRST: a manual stop must not be masked by a mode's own row. */
+    const wide = r.rows.find((x) => x.mode === ALL_MODES && x.halted);
+    if (wide !== undefined) {
+      return { halted: true, scope: 'chain',
+        reason: `[CHAIN-WIDE] ${wide.reason ?? 'halted'}` };
+    }
+    const own = r.rows.find((x) => x.mode === mode && x.halted);
+    if (own !== undefined) {
+      return { halted: true, scope: 'mode',
+        reason: `[mode ${mode}] ${own.reason ?? 'halted'}` };
+    }
+    return { halted: false, reason: '', scope: '' };
   } catch (err) {
-    return { halted: true, reason: `kill-switch read failed: ${(err as Error).message}` };
+    return { halted: true, scope: 'chain',
+      reason: `kill-switch read failed: ${(err as Error).message}` };
   }
 }
 
-export async function halt(c: PoolClient, chain: string, reason: string): Promise<void> {
+/**
+ * AN AUTOMATIC HALT. Scoped to the mode that raised it, always.
+ *
+ * **THERE IS NO WAY TO RAISE A CHAIN-WIDE HALT FROM THE BOT, AND THAT IS THE POINT.**
+ * `mode` is a required parameter rather than an optional one defaulting to the sentinel,
+ * because a default is exactly how every automatic halt became chain-wide in the first
+ * place. A manual chain-wide stop is set by an operator through `halt-control`, which is
+ * not the bot.
+ */
+export async function halt(
+  c: PoolClient, chain: string, mode: string, reason: string,
+): Promise<void> {
+  if (mode === ALL_MODES) {
+    throw new Error('halt() is the AUTOMATIC path and is always mode-scoped. It will not '
+      + `write the ${ALL_MODES} sentinel: a chain-wide stop is a human's decision, set `
+      + 'through halt-control, and the bot must not be able to stop every mode because '
+      + 'one of its own runs could not close a position.');
+  }
   await c.query(
-    `insert into bot_control (chain, halted, reason) values ($1, true, $2)
-     on conflict (chain) do update set halted = true, reason = $2, updated_at = now()`,
-    [chain, reason]);
+    `insert into bot_control (chain, mode, halted, reason) values ($1, $2, true, $3)
+     on conflict (chain, mode) do update
+       set halted = true, reason = $3, updated_at = now()`,
+    [chain, mode, reason]);
 }

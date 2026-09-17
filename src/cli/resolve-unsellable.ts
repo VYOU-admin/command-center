@@ -1,8 +1,12 @@
 /**
- * `npm run resolve-unsellable -- --trade <id> [--commit]`
- * `npm run resolve-unsellable -- --clear-halt "<reason>" [--commit]`
+ * `npm run resolve-unsellable -- --trade <id> [--simulated] [--commit]`
  *
- * RESOLVES A POSITION THE EXIT LADDER CANNOT SELL, AND CLEARS THE HALT IT CAUSED.
+ * RESOLVES A POSITION THE EXIT LADDER CANNOT SELL.
+ *
+ * **CLEARING THE HALT IS `halt-control`'S JOB, NOT THIS TOOL'S.** It used to live here,
+ * and when the kill switch gained two scopes "clear the halt" stopped being one action —
+ * a mode's automatic halt and the chain-wide manual halt are separate rows with different
+ * guards. Keeping a clearer here would have been a second implementation of it.
  * docs/LAUNCHBOT.md section 4 and 2C.
  *
  * ---------------------------------------------------------------------------
@@ -32,21 +36,6 @@
  * `seed-stuck` set the precedent — it *"refused to seed cases whose balances were not
  * actually measured rather than inventing one"*.
  *
- * ---------------------------------------------------------------------------
- * CLEARING THE HALT IS A SEPARATE ACTION WITH ITS OWN GUARD
- * ---------------------------------------------------------------------------
- *
- * The kill switch is chain-wide by decision (section 4), and **the bot must never be able
- * to clear its own halt** — a process that can switch off the thing that switched it off
- * has no kill switch. This is an OPERATOR tool, not the bot, and it keeps that distinction
- * meaningful two ways:
- *
- *   - **it refuses to clear while ANY `needs_exit` row remains on the chain.** Clearing a
- *     halt while the condition that caused it persists is the failure the halt exists to
- *     prevent, and it is the reason this cannot be automated into the boot path.
- *   - **the existing reason is printed before anything is cleared**, and a new reason is
- *     REQUIRED, so the record says who cleared it and why rather than going blank.
- *
  * Dry by default. Counts before, counts after, on a fresh connection.
  */
 import { bootstrap } from '../bootstrap.js';
@@ -69,50 +58,15 @@ async function stuckCount(c: PoolClient): Promise<number> {
   return Number(r.rows[0]!.n);
 }
 
-async function haltRow(c: PoolClient): Promise<{ halted: boolean; reason: string } | null> {
-  const r = await c.query<{ halted: boolean; reason: string | null }>(
-    'select halted, reason from bot_control where chain = $1', [CHAIN]);
-  if (r.rowCount === 0) return null;
-  return { halted: r.rows[0]!.halted, reason: r.rows[0]!.reason ?? '' };
-}
-
-async function clearHalt(
-  c: PoolClient, reason: string, commit: boolean,
-): Promise<void> {
-  const before = await haltRow(c);
-  const stuck = await stuckCount(c);
-  log.info('LIVE FIGURES BEFORE CLEARING THE HALT', {
-    halt_row: before === null ? 'RETURNED NO ROWS' : before,
-    needs_exit_rows_on_this_chain: stuck,
-    new_reason: reason,
-  });
-  if (before === null || !before.halted) {
-    log.info('NOTHING TO CLEAR — the chain is not halted', {
-      note: 'reported rather than treated as success; a halt that was never set is a '
-        + 'different fact from one this run cleared',
-    });
-    return;
-  }
-  if (stuck > 0) {
-    /*
-     * THE GUARD. Clearing a halt while the condition that caused it persists is the
-     * failure the halt exists to prevent.
-     */
-    throw new Error(`REFUSING TO CLEAR: ${stuck} needs_exit row(s) still exist on `
-      + `${CHAIN}. The halt is doing its job. Resolve them first — a boot of their mode `
-      + 'sweeps the ones whose holder balance is now zero, and this tool resolves one '
-      + 'whose pool provably pays nothing.');
-  }
-  if (!commit) {
-    log.info('DRY RUN — the halt is NOT cleared', { note: 'pass --commit to clear it' });
-    return;
-  }
-  await c.query(
-    `update bot_control set halted = false, reason = $2, updated_at = now()
-      where chain = $1`, [CHAIN, reason]);
-  log.info('HALT CLEARED', { reason });
-}
-
+/*
+ * `clearHalt` WAS HERE AND MOVED TO `halt-control`.
+ *
+ * When the kill switch gained two scopes, "clear the halt" stopped being one action:
+ * a mode's automatic halt and the chain-wide manual halt are separate rows with
+ * DIFFERENT guards, and keeping a clearer here would have been a second implementation
+ * of the one that had to exist there. This file resolves positions; `halt-control`
+ * changes the kill switch.
+ */
 async function resolveOne(
   c: PoolClient, rpc: ReadOnlyRpc, tradeId: string, commit: boolean,
 ): Promise<void> {
@@ -324,33 +278,21 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const commit = args.includes('--commit');
   const ti = args.indexOf('--trade');
-  const ci = args.indexOf('--clear-halt');
-  if ((ti >= 0) === (ci >= 0)) {
-    throw new Error('pass exactly one of --trade <id> or --clear-halt "<reason>". They are '
-      + 'separate actions: one resolves a position, the other lifts a chain-wide stop, and '
-      + 'doing both in one command would hide which of them a run performed.');
+  if (ti < 0) {
+    throw new Error('pass --trade <id>. To change the kill switch use halt-control, which '
+      + 'owns both of its scopes.');
   }
-
   const app = await bootstrap();
   const c = await app.pool.connect();
   try {
-    if (ci >= 0) {
-      const reason = String(args[ci + 1] ?? '');
-      if (reason.trim() === '' || reason.startsWith('--')) {
-        throw new Error('--clear-halt requires a reason. The record must say who cleared '
-          + 'the halt and why rather than going blank.');
-      }
-      await clearHalt(c, reason, commit);
+    const key = process.env['ALCHEMY_API_KEY'];
+    if (!key) throw new Error('ALCHEMY_API_KEY is not set');
+    const rpc = new ReadOnlyRpc(
+      new RpcClient(RPC_URL.replace('{key}', key), 60000, 50_000));
+    if (args.includes('--simulated')) {
+      await resolveSimulated(c, rpc, String(args[ti + 1] ?? ''), commit);
     } else {
-      const key = process.env['ALCHEMY_API_KEY'];
-      if (!key) throw new Error('ALCHEMY_API_KEY is not set');
-      const rpc = new ReadOnlyRpc(
-        new RpcClient(RPC_URL.replace('{key}', key), 60000, 50_000));
-      if (args.includes('--simulated')) {
-        await resolveSimulated(c, rpc, String(args[ti + 1] ?? ''), commit);
-      } else {
-        await resolveOne(c, rpc, String(args[ti + 1] ?? ''), commit);
-      }
+      await resolveOne(c, rpc, String(args[ti + 1] ?? ''), commit);
     }
   } finally { c.release(); }
 
@@ -359,7 +301,7 @@ async function main(): Promise<void> {
   try {
     log.info('VERIFIED ON A FRESH CONNECTION', {
       needs_exit_rows: await stuckCount(fresh),
-      halt_row: (await haltRow(fresh)) ?? 'RETURNED NO ROWS',
+      note: 'the kill switch is halt-control\'s to report and change',
     });
   } finally { fresh.release(); }
 

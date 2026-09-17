@@ -85,7 +85,7 @@ async function trailingReverts(c: PoolClient, chain: string, mode: string): Prom
 export async function readRailState(
   c: PoolClient, chain: string, mode: string,
 ): Promise<RailState> {
-  const kill = await isHalted(c, chain);
+  const kill = await isHalted(c, chain, mode);
   const r = await c.query<{
     open: string; today: string; pnl: string | null; basis: string; nobasis: string;
   }>(

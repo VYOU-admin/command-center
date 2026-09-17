@@ -266,7 +266,7 @@ async function main(): Promise<void> {
     const c = await pool.connect();
     try {
       /* THE KILL SWITCH, on a fresh connection, before anything else this tick. */
-      const k = await isHalted(c, CHAIN);
+      const k = await isHalted(c, CHAIN, MODE);
       if (k.halted) { log.warn('HALTED', { reason: k.reason }); break; }
 
       const head = Number(await rpc.call('eth_blockNumber', []).then((h) => BigInt(String(h))));
@@ -505,7 +505,7 @@ async function main(): Promise<void> {
                */
               || (b.startsWith('MAX_DEPLOYED_USD') && deployedCapIsTerminal(rail.state)));
             if (fatal) {
-              await halt(c, CHAIN, fatal);
+              await halt(c, CHAIN, MODE, fatal);
               log.error('HALTING', { reason: fatal, state: rail.state });
               break;
             }
