@@ -351,8 +351,39 @@ async function main(): Promise<void> {
 
       for (const d of due.rows) {
         stats.exitsDue += 1;
-        if (!d.exit_sim_from) {
-          /* No borrowed holder means the sell cannot be simulated at all in dry run.
+        /*
+         * WHO SELLS, AND THEREFORE WHOSE BALANCE IS READ. **THIS IS COMPUTED FIRST, AND
+         * THAT ORDERING IS THE WHOLE FIX.**
+         *
+         * In dry run the seller is the BORROWED holder — the pool's first-swap sender —
+         * because we hold nothing. **With a broadcaster it is OUR OWN address**, or the
+         * simulation would be about a different wallet's ability to sell while the
+         * broadcast was signed by ours.
+         *
+         * ---------------------------------------------------------------------
+         * THE DEFECT THIS REPLACES ABANDONED FIVE REAL POSITIONS
+         * ---------------------------------------------------------------------
+         *
+         * The NULL check used to run BEFORE this line and unconditionally: a row with no
+         * `exit_sim_from` was closed `closed_unsimulatable / no_holder_found` and the
+         * loop moved on. **Live rows carry `exit_sim_from = NULL` BY DESIGN** — section
+         * 2D writes it null precisely so boot reconciliation reads OUR balance rather
+         * than a borrowed holder's — so **every live position reached that branch and was
+         * written off as closed without a single exit attempt.**
+         *
+         * Trades 798-802 are what that cost: five filled buys, $50 of basis, marked
+         * terminal while the wallet still held every token. And `closed_unsimulatable` is
+         * in neither `NON_TERMINAL` nor `HELD`, so the positions left boot
+         * reconciliation, the needs_exit sweep, `MAX_CONCURRENT` and the capital cap all
+         * at once — the same "stranded in a status nothing sweeps" shape this document
+         * already records for `exit_exhausted`, arriving on live money.
+         *
+         * The seller is now resolved first, so a missing holder is only reachable where
+         * it is a real condition: a DRY RUN with nothing to borrow.
+         */
+        const seller = broadcaster !== null ? broadcaster.address : d.exit_sim_from;
+        if (!seller) {
+          /* Dry run only: no borrowed holder means the sell cannot be simulated at all.
            * Counted as its own outcome, never folded into "reverted". */
           stats.exitNotAttempted += 1;
           await c.query(
@@ -361,16 +392,6 @@ async function main(): Promise<void> {
             [d.id]);
           continue;
         }
-        /*
-         * WHO SELLS, AND THEREFORE WHOSE BALANCE IS READ.
-         *
-         * In dry run this is the BORROWED holder — the pool's first-swap sender — because
-         * we hold nothing. **With a broadcaster it must be OUR OWN address**, or the
-         * simulation would be about a different wallet's ability to sell while the
-         * broadcast was signed by ours. `executeExit` guards this too and refuses; the
-         * guard is the backstop, this is the fix.
-         */
-        const seller = broadcaster === null ? d.exit_sim_from : broadcaster.address;
 
         /* The amount is what the SELLER actually holds, read from the chain. */
         let sellAmt: bigint;
@@ -390,11 +411,19 @@ async function main(): Promise<void> {
             ? bal
             : (bal === 0n ? 0n : (wanted > 0n && wanted < bal ? wanted : bal));
         } catch (e) {
+          /*
+           * A LIVE POSITION IS NEVER CLOSED TERMINAL ON A FAILED READ. We hold the
+           * tokens; a balance we could not read says nothing about whether they are
+           * there, and `closed_unsimulatable` would strand them outside every sweep.
+           * `needs_exit` is the state the boot sweep exists for.
+           */
           stats.exitNotAttempted += 1;
           await c.query(
-            `update bot_trades set status='closed_unsimulatable',
+            `update bot_trades set status=$3,
                     exit_sim_status='probe_failed', exit_sim_note=$2, updated_at=now()
-              where id=$1`, [d.id, (e as Error).message.slice(0, 160)]);
+              where id=$1`,
+            [d.id, (e as Error).message.slice(0, 160),
+              broadcaster !== null ? 'needs_exit' : 'closed_unsimulatable']);
           continue;
         }
         if (sellAmt === 0n) {
