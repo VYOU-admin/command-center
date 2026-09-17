@@ -101,6 +101,12 @@ slippage bound      1000 bps, changed from 300 on 2026-09-16 on measured
 exit retry ladder   [1000, 1343], two rungs, re-derived at the new bound
 live gate           20 of 20 cases in npm run live-gate-drill; the static gate
                     passes over 132 source files and is proven able to fail
+prerequisites       ONE outstanding: fill-not-modelled. approvals-not-inline was
+                    CLOSED 2026-09-16 (section 2D). Live still refuses to arm.
+the trade           FOUR transactions since 2026-09-16: BUY -> APPROVE -> PERMIT2
+                    APPROVE -> (at +90 s) SELL, each confirmed by its receipt before
+                    the next is sent. Section 2D. The BUY was never broadcast at all
+                    before that pass -- the broadcaster reached only the exit paths.
 trades to date      0 REAL TRADES. 107+ hypothetical rows across the dry-run modes.
 first real tx       2026-09-16. TWO APPROVALS, both mined, nonces 130 and 131:
                     0x999fdb79...2669  USDG.approve(Permit2, 1)        block 65,017,856
@@ -856,6 +862,179 @@ position**, inside the 1.8–1.9% round trip already recorded and changing no de
 **ITS WRITE HALF HAS NEVER RUN AND CANNOT RUN IN THIS BUILD.** It reaches
 `createBroadcaster` at a real call site and is refused there. The read half works and is
 exercised below.
+
+### 2D. THE TRADE SENDS ALL FOUR TRANSACTIONS — `approvals-not-inline` CLOSED 2026-09-16
+
+**A LIVE TRADE IS FOUR TRANSACTIONS AND ONLY ONE OF THEM WAS WIRED.** Section 2C threaded
+the broadcaster through `exit-exec` and closed `sell-not-broadcast`; the two approvals were
+carried as `approvals-not-inline`. Reading the path end to end before writing that wiring
+found a third thing, upstream of both:
+
+> **THE BUY WAS NEVER BROADCAST EITHER.** `broadcaster` reached `clearNeedsExit` and the
+> per-tick exit sweep and **nothing else**. The entry was an `eth_call` and then an insert:
+> a `holding` row carrying `fill_status = 'dry-run'` and an `exit_due_block`, for a position
+> nothing had bought. A live run would have opened rows against tokens it did not hold and
+> tried to sell them ninety seconds later.
+
+**It was masked by the prerequisites list refusing to arm**, which is the same masking that
+hid the wallet-gate defect when the key arrived: a guard that stops the run also stops
+anyone finding out what the run would have done. **`approvals-not-inline` could not honestly
+be closed while this was true** — wiring approvals to a buy that does not happen would have
+met the prerequisite's words and left the risk exactly where it was, which is the trap
+`approvals-not-executed` was replaced to avoid one pass earlier.
+
+So this pass wires the whole trade: **BUY → APPROVE → PERMIT2 APPROVE → (at +90 s) SELL.**
+
+#### WHERE IN THE SEQUENCE: AFTER THE BUY, AND THE DECIDING REASON IS NOT THE OBVIOUS ONE
+
+Both orders are defensible and the choice was made on evidence rather than preference.
+
+| | grant BEFORE the buy | **grant AFTER the buy** |
+|---|---|---|
+| the amount | **only a quote exists** | **the balance, read from the chain** |
+| gas on a refused entry | paid, every time | **never paid** |
+| window holding with no approval | none | **~300 ms of a 90,000 ms hold** |
+
+**THE DECIDING ARGUMENT IS THE AMOUNT, AND IT IS THE ONE NEITHER ORDER MAKES OBVIOUS.**
+Section 2B's policy is an EXACT amount and never unlimited, and the exit's rule is that the
+amount sold is *the balance read from the chain, never the stored quote*. **Before the buy
+there is no balance — only a quote this document measures to be wrong.** Section 6 records a
+2–3% residual over-quote whose distribution straddles our own bound, and the error runs in
+both directions. An allowance sized on a quote that comes in below the fill leaves the tail
+of the position **unsellable**, which is the precise failure the exact-amount policy exists
+to bound. Granting first therefore forces a choice between an unlimited allowance — refused
+by section 2B, on a contract nobody has read — and a padded guess, which is a number
+invented to cover an error whose size is unknown. **Granting after removes the question:
+`balanceOf` is the answer.**
+
+The other two reasons agree with it and neither would have been sufficient alone:
+
+- **THE COST IS ONLY PAID ON TRADES THAT FILLED.** At the measured entry revert rate the
+  pre-approve order spends $0.0128 on every refused entry, for an allowance on a token the
+  wallet will never hold.
+- **THE EXPOSURE WINDOW IS SUB-SECOND AGAINST A 90-SECOND HOLD.** The two real approvals of
+  2026-09-16 landed in blocks 65,017,856 and 65,017,859 — **three blocks, ~300 ms**, both
+  receipts served on the first poll. `EXIT_DELAY_BLOCKS` is 900 blocks = 90 s. So "holding
+  with no approval" is **0.3% of the hold**, and it is at the START of the hold, which is
+  the half where the exit is not due.
+
+#### WHAT HAPPENS WHEN ONE LEG SUCCEEDS AND THE OTHER DOES NOT
+
+**THE APPROVAL SUCCEEDS AND THE BUY FAILS: IT CANNOT ARISE IN THIS ORDER, AND THAT IS
+ITSELF AN ARGUMENT FOR THE ORDER.** The buy is first and the grant is gated on its receipt,
+so a failed buy simply never reaches the approval. Had the order been reversed, the outcome
+would be a live allowance to Permit2 and to the router on a token the wallet does not own.
+Nothing moves — an allowance without a balance grants a claim on nothing — but it is a
+standing grant on a launch-minute contract, left behind by a trade that did not happen, and
+it is exactly what section 2B bounds the amount in order to survive.
+
+**THE BUY SUCCEEDS AND THE APPROVAL FAILS IS THE CASE THAT MATTERS, AND IT MUST NOT LEAVE A
+POSITION THE BOT CANNOT CLOSE.** The three receipt outcomes are three different facts and
+each gets its own response, which is why `bot/receipt.ts` returns rather than throws:
+
+| the approval | the position | the mode |
+|---|---|---|
+| mined, status 1 | `holding`, normally | continues |
+| **mined, status 0** | **`needs_exit`** | **HALTS** |
+| **no receipt inside the timeout** | **`needs_exit`** | **HALTS** |
+| **the broadcast itself rejected** | **`needs_exit`** | **HALTS** |
+
+**`needs_exit` RATHER THAN A NEW TERMINAL STATUS, AND THE REASON IS A DEFECT THIS DOCUMENT
+ALREADY PAID FOR.** The tokens are ours and the position is real. `needs_exit` is the one
+state `clearNeedsExit` acts on at boot, and the exit path now grants what is missing before
+it sells — so the failed approval is RETRIED there, against a token the wallet demonstrably
+holds. A terminal status would repeat `exit_exhausted`: seven positions in a status no sweep
+contained, which this document records finding months of assumption later.
+
+**IT HALTS BECAUSE AN APPROVAL THAT REVERTS IS A STATEMENT ABOUT THE TOKEN, NOT ABOUT THIS
+POOL.** A freshly launched contract that refuses a standard `approve` — a blacklist, a
+transfer hook, a non-standard return — will refuse the next one from the same launchpad
+seconds later. That is the reasoning `MAX_CONSECUTIVE_REVERTS` already uses, and halting
+here costs one mode's remaining launches against the alternative of opening positions that
+cannot be sold, one every few seconds. **Halts have been mode-scoped since earlier the same
+day, so a live halt stops live and nothing else.**
+
+**THE HALT STOPS NEW TRADES AND NOT THE RESOLUTION OF THIS ONE.** The row is `needs_exit`
+before the halt is written, so the next boot of that mode sweeps it whether or not a human
+has cleared anything — and `halt-control` refuses to clear a mode while it still has
+`needs_exit` rows, which points the operator at the position rather than at the switch.
+
+#### THE NONCE: ONE BROADCAST IN FLIGHT AT A TIME, AND THE RECEIPT IS THE GATE
+
+`signer.send` reads the nonce per transaction as `'pending'`, deliberately, so a replaced
+container cannot reuse one. **On a node that does not track the mempool `'pending'` equals
+`'latest'`**, so two sends before the first is mined take the SAME NONCE and the second
+replaces the first. `approve-setup` hit this on the first real pair and `bot/receipt.ts`
+exists because of it.
+
+**THE RULE IS ABSOLUTE AND IT IS NOW THE WHOLE TRADE'S RULE RATHER THAN ONE CLI'S:**
+
+```
+send -> awaitReceipt -> MINED is the ONLY outcome that permits the next send
+```
+
+so a trade is a strict chain and never a batch:
+
+```
+BUY        send -> receipt MINED -> balanceOf, the exact amount
+APPROVE 1  send -> receipt MINED
+APPROVE 2  send -> receipt MINED
+SELL       (at +90 s) simulate the ladder, send the accepted rung -> receipt
+```
+
+**A BUY THAT REPLACED ITS OWN APPROVAL WOULD BE THE SAME FAILURE ONE STEP WORSE** than the
+one `approve-setup` found, because a replaced approval is a missing allowance while a
+replaced buy is a missing position that the row says exists. Neither can happen: there is
+never a second transaction in flight, and the two non-mined outcomes both stop the chain
+rather than continuing past an unconfirmed send.
+
+**THE SELL LEG ALREADY HAD THIS PROPERTY AND KEEPS IT.** `ExitUnrecoverableError` stops the
+ladder on an unconfirmed broadcast, so no second sell is ever sent; what this pass adds is
+the same guarantee for the buy and the two approvals, through the same `awaitReceipt`.
+
+#### ONE IMPLEMENTATION, AND `approve-setup` NOW CALLS IT RATHER THAN BEING COPIED
+
+`src/bot/approvals.ts` — `ensureSellReadiness` — is the only thing that decides what to
+approve and grants it. **It was extracted rather than written**, because the alternative was
+the ninth recorded instance of the two-implementations trap, in the place this document
+already names as the worst for it: *the side that grants an allowance and the side that
+checks it disagreeing about sufficiency is how a bot sells into a revert it had already been
+told about.*
+
+| what | where it lives | who calls it |
+|---|---|---|
+| reading both allowances, expiry included | `bot/allowance.ts` — `checkSellReadiness` | approvals, exit-exec |
+| building both approvals | `bot/calldata.ts` — `buildTokenApprove`, `buildPermit2Approve` | approvals only |
+| deciding, granting, confirming, re-reading | **`bot/approvals.ts` — `ensureSellReadiness`** | the loop, `exit-exec`, `approve-setup` |
+| waiting for a receipt | `bot/receipt.ts` — `awaitReceipt` | all of them |
+
+**`approve-setup` IS NOW A THIN CLI OVER IT.** Everything that made the first real
+transactions correct — skip what already covers, refuse an unreadable allowance rather than
+treating it as absent, honour the Permit2 expiry, re-read from the chain afterwards and
+raise if the grant did not land — moved into the module unchanged and is now what the loop
+runs too. The CLI keeps only its argument parsing, its balance-sizing default and its
+reporting.
+
+**THE EXIT PATH GRANTS RATHER THAN REFUSING, AND AT THE LAST POSSIBLE MOMENT.**
+`exit-exec`'s step 2 used to raise `ExitUnrecoverableError` when the allowances were short.
+It now calls `ensureSellReadiness` there instead — **after the rung's simulation has passed
+and immediately before the broadcast**, so gas is never spent granting an allowance for a
+pool that was not going to pay anyway. It is naturally at-most-once per exit: once the grant
+lands it covers every later rung. If the grant cannot be made the error is still
+`ExitUnrecoverableError`, because no bound fixes a missing allowance.
+
+That is what makes a failed inline grant recoverable: the boot sweep re-enters through the
+same executor and the approval is attempted again, against a balance the chain confirms.
+
+#### THE COST, AS A KNOWN PER-TRADE LINE RATHER THAN AN ESTIMATE
+
+**$0.0128 per token per trade — MEASURED, on our own two receipts**, against the $0.015 that
+other people's receipts implied. It is **0.13% of a $10 position**, and it is now in the
+round-trip table in section 6 as a measured line rather than an external one.
+
+**It is unavoidable and it is not a choice this design makes.** Every token is a launch
+minutes old, so no allowance can predate the buy; the only way to pay it less often is an
+unlimited allowance, which section 2B refuses for reasons that have nothing to do with cost.
 
 ### RPC cost of running the bot
 
@@ -2087,10 +2266,20 @@ The +450 s peak here disagrees with the offline holdout, where +450 s is **exact
 |---|---|---|
 | LP fee, both legs | **$0.0654** | run 3's own fee mix, weighted: 0.654% round trip |
 | slippage, both legs | ~$0.026 | 0.26% at $10, measured from realised impact (SELLOFF) |
-| gas: buy + sell | $0.071–$0.084 | 200 real receipts per era |
-| gas: two approvals | $0.015 | ERC-20 → Permit2 and Permit2 → router, $0.00751 each |
+| gas: buy + sell | $0.071–$0.084 | 200 real receipts per era — still OTHER PEOPLE'S |
+| gas: two approvals | **$0.0128** | **MEASURED ON OUR OWN RECEIPTS**, 2026-09-16 — see below |
 | RPC, per trade | $0.0021 | 156,872 CU / 34 trades |
-| **total** | **$0.179 – $0.192** | **1.8%–1.9% of a $10 position** |
+| **total** | **$0.177 – $0.190** | **1.8%–1.9% of a $10 position** |
+
+**THE APPROVAL LINE IS THE ONLY ONE THAT IS OURS, AND IT REPLACED AN ESTIMATE THAT WAS 17%
+HIGH.** $0.015 came from other traders' receipts at $0.00751 each; our own two came to
+$0.0128 for the pair. The table moves by a tenth of a cent and the conclusion does not move
+at all — which is the useful result, because it says the remaining external figures are
+probably close too. **`gas_usd` is still NULL on every stored row**: no buy or sell of ours
+has been mined, so two of the four legs above have never been checked against anything we
+paid for. `ROUND_TRIP_GAS_USD` in `bot/config.ts` carries each figure with its provenance
+and the loop reports the whole table at the end of every run, so the document is no longer
+the only place it exists.
 
 **Costs are not the binding constraint.** Against a median gross of +0.374 at +90 s on
 the bot's own trades, or +0.157–0.180 in the recent-era holdout, a 1.9% round trip is
@@ -3387,6 +3576,18 @@ category C.
   receipt confirmation have all executed for real — on `approve` calls to a token and to
   Permit2. The swap calldata has never been signed, and `buildSwap`'s output has only ever
   been `eth_call`ed.
+- **NO BUY HAS EVER BEEN BROADCAST, AND UNTIL 2026-09-16 NO CODE PATH COULD HAVE.** The
+  broadcaster reached `clearNeedsExit` and the per-tick exit sweep and nothing else; the
+  entry was an `eth_call` followed by an insert. Section 2D wires it, `approval-drill`
+  proves the ordering against a test double, and **it has still never run against the
+  chain** — `fill-not-modelled` keeps live from arming.
+- **THE INLINE APPROVAL PATH IS PROVEN ONLY AGAINST A TEST DOUBLE.** `approval-drill` is 13
+  of 13 and proves the ORDERING — a second transaction is never sent before the first has a
+  receipt, MINED is the only outcome that continues, an unreadable allowance refuses without
+  sending, an expired Permit2 grant is not mistaken for a live one, and an already-granted
+  allowance is SKIPPED. **It proves nothing about signing, gas estimation, nonce derivation
+  or the chain accepting our bytes**; the two real approvals of 2026-09-16 are the evidence
+  for those, and they were sent by a CLI rather than by the loop.
 
 ### D. Structural, and stated so they are not rediscovered
 
@@ -3411,6 +3612,18 @@ category C.
   of 20) and confined statically (`check-live-gate`, over 132 files, proven able to fail),
   but **no line of the signing or broadcasting code has ever run against a real key**, and
   that stays true until section 8 step 5.
+- ~~The loop never broadcast the BUY~~ — **CLOSED 2026-09-16, section 2D.** It was not on
+  any list: the prerequisites named the approvals and the sell, and the entry was assumed
+  wired because the row said `holding`. **A guard that stops a run also stops anyone finding
+  out what the run would have done** — the same masking that hid the wallet gate when the
+  key arrived, two passes earlier.
+- ~~`launchbot` handed the signer the READ-ONLY transport~~ — **FIXED 2026-09-16.** The
+  identical line `approve-setup` was fixed on when it hit it on the first real transaction,
+  left standing here. Every send the bot made would have been refused by its own deny-list —
+  loudly, with nothing signed, which is the layered defence working and is not a reason to
+  have shipped it. **Fixing a defect at the call site that failed leaves it at every other
+  call site**, and nothing reported that. Both call sites now choose the transport
+  explicitly and by name.
 - ~~`exit-exec` simulates and does not send~~ — **CLOSED 2026-09-16.** The broadcaster is
   threaded through and forwarded by both callers; the ladder climbs on simulations and
   sends only the rung the pool accepted. Section 2C.
@@ -3578,7 +3791,7 @@ that should be made before step 3, not during it.
 | ~~**4**~~ | ~~Re-run the gates with the key present~~ | **DONE 2026-09-16** — 20 of 20, with case 6 flipping its assertion and reporting that it did. | — |
 | ~~**5**~~ | ~~THE FIRST REAL TRANSACTION: a bounded approval~~ | **DONE 2026-09-16.** `0x999fdb79…` and `0x178977d3…`, both mined, $0.0128. Two defects surfaced on a call that moved nothing, which is exactly what this step was for. | — |
 | ~~**6**~~ | ~~Verify the approval from the chain~~ | **DONE** — the CLI re-read both allowances (1 and 1, expiry set) and an independent process re-read both receipts, nonces and the gas actually paid. | — |
-| **7** | **Clear the prerequisites list** | remove the closed entries from `bot/live-preflight.ts`, deliberately, with evidence | it is data, not a comment, and each removal is an edit somebody signs off |
+| ~~**7**~~ | ~~Clear the prerequisites list~~ | **PARTLY DONE 2026-09-16** — `approvals-not-inline` removed with the evidence in section 2D. **`fill-not-modelled` REMAINS and is the only one**, so live still refuses to arm. Closing it is the operator ACCEPTING a known unknown, not a code change. | it is data, not a comment, and each removal is an edit somebody signs off |
 | **8** | **One live run, bounded hard** | `npm run launchbot -- --live --minutes <small>` | the rails already bound it: $10 a position, 5 concurrent, $100 deployed, 40 trades a day, $15 daily loss |
 | **9** | **Reconcile from a fresh connection** | rows, allowances, balance, `bot_control` | a clean exit is not evidence; this is the standing rule and it applies hardest here |
 

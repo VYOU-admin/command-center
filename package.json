@@ -67,6 +67,7 @@
     "live-gate-drill": "node dist/cli/live-gate-drill.js",
     "approve-setup": "node dist/cli/approve-setup.js",
     "exit-broadcast-drill": "node dist/cli/exit-broadcast-drill.js",
+    "approval-drill": "node dist/cli/approval-drill.js",
     "purge-orphan-attempts": "node dist/cli/purge-orphan-attempts.js",
     "receipt-timing": "node dist/cli/receipt-timing.js",
     "signer-check": "node dist/cli/signer-check.js",

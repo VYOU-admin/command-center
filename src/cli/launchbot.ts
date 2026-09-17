@@ -26,9 +26,13 @@ import { TOPICS as EVENT_TOPICS } from '../adapters/token-updates/decode.js';
 const TOPICS_SWAP = EVENT_TOPICS.swapV4;
 import {
   BACKFILL_OFFSETS_S, BLOCKS_PER_SECOND, DETECT_INTERVAL_MS, ENTRY_DELAY_BLOCKS,
-  EXIT_DELAY_BLOCKS, EXIT_RETRY, NATIVE_ETH, POOL_MANAGER, RAILS, SLIPPAGE_BPS,
+  EXIT_DELAY_BLOCKS, EXIT_RETRY, NATIVE_ETH, POOL_MANAGER, RAILS, RECEIPT_POLL_MS,
+  RECEIPT_TIMEOUT_MS, ROUND_TRIP_GAS_USD, SLIPPAGE_BPS,
 } from '../bot/config.js';
-import { buildPermit2Approve, buildSwap, buildTokenApprove } from '../bot/calldata.js';
+import { buildSwap } from '../bot/calldata.js';
+import { ensureSellReadiness, plannedSends } from '../bot/approvals.js';
+import { readTokenBalance } from '../bot/allowance.js';
+import { awaitReceipt } from '../bot/receipt.js';
 import { minOut, positionWei, qualifies } from '../bot/rule.js';
 import { quote } from '../bot/quote.js';
 import type { PoolTick } from '../bot/quote.js';
@@ -36,7 +40,7 @@ import { BOT_SCHEMA, halt, isHalted } from '../bot/state.js';
 import { checkRails, deployedCapIsTerminal, deployedUsd } from '../bot/rails.js';
 import { id } from 'ethers';
 import { quoteRate, swapAmounts, tokenPrice } from '../bot/price.js';
-import { ReadOnlyRpc } from '../bot/rpc.js';
+import { BroadcastRpc, ReadOnlyRpc } from '../bot/rpc.js';
 import { clearNeedsExit, reconcileOnBoot } from '../bot/reconcile.js';
 import { configuredWallet, readWalletState, requiredUsd } from '../bot/wallet.js';
 import { resolveMode } from '../bot/mode.js';
@@ -80,7 +84,8 @@ async function main(): Promise<void> {
   if (!key) throw new Error('ALCHEMY_API_KEY is not set');
   /* A generous ceiling: the loop is one getLogs per tick plus a simulation per
    * candidate, and the run is bounded by --minutes rather than by spend. */
-  const rpc = new ReadOnlyRpc(new RpcClient(RPC_URL.replace('{key}', key), 60000, 5_000_000));
+  const inner = new RpcClient(RPC_URL.replace('{key}', key), 60000, 5_000_000);
+  const rpc = new ReadOnlyRpc(inner);
 
   /*
    * TEST CONTROL, DRY RUN ONLY. Inflates the exit re-quote so the first rungs of the
@@ -123,8 +128,27 @@ async function main(): Promise<void> {
         + 'can be signed, and no key exists in this build.',
     });
     assertLiveReady(BOT_MODE);
-    broadcaster = await createBroadcaster(BOT_MODE, rpc);
-    log.warn('LIVE BROADCASTER CONSTRUCTED', { address: broadcaster.address });
+    /*
+     * THE SIGNER GETS THE BROADCAST-CAPABLE TRANSPORT, AND THIS LINE WAS WRONG HERE UNTIL
+     * 2026-09-16 — THE SAME DEFECT THE FIRST REAL TRANSACTION HIT IN `approve-setup`.
+     *
+     * It read `createBroadcaster(BOT_MODE, rpc)`, handing the signer the `ReadOnlyRpc` the
+     * loop reads through — which refuses `eth_sendRawTransaction` BY NAME in every mode
+     * including live. Every send this bot made would have been refused by its own
+     * deny-list. `approve-setup` was fixed when it hit this and **the same line was left
+     * standing here**, which is what "fix it at the call site that failed" costs: the
+     * other call sites keep the defect and nothing reports it.
+     *
+     * The layered defence would have caught it again — loudly, with nothing signed — but
+     * it would have caught it on the first live trade rather than here.
+     */
+    const sender = new BroadcastRpc(inner, BOT_MODE);
+    broadcaster = await createBroadcaster(BOT_MODE, sender);
+    log.warn('LIVE BROADCASTER CONSTRUCTED', {
+      address: broadcaster.address,
+      transport: 'BroadcastRpc — the read path stays ReadOnlyRpc, which still refuses the '
+        + 'broadcast by name, so broadcasting is opt-in at this one call site',
+    });
   }
 
   let walletState = null as Awaited<ReturnType<typeof readWalletState>> | null;
@@ -254,6 +278,11 @@ async function main(): Promise<void> {
     quoteBasis: {} as Record<string, number>,
     exitsDue: 0, ladderFired: 0, ladderExhausted: 0, rowsNotStored: 0,
     ladderRungs: {} as Record<string, number>,
+    /* THE LIVE ENTRY LEGS, counted separately because they are different facts. */
+    buysBroadcast: 0, buysFilled: 0, entryReverted: 0, entryUnresolved: 0,
+    approvalsGranted: 0, approvalsSkipped: 0,
+    /* The DRY-RUN plan: reached and built, or not buildable and why. */
+    approvalPlanBuilt: 0, approvalPlanFailed: 0, approvalPlanSkipped: 0,
   };
   const exitFails: string[] = [];
   const refusals: string[] = [];
@@ -593,9 +622,6 @@ async function main(): Promise<void> {
           const buy = buildSwap(plan);
           const sell = buildSwap({ ...plan, zeroForOne: !p.zeroIsPricing,
             amountIn: quoted, amountOutMinimum: minOut(size) });
-          const appr = buildTokenApprove(p.token, quoted);
-          const p2 = buildPermit2Approve(p.token, quoted, Math.floor(Date.now() / 1000) + 3600);
-
           stats.simulated += 1;
           let simOk = false; let simNote = '';
           try {
@@ -634,7 +660,17 @@ async function main(): Promise<void> {
             exitFrom = txr?.from ? txr.from.toLowerCase() : null;
           } catch { exitFrom = null; }
 
-          const exitDue = firstSwapBlock + ENTRY_DELAY_BLOCKS + EXIT_DELAY_BLOCKS;
+          /*
+           * THE HORIZON IS MEASURED FROM ENTRY, AND ON A LIVE PATH ENTRY IS THE BLOCK THE
+           * BUY WAS MINED IN — not a block arithmetic said it would be.
+           *
+           * In dry run nothing is bought, so entry is the modelled `firstSwapBlock +
+           * ENTRY_DELAY_BLOCKS` and this is the figure every stored dry-run row carries.
+           * A live buy takes however long inclusion takes; using the modelled block there
+           * would shorten or lengthen the hold by the difference and call it +90 s. The
+           * live value is rewritten from the receipt below.
+           */
+          let exitDue = firstSwapBlock + ENTRY_DELAY_BLOCKS + EXIT_DELAY_BLOCKS;
 
           /*
            * THE ROW IS WRITTEN BEFORE ANYTHING IS REPORTED.
@@ -651,8 +687,23 @@ async function main(): Promise<void> {
            * per-tick exit sweep looks for; a reverted buy never opened one and is
            * terminal. `rowCount` is checked, because an insert that stores nothing is
            * indistinguishable from one that worked unless somebody looks.
+           *
+           * ---------------------------------------------------------------------------
+           * ON A LIVE PATH IT IS WRITTEN AS `intent` AND COMMITTED **BEFORE** THE BUY
+           * ---------------------------------------------------------------------------
+           *
+           * LAUNCHBOT.md section 2 rule 1, which existed as a rule and as nothing else
+           * until this pass: *a row is inserted with status `intent` carrying the pool,
+           * the calldata and the value, and committed, before `eth_sendRawTransaction` is
+           * called.* A crash between the insert and the broadcast leaves a row the chain
+           * can be asked about; a crash the other way round leaves a position nobody
+           * knows exists, on a token nobody comes back for.
+           *
+           * `intent` is already in `NON_TERMINAL`, so boot reconciliation resolves it
+           * against the wallet's balance without anything further being added.
            */
-          const ins = await c.query(
+          const liveEntry = broadcaster !== null && simOk;
+          const ins = await c.query<{ id: string }>(
             `insert into bot_trades (chain,mode,pool_id,token,counter,launchpad,fee,
                tick_spacing,hooks,status,init_block,first_swap_block,age_blocks_at_entry,
                age_seconds_at_entry,position_wei,position_usd,quoted_out,min_out,
@@ -660,16 +711,22 @@ async function main(): Promise<void> {
                exit_sim_status,exit_sim_from,px_entry,exit_due_block,quote_basis)
              values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
                      $20,$21,$22,$23,$24,$25,$26,$27,$28)
-             on conflict (chain,mode,pool_id) do nothing`,
+             on conflict (chain,mode,pool_id) do nothing
+             returning id::text`,
             [CHAIN, MODE, pid, p.token, p.counter, p.launchpad, p.init.fee,
               p.init.tickSpacing, p.init.hooks,
-              simOk ? 'holding' : 'sim_reverted',
+              simOk ? (liveEntry ? 'intent' : 'holding') : 'sim_reverted',
               p.init.blockNumber, firstSwapBlock,
               firstSwapBlock - p.init.blockNumber,
               (firstSwapBlock - p.init.blockNumber) / BLOCKS_PER_SECOND,
               size.toString(), RAILS.MAX_POSITION_USD, quoted.toString(), bound.toString(),
-              rate, buy.data, sell.data, 'dry-run', simNote,
-              simOk ? 'pending' : 'entry_reverted', exitFrom, px,
+              rate, buy.data, sell.data, liveEntry ? 'live-pending' : 'dry-run', simNote,
+              simOk ? 'pending' : 'entry_reverted',
+              /* A LIVE POSITION IS OURS AND CARRIES NO BORROWED HOLDER. `exit_sim_from`
+               * is the dry-run fixture; writing one on a live row would tell boot
+               * reconciliation to read somebody else's balance to decide whether WE hold
+               * the token. */
+              liveEntry ? null : exitFrom, px,
               simOk ? exitDue : null, quoteBasis]);
           if ((ins.rowCount ?? 0) === 0) {
             stats.rowsNotStored += 1;
@@ -679,8 +736,222 @@ async function main(): Promise<void> {
                 + 'counted as a trade',
             });
           }
+          const tradeId = ins.rows[0]?.id ?? null;
 
-          log.info('WOULD TRADE', {
+          /*
+           * =========================================================================
+           * THE TRADE, ON A LIVE PATH: BUY -> APPROVE -> PERMIT2 APPROVE
+           * =========================================================================
+           *
+           * docs/LAUNCHBOT.md section 2D. Four transactions make a trade and the fourth,
+           * the SELL, is sent later by the per-tick exit sweep when the horizon arrives.
+           *
+           * **ONE BROADCAST IN FLIGHT AT A TIME AND THE RECEIPT IS THE GATE.**
+           * `signer.send` reads the nonce as `'pending'`, and on a node that does not
+           * track the mempool that equals `'latest'` — so a second send before the first
+           * is mined takes the SAME NONCE and replaces it. A buy that replaced its own
+           * approval would be the failure `approve-setup` already found, one step worse.
+           * So every send is followed by `awaitReceipt` and MINED is the only outcome
+           * that continues.
+           *
+           * In dry run `liveEntry` is false and none of this runs; the approval PLAN is
+           * still built and reported below, so the path is exercised without a key being
+           * read — `createBroadcaster` is the only way to obtain a broadcaster and it
+           * refuses outside live mode.
+           */
+          let entryTx: string | null = null;
+          let heldRaw: bigint | null = null;
+          let approvalPlan: Awaited<ReturnType<typeof ensureSellReadiness>> | null = null;
+          let tradeFailed: string | null = null;
+
+          if (liveEntry && tradeId !== null && broadcaster !== null) {
+            const owner = broadcaster.address;
+            try {
+              /* ---- THE BUY ------------------------------------------------- */
+              const hash = await broadcaster.send({
+                to: buy.to, data: buy.data, value: buy.value,
+                description: `BUY trade ${tradeId} ${p.token} minOut=${bound}`,
+              });
+              entryTx = hash; stats.buysBroadcast += 1;
+              log.warn('BUY BROADCAST', { trade: tradeId, hash, pool: pid,
+                value_wei: buy.value.toString(), min_out: bound.toString() });
+              await c.query(
+                `update bot_trades set status='entry_sent', entry_tx=$2, updated_at=now()
+                  where id=$1`, [tradeId, hash]);
+
+              const rec = await awaitReceipt(rpc, hash,
+                { timeoutMs: RECEIPT_TIMEOUT_MS, pollMs: RECEIPT_POLL_MS });
+              log.info('BUY RECEIPT', { trade: tradeId, hash, outcome: rec.outcome,
+                block: rec.blockNumber, receipt_wait_ms: rec.waitMs,
+                receipt_polls: rec.polls });
+
+              if (rec.outcome === 'reverted') {
+                /*
+                 * SETTLED, AND WE HOLD NOTHING. A mined revert is definitive: the buy did
+                 * not happen, no tokens moved, and there is nothing to approve or to
+                 * exit. Terminal, and NOT `needs_exit` — sweeping a position that does
+                 * not exist would be the opposite error.
+                 */
+                throw new EntryReverted(`the buy MINED AND REVERTED (${hash}) — the pool `
+                  + 'moved between the simulation and the send. Nothing was bought.');
+              }
+              if (rec.outcome === 'unknown') {
+                /*
+                 * NEITHER CONFIRMED NOR FAILED. The buy may still land, so the position
+                 * is UNKNOWN and must be treated as possibly open: `needs_exit` and a
+                 * halt. Boot reconciliation against the chain settles it.
+                 */
+                throw new Error(`NO RECEIPT for the buy ${hash} after ${rec.waitMs} ms `
+                  + `(${rec.polls} polls). THE POSITION STATE IS UNKNOWN: the buy may `
+                  + 'still land. Nothing further was sent and boot reconciliation against '
+                  + 'the chain settles this.');
+              }
+
+              /* ---- THE EXACT AMOUNT, READ FROM THE CHAIN -------------------- */
+              /*
+               * THE FILL, NOT THE QUOTE. This is the whole reason the approvals are
+               * granted AFTER the buy: the quote is measured to be wrong by 2-3% in
+               * either direction, and an allowance below the balance leaves the tail of
+               * the position unsellable. `readTokenBalance` raises on `0x` rather than
+               * returning a plausible zero.
+               */
+              heldRaw = await readTokenBalance(rpc, p.token, owner);
+              stats.buysFilled += 1;
+              const entryBlock = rec.blockNumber ?? head;
+              /* The horizon runs from the block the buy was MINED in. */
+              exitDue = entryBlock + EXIT_DELAY_BLOCKS;
+              log.info('BUY FILLED', {
+                trade: tradeId, hash, block: entryBlock,
+                held_raw: heldRaw.toString(), quoted_out: quoted.toString(),
+                fill_vs_quote: quoted > 0n
+                  ? Number((heldRaw * 10000n) / quoted) / 10000 : null,
+                exit_due_block: exitDue,
+              });
+
+              /* ---- THE TWO APPROVALS, FOR EXACTLY WHAT WE HOLD -------------- */
+              approvalPlan = await ensureSellReadiness(
+                { rpc, broadcaster },
+                { token: p.token, owner, amount: heldRaw },
+              );
+
+              /* ---- THE POSITION IS OPEN AND SELLABLE ------------------------ */
+              await c.query(
+                `update bot_trades set status='holding', fill_status='live-filled',
+                        entry_block=$2, executed_out=$3, exit_due_block=$4,
+                        exit_sim_status='pending', updated_at=now()
+                  where id=$1`,
+                [tradeId, entryBlock, heldRaw.toString(), exitDue]);
+            } catch (err) {
+              const msg = (err as Error).message.slice(0, 220);
+              tradeFailed = msg;
+              if (err instanceof EntryReverted) {
+                /*
+                 * THE BUY REVERTED ON CHAIN. Terminal, no halt: this is the same ordinary
+                 * outcome a reverted simulation is, arriving one step later, and the pool
+                 * moving between the call and the send is a race this design accepts.
+                 */
+                stats.entryReverted += 1;
+                await c.query(
+                  `update bot_trades set status='closed_unfilled', fill_status='live-reverted',
+                          exit_sim_status='entry_reverted', exit_due_block=null,
+                          note=$2, updated_at=now() where id=$1`, [tradeId, msg]);
+                log.warn('LIVE BUY REVERTED — NOTHING BOUGHT', { trade: tradeId, detail: msg });
+              } else {
+                /*
+                 * EVERYTHING ELSE LEAVES THE POSITION POSSIBLY OPEN, SO IT BECOMES
+                 * `needs_exit` AND THE MODE HALTS. LAUNCHBOT.md section 2D.
+                 *
+                 * `needs_exit` rather than a terminal status because the tokens may be
+                 * ours and it is the one state the boot sweep acts on — and that sweep
+                 * now grants the missing approvals through the same `ensureSellReadiness`
+                 * before selling, so a failed grant is retried rather than stranded. A
+                 * terminal status here would repeat `exit_exhausted`: seven positions in
+                 * a status no sweep contained.
+                 *
+                 * THE ROW IS WRITTEN BEFORE THE HALT, so the position is visible to the
+                 * next boot whether or not anyone clears the switch — and `halt-control`
+                 * refuses to clear a mode while it still has `needs_exit` rows, which
+                 * points the operator at the position rather than at the switch.
+                 *
+                 * IT HALTS because an approval that reverts is a statement about the
+                 * TOKEN — a blacklist, a transfer hook, a non-standard approve — and the
+                 * next launch from the same launchpad arrives seconds later. That is the
+                 * reasoning MAX_CONSECUTIVE_REVERTS already uses. Halts are mode-scoped,
+                 * so a live halt stops live and nothing else.
+                 */
+                stats.entryUnresolved += 1;
+                await c.query(
+                  `update bot_trades set status='needs_exit', fill_status='live-unknown',
+                          exit_sim_status='reverted', note=$2, updated_at=now()
+                    where id=$1`,
+                  [tradeId, `LIVE TRADE UNRESOLVED: ${msg}`]);
+                await halt(c, CHAIN, MODE,
+                  `live trade ${tradeId} left an unresolved position: ${msg}`);
+                log.error('LIVE TRADE UNRESOLVED — POSITION MARKED needs_exit AND MODE HALTED', {
+                  trade: tradeId, pool: pid, token: p.token, entry_tx: entryTx,
+                  detail: msg,
+                  note: 'the next boot of this mode sweeps the row before arming and the '
+                    + 'exit path grants the approvals it needs; the halt stops NEW trades, '
+                    + 'not the resolution of this one',
+                });
+                break;
+              }
+            }
+          } else if (simOk) {
+            /*
+             * DRY RUN: THE APPROVAL PATH IS REACHED AND CONSTRUCTED, AND NOTHING IS SENT.
+             *
+             * The allowances are READ from the real contracts for our own configured
+             * address, and both approvals are BUILT for the quoted output — which is the
+             * honest amount here precisely because there is no balance: nothing was
+             * bought. It is labelled hypothetical for that reason and must not be read as
+             * what a live trade would approve, which is the FILL.
+             *
+             * With no wallet configured there is nobody to read an allowance for, and the
+             * plan is reported as unavailable rather than as zero.
+             */
+            const owner = configuredWallet();
+            if (owner !== null) {
+              try {
+                approvalPlan = await ensureSellReadiness(
+                  { rpc, broadcaster: null }, { token: p.token, owner, amount: quoted });
+              } catch (e) {
+                stats.approvalPlanFailed += 1;
+                log.warn('APPROVAL PLAN COULD NOT BE BUILT', {
+                  pool: pid, token: p.token, error: (e as Error).message.slice(0, 160),
+                });
+              }
+            } else {
+              stats.approvalPlanSkipped += 1;
+            }
+          }
+
+          if (approvalPlan !== null) {
+            if (approvalPlan.hypothetical) stats.approvalPlanBuilt += 1;
+            else {
+              stats.approvalsGranted += approvalPlan.sent.length;
+              stats.approvalsSkipped +=
+                approvalPlan.steps.filter((st) => st.verdict === 'SKIP').length;
+            }
+          }
+
+          /*
+           * WHAT THE TRADE IS, IN FOUR TRANSACTIONS AND IN ORDER.
+           *
+           * The two approvals come from the PLAN rather than being rebuilt for this line,
+           * so what is reported is what `ensureSellReadiness` decided rather than a second
+           * construction of it that could differ. Where no plan exists the reason is
+           * stated rather than the line being dropped.
+           */
+          const approvalLines = approvalPlan === null
+            ? ['APPROVALS: no plan — ' + (tradeFailed !== null
+                ? 'the live entry did not reach them'
+                : 'BOT_WALLET_ADDRESS is unset, so there is nobody to read an allowance '
+                  + 'for; reported rather than treated as zero')]
+            : plannedSends(approvalPlan);
+
+          log.info(liveEntry ? 'TRADE' : 'WOULD TRADE', {
+            live: liveEntry,
             quote_basis: quoteBasis, fee_pct: feePct.toFixed(4),
             impact_pct: impactPct.toFixed(3), ticks_observed: ticks.length,
             pool: pid, token: p.token, launchpad: p.launchpad, fee: p.init.fee,
@@ -688,10 +959,24 @@ async function main(): Promise<void> {
             gap_seconds: (firstSwapBlock - p.init.blockNumber) / BLOCKS_PER_SECOND,
             position_usd: RAILS.MAX_POSITION_USD, position_wei: size.toString(),
             quoted_out: quoted.toString(), min_out: bound.toString(), slippage_bps: SLIPPAGE_BPS,
-            transactions: [appr.description, p2.description, buy.description, sell.description],
+            /* FOUR TRANSACTIONS PER TRADE. The sell is sent later, by the exit sweep. */
+            transactions: [
+              `1. ${buy.description}`,
+              ...approvalLines.map((x, n) => `${n + 2}. ${x}`),
+              `4. (at +90 s) ${sell.description}`,
+            ],
+            approvals_amount_from: approvalPlan === null ? null
+              : (liveEntry ? 'the BALANCE read from the chain after the buy mined'
+                : 'the QUOTED output — HYPOTHETICAL, nothing was bought'),
+            approvals_amount_raw: approvalPlan === null ? null
+              : approvalPlan.amount.toString(),
+            approvals_already_in_place: approvalPlan === null ? null : approvalPlan.before.ready,
+            entry_tx: entryTx, held_raw: heldRaw === null ? null : heldRaw.toString(),
             buy_to: buy.to, buy_value_wei: buy.value.toString(),
             buy_calldata_bytes: (buy.data.length - 2) / 2,
             simulation: simOk ? 'CLEAN' : 'REVERTED', simulation_detail: simNote,
+            outcome: tradeFailed === null ? (liveEntry ? 'FILLED AND APPROVED' : 'not sent')
+              : tradeFailed,
           });
         }
       }
@@ -729,7 +1014,45 @@ async function main(): Promise<void> {
     } finally { fresh.release(); }
   }
 
-  log.info('launchbot dry run complete', {
+  /*
+   * THE FULL ROUND TRIP, PER LEG, WITH EACH FIGURE'S PROVENANCE.
+   *
+   * Reported because every leg is now known: the loop sends the buy and both approvals and
+   * the exit sweep sends the sell, so a trade is four transactions and the cost of one is
+   * no longer partly hypothetical. **ONE OF THE FOUR IS MEASURED ON OUR OWN RECEIPTS** —
+   * the approval pair, at $0.0128 — and the other two gas figures are still other people's,
+   * which is why they are listed separately rather than summed into a constant. `gas_usd`
+   * remains NULL on every stored row: no buy or sell of ours has ever been mined.
+   */
+  const gasLow = ROUND_TRIP_GAS_USD.BUY_LOW + ROUND_TRIP_GAS_USD.APPROVALS
+    + ROUND_TRIP_GAS_USD.SELL;
+  const gasHigh = ROUND_TRIP_GAS_USD.BUY_HIGH + ROUND_TRIP_GAS_USD.APPROVALS
+    + ROUND_TRIP_GAS_USD.SELL;
+  const rpcPerTrade = stats.simulated > 0
+    ? (rpc.cuSpent * 0.45) / 1e6 / stats.simulated : null;
+  log.info('THE FULL ROUND TRIP ON A $10 POSITION, EVERY LEG', {
+    gas_buy_usd: `${ROUND_TRIP_GAS_USD.BUY_LOW}–${ROUND_TRIP_GAS_USD.BUY_HIGH}`,
+    gas_buy_from: 'ESTIMATED — 200 real receipts per era, other traders',
+    gas_approvals_usd: ROUND_TRIP_GAS_USD.APPROVALS,
+    gas_approvals_from: 'MEASURED ON OUR OWN TWO RECEIPTS, 2026-09-16 — 0x999fdb79… and '
+      + '0x178977d3…, 57,892 + 47,554 gas. The external estimate it replaced was $0.015, '
+      + 'so that figure was 17% high.',
+    gas_sell_usd: ROUND_TRIP_GAS_USD.SELL,
+    gas_sell_from: 'ESTIMATED — median of 40 sampled real sells',
+    gas_total_usd: `${gasLow.toFixed(4)}–${gasHigh.toFixed(4)}`,
+    lp_fee_usd: 0.0654, lp_fee_from: 'run 3 fee mix, weighted: 0.654% round trip',
+    slippage_usd: 0.026, slippage_from: 'measured from realised impact at $10, SELLOFF',
+    rpc_usd_per_trade: rpcPerTrade === null ? 'no trades this run' : rpcPerTrade.toFixed(5),
+    total_usd: `${(gasLow + 0.0654 + 0.026 + (rpcPerTrade ?? 0)).toFixed(4)}–`
+      + `${(gasHigh + 0.0654 + 0.026 + (rpcPerTrade ?? 0)).toFixed(4)}`,
+    share_of_position: `${(((gasLow + 0.0654 + 0.026) / RAILS.MAX_POSITION_USD) * 100)
+      .toFixed(2)}%–${(((gasHigh + 0.0654 + 0.026) / RAILS.MAX_POSITION_USD) * 100)
+      .toFixed(2)}%`,
+    note: 'COSTS ARE NOT THE BINDING CONSTRAINT against a measured median gross of +0.374 '
+      + 'at +90 s. The binding constraints are the entry revert rate and exit availability.',
+  });
+
+  log.info(BOT_MODE.live ? 'launchbot LIVE run complete' : 'launchbot dry run complete', {
     mode: MODE, minutes, ...stats, cu_spent: rpc.cuSpent,
     usd: ((rpc.cuSpent * 0.45) / 1e6).toFixed(5),
     revert_samples: reverts,
@@ -743,5 +1066,16 @@ async function main(): Promise<void> {
   await pool.end();
   process.exit(0);
 }
+/**
+ * A BUY THAT WAS MINED AND REVERTED, distinguished from every other live-entry failure.
+ *
+ * It is its own class because the two outcomes are opposite: a mined revert is SETTLED —
+ * nothing moved, we hold nothing, and the row is terminal — while an absent receipt, a
+ * rejected broadcast or a failed approval all leave the position POSSIBLY OPEN and must
+ * become `needs_exit` with the mode halted. Collapsing them would either strand a position
+ * that does not exist or abandon one that does.
+ */
+class EntryReverted extends Error {}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms); });
 main().catch((e) => { log.error('launchbot failed', errorFields(e)); process.exit(1); });

@@ -60,8 +60,15 @@ interface Script {
   receipts: Array<{ status?: string; blockNumber?: string } | null>;
   /** Make the SIMULATION fail with a decodable V4TooLittleReceived. */
   simulationFails?: boolean;
-  /** Allowances: false = the token->Permit2 grant is short. */
+  /**
+   * Allowances. `false` = short. Since 2026-09-16 `exit-exec` GRANTS rather than refusing
+   * (LAUNCHBOT.md section 2D), so `grantLands` decides whether the grant it attempts
+   * succeeds — which is the difference between "the exit was rescued" and "no bound fixes
+   * this". Both are now cases.
+   */
   allowanceOk?: boolean;
+  /** When the allowances start short: does the grant land and cover them afterwards? */
+  grantLands?: boolean;
   /** Make the broadcast itself reject. */
   sendRejects?: boolean;
 }
@@ -69,6 +76,9 @@ interface Script {
 function fakeRpc(script: Script): { rpc: ExitRpc; calls: string[] } {
   const calls: string[] = [];
   let receiptIdx = 0;
+  /* Flipped once a receipt has been served, so `grantLands` can make the RE-READ that
+   * `ensureSellReadiness` performs come back covering. */
+  let granted = false;
   const rpc: ExitRpc = {
     async call(method: string, params: unknown[]): Promise<unknown> {
       calls.push(method);
@@ -82,6 +92,7 @@ function fakeRpc(script: Script): { rpc: ExitRpc; calls: string[] } {
         const r = script.receipts[Math.min(receiptIdx, script.receipts.length - 1)]
           ?? null;
         receiptIdx += 1;
+        if (r?.status === '0x1') granted = true;
         return r;
       }
       if (method === 'eth_call') {
@@ -90,13 +101,15 @@ function fakeRpc(script: Script): { rpc: ExitRpc; calls: string[] } {
         /* The allowance reads. Both are eth_call, distinguished by target. */
         if (to === PERMIT2) {
           /* (amount, expiration, nonce) — a live grant far in the future. */
-          const amt = script.allowanceOk === false ? 0n : (1n << 150n);
+          const short = script.allowanceOk === false && !(script.grantLands && granted);
+          const amt = short ? 0n : (1n << 150n);
           return `0x${amt.toString(16).padStart(64, '0')}`
             + `${(9_999_999_999n).toString(16).padStart(64, '0')}`
             + `${'0'.repeat(64)}`;
         }
         if (to === TOKEN) {
-          const amt = script.allowanceOk === false ? 0n : (1n << 200n);
+          const short = script.allowanceOk === false && !(script.grantLands && granted);
+          const amt = short ? 0n : (1n << 200n);
           return `0x${amt.toString(16).padStart(64, '0')}`;
         }
         /* The swap simulation against the router. */
@@ -268,7 +281,19 @@ async function main(): Promise<void> {
       `type=${(err as Error)?.name} attempted_sends=${sent.length}`);
     }
 
-    /* ---- 7. LIVE, ALLOWANCES SHORT: REFUSED BEFORE ANY GAS -------------- */
+    /* ---- 7. LIVE, ALLOWANCES SHORT AND UNGRANTABLE: NO SELL IS SENT ----- */
+    /*
+     * THIS CASE CHANGED ON 2026-09-16 AND THE CHANGE IS THE POINT. `exit-exec` used to
+     * REFUSE when the allowances were short; it now GRANTS them through the same
+     * `ensureSellReadiness` the loop uses, so a position whose inline grant failed can be
+     * rescued by the boot sweep. What must still hold is that a grant which cannot be made
+     * stops the ladder: **no bound fixes a missing allowance.**
+     *
+     * The assertion is therefore no longer "nothing was sent" — approvals are attempted,
+     * which is the new behaviour — but **NO SELL WAS SENT**, which is the property that
+     * matters. Asserting the old thing would have passed only by the exit having done
+     * nothing, which is what this change exists to stop.
+     */
     {
       const s: Script = { receipts: [], allowanceOk: false };
       const { rpc } = fakeRpc(s);
@@ -277,10 +302,39 @@ async function main(): Promise<void> {
       try {
         await executeExit({ ...ctxBase, rpc, broadcaster: b }, base);
       } catch (e) { err = e; }
-      record('live + allowances short -> UNRECOVERABLE, NOTHING sent',
-        err instanceof ExitUnrecoverableError && sent.length === 0
-          && (err as Error).message.includes('approvals do not cover'),
-        `type=${(err as Error)?.name} sent=${sent.length}`);
+      const sells = sent.filter((t) => t.to.toLowerCase() === UNIVERSAL_ROUTER);
+      record('live + allowances short and UNGRANTABLE -> UNRECOVERABLE, NO SELL sent',
+        err instanceof ExitUnrecoverableError && sells.length === 0
+          && (err as Error).message.includes('could not be granted'),
+        `type=${(err as Error)?.name} sells=${sells.length} total_sends=${sent.length}`);
+    }
+
+    /* ---- 7b. LIVE, ALLOWANCES SHORT BUT THE GRANT LANDS: THE SELL GOES -- */
+    /*
+     * THE CASE THAT PROVES THE CHANGE BOUGHT SOMETHING. A refusal-only path can be shown
+     * to refuse; only this shows that a position which WAS unsellable becomes sellable.
+     * Two approvals then the sell, in that order, each after the last one's receipt.
+     */
+    {
+      const s: Script = {
+        receipts: [{ status: '0x1' }], allowanceOk: false, grantLands: true,
+      };
+      const { rpc } = fakeRpc(s);
+      const { b, sent } = fakeBroadcaster(s);
+      let err: unknown = null;
+      let outcome: Awaited<ReturnType<typeof executeExit>> | null = null;
+      try {
+        outcome = await executeExit({ ...ctxBase, rpc, broadcaster: b }, base);
+      } catch (e) { err = e; }
+      const sells = sent.filter((t) => t.to.toLowerCase() === UNIVERSAL_ROUTER);
+      const approvals = sent.filter((t) => t.to.toLowerCase() !== UNIVERSAL_ROUTER);
+      record('live + allowances short but the GRANT LANDS -> approvals then ONE sell',
+        err === null && outcome?.filledOn === 1
+          && approvals.length === 2 && sells.length === 1
+          /* ORDER: both approvals precede the sell. */
+          && sent.findIndex((t) => t.to.toLowerCase() === UNIVERSAL_ROUTER) === 2,
+        `err=${(err as Error)?.message?.slice(0, 60) ?? 'none'} approvals=${approvals.length} `
+        + `sells=${sells.length} filled_on=${outcome?.filledOn ?? 'null'}`);
     }
 
     /* ---- 8. LIVE, SELLER != SIGNER: REFUSED BEFORE ANYTHING ------------- */

@@ -23,10 +23,13 @@
  * capital and depends on a quote, a rail, a pool and an exit. If the signer is wrong, this
  * is where it should be wrong.
  *
- * It is also why it lives outside `launchbot`: the bot's live loop will need these inline
- * per token, and that wiring is an OUTSTANDING PREREQUISITE in `bot/live-preflight.ts`.
- * This CLI is the one place the calldata and the allowance reads are implemented, so the
- * inline version imports it rather than growing a second copy.
+ * **THE DECIDING, GRANTING AND VERIFYING NOW LIVE IN `bot/approvals.ts` AND THIS CALLS IT.**
+ * They were implemented here first and proved by the first two real transactions; when the
+ * loop needed the same thing inline per token (LAUNCHBOT.md section 2D), copying them would
+ * have been the NINTH recorded instance of the two-implementations trap, in the worst place
+ * for it. So `ensureSellReadiness` was EXTRACTED rather than reimplemented, and this file
+ * keeps only what is genuinely a CLI's: argument parsing, the balance-sizing default, and
+ * the report. The loop and this tool now run the same code.
  *
  * ---------------------------------------------------------------------------
  * EXACT AMOUNT, NOT UNLIMITED — AND THE MEASUREMENT CUTS THE OTHER WAY
@@ -69,20 +72,12 @@ import { RpcClient } from '../adapters/token-updates/rpc.js';
 import { BroadcastRpc, ReadOnlyRpc } from '../bot/rpc.js';
 import { resolveMode } from '../bot/mode.js';
 import { createBroadcaster } from '../bot/signer.js';
-import { buildPermit2Approve, buildTokenApprove } from '../bot/calldata.js';
 import { PERMIT2, RAILS, UNIVERSAL_ROUTER } from '../bot/config.js';
 import { configuredWallet } from '../bot/wallet.js';
-import { awaitReceipt } from '../bot/receipt.js';
-import {
-  readErc20Allowance, readPermit2Allowance, readTokenBalance,
-} from '../bot/allowance.js';
+import { readTokenBalance } from '../bot/allowance.js';
+import { ensureSellReadiness } from '../bot/approvals.js';
 
 const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
-/* The same figures exit-exec uses, and derived there: receipt availability measured at
- * 60 of 60 on the first ask with a 36 ms maximum, against an inclusion half that could
- * not be measured without sending. These transactions are what measure it. */
-const RECEIPT_TIMEOUT_MS = 60_000;
-const RECEIPT_POLL_MS = 1_000;
 
 /*
  * THE ALLOWANCE READS USED TO BE DUPLICATED HERE, AND THAT WAS THE WORST PLACE FOR IT.
@@ -147,160 +142,47 @@ async function main(): Promise<void> {
     }
   }
 
-  /* ---- 2. READ WHAT IS ALREADY GRANTED ----------------------------------- */
-  const a1 = await readErc20Allowance(rpc, token, owner, PERMIT2);
-  const a2 = await readPermit2Allowance(rpc, owner, token, UNIVERSAL_ROUTER);
-  const now = Math.floor(Date.now() / 1000);
-  const p2Live = a2.amount !== null && a2.amount > 0n && a2.expiration > now;
+  /* ---- 2. DECIDE, REPORT, AND ONLY THEN GRANT ---------------------------- */
+  /*
+   * ONE CALL. `ensureSellReadiness` reads both allowances through `bot/allowance.ts`,
+   * skips what already covers the amount, refuses an unreadable one, honours the Permit2
+   * expiry, sends each grant and confirms its receipt before the next, and re-reads the
+   * chain afterwards. Every one of those rules was implemented here and is now shared
+   * with the live loop, which is what stops the two sides drifting.
+   *
+   * WITHOUT A BROADCASTER IT SENDS NOTHING and returns the plan, which is exactly what a
+   * dry run of this CLI is: the real allowances read from the real contracts, the real
+   * calldata built, and no key so much as looked for.
+   */
+  const sender = commit ? new BroadcastRpc(inner, mode) : null;
+  const bcast = sender === null ? null : await createBroadcaster(mode, sender);
 
-  const step1Needed = a1.amount === null ? 'UNREADABLE'
-    : (a1.amount >= amount ? 'SKIP' : 'SEND');
-  const step2Needed = a2.amount === null ? 'UNREADABLE'
-    : (p2Live && a2.amount >= amount ? 'SKIP' : 'SEND');
+  const plan = await ensureSellReadiness(
+    { rpc, broadcaster: bcast }, { token, owner, amount });
 
-  log.info('WHAT WILL BE APPROVED, TO WHOM, AND FOR HOW MUCH', {
+  log.info('WHAT WAS APPROVED, TO WHOM, AND FOR HOW MUCH', {
     mode: mode.label, live: mode.live, commit,
     owner, token,
     amount_raw: amount.toString(),
+    amount_from: amountArg ? '--amount, supplied' : 'the BALANCE read from the chain',
     policy: 'EXACT AMOUNT, not unlimited — see the header. Section 2 measured 46 finite '
       + 'against 19 unlimited, and unlimited is the norm for the Permit2 route; this bot '
       + 'bounds it anyway because every token it touches is a launch minutes old from a '
       + 'contract nobody has read.',
     position_bound_usd: RAILS.MAX_POSITION_USD,
-    step_1: {
-      what: `${token} .approve(${PERMIT2}, ${amount})`,
-      spender: PERMIT2, spender_is: 'Permit2',
-      current_allowance: a1.amount === null ? a1.note : a1.amount.toString(),
-      verdict: step1Needed,
-    },
-    step_2: {
-      what: `Permit2.approve(${token}, ${UNIVERSAL_ROUTER}, ${amount}, <expiry>)`,
-      spender: UNIVERSAL_ROUTER, spender_is: 'the Universal Router',
-      current_amount: a2.amount === null ? a2.note : a2.amount.toString(),
-      current_expiration: a2.expiration,
-      expired: a2.amount !== null && a2.amount > 0n && a2.expiration <= now,
-      verdict: step2Needed,
-      note: 'a Permit2 grant carries an EXPIRY, so a non-zero amount that has expired is '
-        + 'worthless and must not read as already granted',
-    },
+    permit2: PERMIT2, router: UNIVERSAL_ROUTER,
+    steps: plan.steps.map((st) => ({
+      what: st.tx.description, verdict: st.verdict, current_allowance: st.current,
+    })),
+    sent: plan.sent.length === 0 ? 'NOTHING SENT' : plan.sent,
+    ready: plan.ready,
+    hypothetical: plan.hypothetical,
+    note: plan.hypothetical
+      ? 'DRY RUN — the allowances were READ from the chain and the calldata BUILT; pass '
+        + '--commit AND --live to broadcast. A SKIP is reported as skipped, never as done.'
+      : 'the allowances were re-read from the chain after granting; a transaction the node '
+        + 'accepted is not an allowance that is set',
   });
-
-  if (step1Needed === 'UNREADABLE' || step2Needed === 'UNREADABLE') {
-    throw new Error('an allowance could not be read. UNKNOWN is not zero: refusing to '
-      + 'send an approval against a state that could not be established.');
-  }
-  if (step1Needed === 'SKIP' && step2Needed === 'SKIP') {
-    log.info('NOTHING TO DO — both allowances already cover this amount', {
-      note: 'reported as SKIPPED, never as done. An approval that was already in place '
-        + 'is a different fact from one this run granted.',
-    });
-    await app.pool.end(); process.exit(0);
-  }
-
-  if (!commit) {
-    log.info('DRY RUN — NOTHING SENT', {
-      note: 'pass --commit AND --live to broadcast; both are required and a key must '
-        + 'exist, which it does not in this build',
-      would_send: [step1Needed === 'SEND' ? 'step 1 (token -> Permit2)' : null,
-        step2Needed === 'SEND' ? 'step 2 (Permit2 -> router)' : null].filter(Boolean),
-    });
-    await app.pool.end(); process.exit(0);
-  }
-
-  /* ---- 3. THE BROADCAST ------------------------------------------------- */
-  /*
-   * THE SIGNER GETS THE BROADCAST-CAPABLE TRANSPORT, AND THIS LINE WAS WRONG ON THE
-   * FIRST REAL ATTEMPT.
-   *
-   * It read `createBroadcaster(mode, rpc)` — handing the signer a `ReadOnlyRpc` — while a
-   * `BroadcastRpc` was built beside it and thrown away with `void sender`. So the first
-   * real transaction was refused by the deny-list with *"eth_sendRawTransaction is refused
-   * by ReadOnlyRpc BY NAME"*, having signed nothing and spent no gas.
-   *
-   * **THE LAYERED DEFENCE WORKED AND THE TELL WAS AN UNUSED VARIABLE IN A MONEY PATH.**
-   * `void sender` is exactly the shape that should never appear next to a broadcast, and
-   * it is gone: the broadcast transport is constructed FIRST and is the one the signer
-   * receives, so there is no second transport to pick the wrong one from.
-   *
-   * Note that `signer-check` gives `createBroadcaster` a `ReadOnlyRpc` DELIBERATELY, so
-   * that the signer it builds cannot send. The same line is a feature there and was a
-   * defect here, which is why the transport is now chosen explicitly at each call site
-   * rather than being whatever variable was in scope.
-   */
-  const sender = new BroadcastRpc(inner, mode);
-  const bcast = await createBroadcaster(mode, sender);
-  const sent: string[] = [];
-
-  /*
-   * EACH STEP IS CONFIRMED BEFORE THE NEXT IS SENT, AND THAT IS NOT CAUTION FOR ITS OWN
-   * SAKE — IT IS A NONCE HAZARD.
-   *
-   * `signer.send` reads the nonce per transaction as `'pending'`, deliberately, so a
-   * replaced container cannot reuse one. On a node that does not track the mempool,
-   * `'pending'` equals `'latest'` — and then sending step 2 before step 1 is mined gives
-   * BOTH THE SAME NONCE, so the second either replaces the first or is refused as a
-   * duplicate. Step 1 would silently never happen while the run reported two broadcasts.
-   *
-   * So: send, wait for the receipt, and only continue if it MINED. The wait is
-   * `bot/receipt.ts`, shared with `exit-exec` rather than copied.
-   */
-  const send = async (label: string, tx: { to: string; data: string; value: bigint;
-    description: string }): Promise<void> => {
-    const hash = await bcast.send({ to: tx.to, data: tx.data, value: tx.value,
-      description: tx.description });
-    log.warn(`${label} BROADCAST`, { hash, what: tx.description });
-    const rec = await awaitReceipt(rpc, hash, {
-      timeoutMs: RECEIPT_TIMEOUT_MS, pollMs: RECEIPT_POLL_MS,
-    });
-    log.info(`${label} RECEIPT`, {
-      hash, outcome: rec.outcome, block: rec.blockNumber,
-      receipt_wait_ms: rec.waitMs, receipt_polls: rec.polls,
-      note: 'the first real measurement of the inclusion half of the receipt wait — '
-        + 'receipt-timing could only measure availability, because nothing could send',
-    });
-    sent.push(`${label} ${hash} ${rec.outcome} in block ${rec.blockNumber ?? '?'} `
-      + `after ${rec.waitMs} ms / ${rec.polls} polls`);
-    if (rec.outcome === 'reverted') {
-      throw new Error(`${label} was MINED AND REVERTED (${hash}). Nothing further is `
-        + 'sent: the allowance is not in place and a second transaction would be built '
-        + 'against a state that does not exist.');
-    }
-    if (rec.outcome === 'unknown') {
-      throw new Error(`${label} produced NO RECEIPT in ${rec.waitMs} ms (${hash}). It may `
-        + 'still land, so NOTHING FURTHER IS SENT — a second transaction now could reuse '
-        + 'its nonce and replace it. Read the allowances from the chain before retrying.');
-    }
-  };
-
-  if (step1Needed === 'SEND') {
-    await send('STEP 1 token -> Permit2', buildTokenApprove(token, amount));
-  }
-  if (step2Needed === 'SEND') {
-    await send('STEP 2 Permit2 -> router',
-      buildPermit2Approve(token, amount, now + 3600));
-  }
-
-  /* ---- 4. VERIFY BY RE-READING THE CHAIN --------------------------------- */
-  /*
-   * A transaction the node accepted is not an allowance that is set. This is the
-   * fresh-connection rule in its on-chain form, and it is the same reason
-   * `wallet_transactions` is re-counted after a write.
-   */
-  const v1 = await readErc20Allowance(rpc, token, owner, PERMIT2);
-  const v2 = await readPermit2Allowance(rpc, owner, token, UNIVERSAL_ROUTER);
-  log.info('VERIFIED BY RE-READING THE CHAIN', {
-    sent,
-    step_1_allowance_now: v1.amount === null ? v1.note : v1.amount.toString(),
-    step_2_amount_now: v2.amount === null ? v2.note : v2.amount.toString(),
-    step_2_expiration_now: v2.expiration,
-    covers_the_amount: v1.amount !== null && v2.amount !== null
-      && v1.amount >= amount && v2.amount >= amount,
-  });
-  if (!(v1.amount !== null && v2.amount !== null
-    && v1.amount >= amount && v2.amount >= amount)) {
-    throw new Error('the allowances do NOT cover the amount after broadcasting. The '
-      + 'transactions may be pending; do not sell against this state.');
-  }
 
   await app.pool.end();
   process.exit(0);

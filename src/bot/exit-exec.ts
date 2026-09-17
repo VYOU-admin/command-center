@@ -74,7 +74,7 @@ import { swapAmounts, tokenPrice } from './price.js';
 import { ExitUnrecoverableError, boundForAttempt, boundedMinOut, exitWithRetry } from './exit.js';
 import type { ExitAttempt, ExitOutcome, ExitQuote, SendResult } from './exit.js';
 import { POOL_MANAGER, UNIVERSAL_ROUTER } from './config.js';
-import { checkSellReadiness } from './allowance.js';
+import { ensureSellReadiness } from './approvals.js';
 import { awaitReceipt } from './receipt.js';
 import type { Broadcaster } from './signer.js';
 import { TOPICS } from '../adapters/token-updates/decode.js';
@@ -344,24 +344,49 @@ export async function executeExit(
         throw new Error(e.message.slice(0, 160));
       }
 
-      /* ---- STEP 2: THE ALLOWANCES, BEFORE ANY GAS IS SPENT ---------------- */
+      /* ---- STEP 2: THE ALLOWANCES — GRANTED HERE IF THEY ARE SHORT -------- */
       /*
-       * The simulation ran as `pos.sellFrom`, which the guard above has already proved is
-       * the broadcaster's own address — so this asks about the account that will actually
-       * send. `checkSellReadiness` is shared with `approve-setup`, so the side that grants
-       * and the side that checks cannot disagree.
+       * THIS USED TO REFUSE AND IT NOW GRANTS, WHICH IS WHAT MAKES A FAILED INLINE GRANT
+       * RECOVERABLE. LAUNCHBOT.md section 2D.
        *
-       * UNRECOVERABLE, not an ordinary failure: every rung would fail identically, so
-       * climbing the ladder would waste the remaining attempts on a problem no bound can
-       * fix. Nothing has been sent at this point.
+       * The loop grants both approvals immediately after a live buy confirms, so on the
+       * ordinary path this is a free read that finds them already in place. It matters on
+       * the path that is not ordinary: a position whose inline grant failed is marked
+       * `needs_exit`, and the boot sweep re-enters through this same executor — so the
+       * approval is attempted again, against a balance the chain has confirmed. Refusing
+       * here instead would leave that position permanently unsellable, which is the
+       * outcome every part of this file exists to prevent.
+       *
+       * **IT IS DELIBERATELY THE LAST POSSIBLE MOMENT.** The rung's simulation has already
+       * returned, so the pool has just told us it will pay this bound — and gas is never
+       * spent granting an allowance for a pool that was not going to pay anyway. It is
+       * naturally at-most-once per exit: once the grant lands it covers every later rung,
+       * and `ensureSellReadiness` skips what already covers.
+       *
+       * The simulation ran as `pos.sellFrom`, which the guard above has already proved is
+       * the broadcaster's own address, so this grants for the account that will send.
+       *
+       * STILL UNRECOVERABLE WHEN IT CANNOT BE MADE READY: no bound fixes a missing
+       * allowance, so climbing the ladder would waste the remaining attempts on a problem
+       * that is not about the bound. Nothing of the SELL has been sent at this point — and
+       * `ensureSellReadiness` raises rather than returning a status, so reaching the line
+       * below means the allowances cover this position.
        */
-      const ready = await checkSellReadiness(
-        ctx.rpc, pos.token, bcast.address, UNIVERSAL_ROUTER, pos.amountIn,
-        Math.floor(nowMs() / 1000),
-      );
-      if (!ready.ready) {
+      try {
+        await ensureSellReadiness(
+          {
+            rpc: ctx.rpc, broadcaster: bcast,
+            ...(ctx.now ? { now: ctx.now } : {}),
+            wait: pollWait,
+            ...(ctx.receiptTimeoutMs !== undefined
+              ? { receiptTimeoutMs: ctx.receiptTimeoutMs } : {}),
+          },
+          { token: pos.token, owner: bcast.address, amount: pos.amountIn },
+        );
+      } catch (err) {
         throw new ExitUnrecoverableError('CANNOT SELL — the approvals do not cover this '
-          + `position: ${ready.reason} Nothing was broadcast.`);
+          + `position and could not be granted: ${(err as Error).message.slice(0, 220)} `
+          + 'No SELL was broadcast.');
       }
 
       /* ---- STEP 3: BROADCAST THE BOUND THE POOL JUST ACCEPTED ------------- */

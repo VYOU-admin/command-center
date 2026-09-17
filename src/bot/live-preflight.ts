@@ -58,21 +58,23 @@ export const LIVE_PREREQUISITES: readonly Prerequisite[] = [
    * status 1). **It is NOT simply closed, because closing it there would have marked the
    * risk resolved while the thing that actually prevents it stayed unbuilt.**
    */
-  {
-    id: 'approvals-not-inline',
-    what: 'the two approvals are proven and are NOT wired into the live loop: nothing '
-      + 'grants them for the token a live buy just acquired',
-    why: 'every token the bot trades is a launch minutes old, so no allowance for it can '
-      + 'predate the buy — it must be granted between the buy and the sell. Without that, '
-      + 'a live trade buys, then `checkSellReadiness` correctly refuses to broadcast the '
-      + 'sell, `ExitUnrecoverableError` halts the mode, and the position is stuck. That is '
-      + 'the buy-without-a-sell outcome `sell-not-broadcast` was closed to prevent, '
-      + 'arriving by a different route.',
-    closedBy: 'calling the approval path from the loop between the buy and the exit, '
-      + 'through the same `buildTokenApprove`/`buildPermit2Approve` and the same allowance '
-      + 'reads `approve-setup` uses — and paying the measured $0.0128 per token per trade, '
-      + 'which is 0.13% of a $10 position',
-  },
+  /*
+   * `approvals-not-inline` WAS HERE AND IS CLOSED — 2026-09-16. LAUNCHBOT.md section 2D.
+   *
+   * The loop grants both approvals as part of the trade: BUY -> receipt -> the exact
+   * balance read from the chain -> APPROVE -> receipt -> PERMIT2 APPROVE -> receipt, and
+   * the SELL at +90 s. `bot/approvals.ts` is the one implementation and `approve-setup`
+   * was rewritten to call it rather than being copied from.
+   *
+   * **CLOSING IT REQUIRED FIXING SOMETHING UPSTREAM THAT WAS NOT ON THIS LIST: the loop
+   * never broadcast the BUY either.** The broadcaster reached only the exit paths, so a
+   * live run would have opened rows for positions it had not bought. Wiring approvals to a
+   * buy that does not happen would have met this entry's words and left the risk exactly
+   * where it was — which is why `approvals-not-executed` was replaced by it one pass
+   * earlier rather than being ticked off.
+   *
+   * Removed rather than struck through, because this list is read by code.
+   */
   {
     id: 'fill-not-modelled',
     what: '`fill_status` is the literal `dry-run` on every row and nothing models '

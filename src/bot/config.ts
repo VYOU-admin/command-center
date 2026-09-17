@@ -270,3 +270,68 @@ export const DETECT_INTERVAL_MS = 5000;
 /** Prices are backfilled at these offsets from ENTRY regardless of when we exited,
  *  so the optimal hold can be re-derived from live data (LAUNCHBOT.md section 5). */
 export const BACKFILL_OFFSETS_S = [30, 60, 120, 300] as const;
+
+/**
+ * THE RECEIPT WAIT, SHARED BY EVERY PATH THAT BROADCASTS.
+ *
+ * These two figures were literals in `exit-exec.ts` AND in `approve-setup.ts`, with a
+ * comment in the second saying it used "the same figures exit-exec uses". Two copies of
+ * one constant is the trap this project records eight times, and the loop was about to
+ * become a third copy — so they are here, and every broadcasting path imports them.
+ *
+ * The derivation is `exit-exec`'s header and LAUNCHBOT.md: receipt AVAILABILITY measured
+ * at 60 of 60 on the first ask with a 36 ms maximum, and INCLUSION measured for the first
+ * time by the two real approvals of 2026-09-16 at 20 ms and 16 ms, both on the first poll.
+ * So 60 s is roughly 3,000x the observed total, kept deliberately: firing early stops a
+ * ladder and leaves a position for a human, firing late makes the bot wait on $10.
+ */
+export const RECEIPT_TIMEOUT_MS = 60_000;
+/** 1 s against a measured 100.52 ms block interval; a finer poll bought nothing. */
+export const RECEIPT_POLL_MS = 1_000;
+
+/**
+ * HOW LONG A PERMIT2 GRANT LIVES. One hour.
+ *
+ * A Permit2 allowance carries an EXPIRY as well as an amount, which is the one way it
+ * differs from a plain ERC-20 allowance and the one a check written from the ERC-20 shape
+ * misses. It is short on purpose: the grant exists to cover ONE position for ONE hold of
+ * ~90 seconds, and a grant that outlives its position is a standing claim on a launch-
+ * minute contract nobody has read. An hour is ~40x the hold, which absorbs a stuck
+ * position being retried at the next boot without becoming open-ended.
+ *
+ * It is a constant here rather than a literal at two call sites because `approve-setup`
+ * and the loop must grant the same thing; the value that matters is that it is bounded.
+ */
+export const APPROVAL_TTL_SECONDS = 3600;
+
+/**
+ * THE ROUND TRIP'S GAS, PER LEG, WITH EACH FIGURE'S PROVENANCE.
+ *
+ * Kept here so the loop can REPORT a complete round-trip cost rather than the document
+ * carrying a table nothing can read back. LAUNCHBOT.md section 6 holds the derivations.
+ *
+ * **ONE OF THESE IS OURS AND THE REST ARE OTHER PEOPLE'S**, which is the distinction that
+ * matters and the reason they are labelled individually rather than summed into a constant:
+ *
+ *   approvals  MEASURED ON OUR OWN TWO RECEIPTS, 2026-09-16 — 0x999fdb79… and 0x178977d3…,
+ *              57,892 + 47,554 gas at ~50 gwei-equivalent = 0.00000527312716 ETH = $0.0128
+ *              for the PAIR. The external estimate those receipts replaced was $0.015, so
+ *              it was 17% high. This is the first gas figure this project has from a
+ *              transaction it actually paid for.
+ *   buy / sell ESTIMATED, from 200 real receipts per era belonging to other traders. The
+ *              buy range is the CALM-to-SELLOFF spread; the sell is a single median.
+ *
+ * `gas_usd` is still NULL on every stored row: no trade of ours has been broadcast, so
+ * nothing here has been checked against our own buy or sell. These are the figures a run
+ * reports, not measurements of it.
+ */
+export const ROUND_TRIP_GAS_USD = {
+  /** MEASURED, ours. Both approvals, one token, one trade. */
+  APPROVALS: 0.0128,
+  /** Estimated, other people's receipts. SELLOFF era. */
+  BUY_LOW: 0.0279,
+  /** Estimated, other people's receipts. CALM era. */
+  BUY_HIGH: 0.0405,
+  /** Estimated, other people's receipts, median of 40 sampled sells. */
+  SELL: 0.04339,
+} as const;
