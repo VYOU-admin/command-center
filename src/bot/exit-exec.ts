@@ -72,7 +72,7 @@ import { quote } from './quote.js';
 import type { PoolTick } from './quote.js';
 import { swapAmounts, tokenPrice } from './price.js';
 import { ExitUnrecoverableError, boundForAttempt, boundedMinOut, exitWithRetry } from './exit.js';
-import type { ExitAttempt, ExitOutcome, ExitQuote } from './exit.js';
+import type { ExitAttempt, ExitOutcome, ExitQuote, SendResult } from './exit.js';
 import { POOL_MANAGER, UNIVERSAL_ROUTER } from './config.js';
 import { checkSellReadiness } from './allowance.js';
 import type { Broadcaster } from './signer.js';
@@ -157,8 +157,50 @@ export interface ExitExecContext {
   pollWait?: (ms: number) => Promise<void>;
 }
 
-/** Default receipt wait. At ~0.1 s blocks this is many blocks, not a tight race. */
+/**
+ * THE RECEIPT WAIT. MEASURED AGAINST 2026-09-16, AND KEPT AT 60 s FOR A STATED REASON.
+ *
+ * `npm run receipt-timing` ran the same poll loop this module runs, against the same
+ * endpoint, over 60 newly-mined blocks. The timeout has to cover two things and only one
+ * of them could be measured:
+ *
+ *   B. RECEIPT AVAILABILITY -- MEASURED. 60 of 60 receipts served on the FIRST ask,
+ *      median 20 ms, p90 24 ms, max 36 ms, nothing near the cap. There is effectively no
+ *      indexing lag on this endpoint: once a block is at head its receipts are queryable.
+ *   A. INCLUSION -- NOT MEASURED, AND IT IS THE DOMINANT TERM. Nothing in this repository
+ *      can send, and another party's submission time is not in any available method.
+ *      Bounded instead: the block interval measures 100.52 ms (6,936 ms over 69 blocks),
+ *      which independently reproduces ROBINHOOD.md's ~101 ms from a different method, and
+ *      blocks carry ~1.3 M gas used against a 2^50 nominal limit, so congestion is not a
+ *      factor and a fee-paying transaction should land in the next block or two.
+ *
+ * **SO THE EXPECTED TOTAL IS ~250 ms AND THIS CONSTANT IS 240x IT.** That margin is
+ * deliberate rather than lazy, for two reasons:
+ *
+ *   - **THE ASYMMETRY.** Firing early raises `ExitUnrecoverableError`, stops the ladder at
+ *     one transaction and leaves a position for a human to reconcile against the chain.
+ *     Firing late only makes the bot wait on a $10 position. The costs are nowhere near
+ *     symmetric.
+ *   - **THE DOMINANT TERM IS UNMEASURED.** Tightening a timeout towards a figure whose
+ *     largest component has never been observed would be deriving precision from the half
+ *     that happens to be measurable, which is the shape this project calls a bound of
+ *     one's own presented as a fact.
+ *
+ * **IT IS NOW MEASURABLE AND STAYS PROVISIONAL.** `bot_exit_attempts.receipt_wait_ms` and
+ * `receipt_polls` are written on every broadcast attempt, so the first real exits measure
+ * the inclusion half that this could not, and the value is re-derived from our own
+ * transactions rather than from other people's blocks. Every such column is NULL today.
+ *
+ * WHAT NO TIMEOUT COVERS: a transaction that is never included at all -- underpriced or
+ * dropped. Nothing distinguishes that from a slow one, which is exactly why reaching this
+ * bound raises UNRECOVERABLE rather than counting as a failed attempt.
+ */
 const RECEIPT_TIMEOUT_MS = 60_000;
+/**
+ * The poll interval. 1 s against a measured 100.52 ms block interval, so a receipt is
+ * seen within a second of landing; `receipt-timing` polled at 100 ms and found the
+ * receipt available on the first ask every time, so a finer interval buys nothing here.
+ */
 const RECEIPT_POLL_MS = 1_000;
 
 /** The pool's observed swaps up to `toBlock`. One filtered eth_getLogs, 60 CU. */
@@ -264,7 +306,7 @@ export async function executeExit(
       return { expectedOut: expected, amountOutMinimum: boundedMinOut(expected, boundBps) };
     },
 
-    send: async (q: ExitQuote): Promise<string> => {
+    send: async (q: ExitQuote): Promise<SendResult> => {
       const tx = buildSwap({
         pool: {
           currency0: tokenIsCurrency0 ? pos.token : pos.counter,
@@ -345,15 +387,29 @@ export async function executeExit(
       });
 
       /* ---- STEP 4: THE RECEIPT DECIDES, AND AN ABSENT ONE IS NOT A FAILURE - */
-      const deadline = nowMs() + (ctx.receiptTimeoutMs ?? RECEIPT_TIMEOUT_MS);
+      const waitStart = nowMs();
+      const deadline = waitStart + (ctx.receiptTimeoutMs ?? RECEIPT_TIMEOUT_MS);
+      let polls = 0;
       for (;;) {
+        polls += 1;
         const rec = (await ctx.rpc.call('eth_getTransactionReceipt', [hash])) as
           { status?: string; blockNumber?: string } | null;
         if (rec !== null && rec !== undefined && rec.status !== undefined) {
           const status = Number(BigInt(rec.status));
           if (status === 1) {
-            return `BROADCAST FILLED ${hash} in block `
-              + `${rec.blockNumber === undefined ? '?' : Number(BigInt(rec.blockNumber))}`;
+            /*
+             * THE TIMING IS RETURNED, NOT JUST LOGGED. `receipt-timing` could measure the
+             * availability half of this wait and NOT the inclusion half, because nothing
+             * here can send. These two figures are the first real measurement of it, and
+             * they land in columns rather than in a text field because
+             * `bot_exit_attempts` is a measurement table rather than a log.
+             */
+            return {
+              detail: `BROADCAST FILLED ${hash} in block `
+                + `${rec.blockNumber === undefined ? '?' : Number(BigInt(rec.blockNumber))}`,
+              receiptWaitMs: nowMs() - waitStart,
+              receiptPolls: polls,
+            };
           }
           /*
            * MINED AND REVERTED. This IS an ordinary failure: the transaction is settled,
@@ -382,14 +438,18 @@ export async function executeExit(
     record: async (a: ExitAttempt): Promise<void> => {
       await ctx.client.query(
         `insert into bot_exit_attempts
-           (chain, trade_id, attempt, bound_bps, expected_out, min_out, ok, detail, sell_from)
-         values ($9, $1, $2, $3, $4, $5, $6, $7, $8)
+           (chain, trade_id, attempt, bound_bps, expected_out, min_out, ok, detail,
+            sell_from, receipt_wait_ms, receipt_polls)
+         values ($9, $1, $2, $3, $4, $5, $6, $7, $8, $10, $11)
          on conflict (chain, trade_id, attempt) do update
            set bound_bps = excluded.bound_bps, expected_out = excluded.expected_out,
                min_out = excluded.min_out, ok = excluded.ok, detail = excluded.detail,
-               sell_from = excluded.sell_from, recorded_at = now()`,
+               sell_from = excluded.sell_from,
+               receipt_wait_ms = excluded.receipt_wait_ms,
+               receipt_polls = excluded.receipt_polls, recorded_at = now()`,
         [pos.tradeId, a.attempt, a.boundBps, a.expectedOut, a.amountOutMinimum,
-          a.ok, a.detail, pos.sellFrom, ctx.chain]);
+          a.ok, a.detail, pos.sellFrom, ctx.chain,
+          a.receiptWaitMs ?? null, a.receiptPolls ?? null]);
     },
 
     ...(ctx.wait ? { wait: ctx.wait } : {}),

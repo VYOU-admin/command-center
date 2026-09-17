@@ -93,6 +93,27 @@ create table if not exists bot_exit_attempts (
   recorded_at  timestamptz not null default now(),
   primary key (chain, trade_id, attempt)
 );
+
+-- AND ITS OWN ALTERS, AFTER THE CREATE RATHER THAN BEFORE IT.
+--
+-- These were first written ABOVE the create, which would have FAILED ON A FRESH DATABASE:
+-- an alter on a table that does not exist yet is an error, not a no-op, and the whole
+-- schema statement would have aborted. The existing container already has the table, so
+-- it would have worked here and broken only on a rebuild -- the shape ROBINHOOD.md
+-- records for token_swap_logs, which every reader assumed existed because the first
+-- intake made it by hand. (It also broke the build immediately, because the backticks
+-- this comment originally used to quote those names terminated the template literal
+-- BOT_SCHEMA is written in. Two defects, one of which announced itself.)
+--
+-- THE RECEIPT WAIT, SO THE INCLUSION HALF BECOMES MEASURABLE ON THE FIRST LIVE EXIT.
+-- receipt-timing measured the RECEIPT AVAILABILITY half exactly -- 60 of 60 served on
+-- the first ask, max 36 ms -- and CANNOT measure inclusion, because nothing here can
+-- send: the gap between our broadcast and a block taking it has never been observed.
+-- These two columns are how the first real exit measures it, rather than the timeout
+-- staying a margin for ever. NULL on every simulated attempt, which is every attempt
+-- recorded so far.
+alter table bot_exit_attempts add column if not exists receipt_wait_ms integer;
+alter table bot_exit_attempts add column if not exists receipt_polls  integer;
 `;
 
 /** Statuses a boot reconciliation must resolve. Anything else is terminal. */

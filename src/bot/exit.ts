@@ -39,7 +39,29 @@ export interface ExitAttempt {
   amountOutMinimum: string;
   ok: boolean;
   detail: string;
+  /**
+   * How long the receipt took, and how many polls it needed. **Null on a simulated
+   * attempt, which is every attempt recorded so far.**
+   *
+   * `receipt-timing` measured the RECEIPT AVAILABILITY half of the timeout exactly — 60
+   * of 60 served on the first ask, max 36 ms — and cannot measure INCLUSION, because
+   * nothing in this repository can send. These fields are how the first real exit
+   * measures the half that is currently a margin rather than a figure.
+   */
+  receiptWaitMs?: number;
+  receiptPolls?: number;
 }
+
+/**
+ * What `send` resolves with. A bare string is the simulated case and stays supported, so
+ * the drills and every existing caller are unchanged; the object form carries the receipt
+ * timing that only a real broadcast can produce.
+ */
+export type SendResult = string | {
+  detail: string;
+  receiptWaitMs?: number;
+  receiptPolls?: number;
+};
 
 export interface ExitOutcome {
   filled: boolean;
@@ -113,7 +135,7 @@ export interface ExitDeps {
    * established, or when a precondition makes every rung fail identically. The ladder
    * then stops instead of advancing.
    */
-  send: (q: ExitQuote, attempt: number) => Promise<string>;
+  send: (q: ExitQuote, attempt: number) => Promise<SendResult>;
   /** Persist one attempt before the next begins. */
   record: (a: ExitAttempt) => Promise<void>;
   /** Injected so the drill does not wait 15 real seconds. */
@@ -136,14 +158,21 @@ export async function exitWithRetry(deps: ExitDeps, poolId: string): Promise<Exi
     try {
       /* RE-QUOTED PER ATTEMPT. The pool has moved; the previous quote is stale. */
       const q = await deps.quote(n, boundBps);
-      const detail = await deps.send(q, n);
+      const res = await deps.send(q, n);
+      const sent = typeof res === 'string' ? { detail: res } : res;
       rec = {
         attempt: n, boundBps, expectedOut: q.expectedOut.toString(),
-        amountOutMinimum: q.amountOutMinimum.toString(), ok: true, detail,
+        amountOutMinimum: q.amountOutMinimum.toString(), ok: true, detail: sent.detail,
+        ...(sent.receiptWaitMs === undefined ? {} : { receiptWaitMs: sent.receiptWaitMs }),
+        ...(sent.receiptPolls === undefined ? {} : { receiptPolls: sent.receiptPolls }),
       };
       attempts.push(rec);
       await deps.record(rec);
-      log.info('EXIT FILLED', { pool: poolId, attempt: n, boundBps, detail });
+      log.info('EXIT FILLED', {
+        pool: poolId, attempt: n, boundBps, detail: sent.detail,
+        receipt_wait_ms: sent.receiptWaitMs ?? null,
+        receipt_polls: sent.receiptPolls ?? null,
+      });
       return { filled: true, attempts, filledOn: n };
     } catch (err) {
       rec = {
