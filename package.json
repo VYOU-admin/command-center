@@ -44,6 +44,7 @@
     "v4-init-sweep": "node dist/cli/v4-init-sweep.js",
     "launch-backtest": "node dist/cli/launch-backtest.js",
     "realised-backtest": "npm run build && node dist/cli/realised-backtest.js",
+    "exit-simulate": "npm run build && node dist/cli/exit-simulate.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
     "launch-economics": "node dist/cli/launch-economics.js",
