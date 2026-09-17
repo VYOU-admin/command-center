@@ -55,6 +55,7 @@ import { RpcClient } from '../adapters/token-updates/rpc.js';
 import { ReadOnlyRpc } from '../bot/rpc.js';
 import { executeExit } from '../bot/exit-exec.js';
 import { readTokenBalance } from '../bot/allowance.js';
+import { isDryRunMode } from '../bot/mode.js';
 import { EXIT_RETRY } from '../bot/config.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -231,6 +232,94 @@ async function resolveOne(
   log.info('RESOLVED', { trade: tradeId, status: 'closed_unsellable' });
 }
 
+/**
+ * RESOLVE A DRY-RUN ROW AS WHAT IT IS: A SIMULATION WE NEVER HELD.
+ *
+ * **THIS EXISTS BECAUSE THE OTHER TWO PATHS BOTH REFUSE, CORRECTLY.** Trades 334 and 335
+ * exhausted the ladder while their pools reported paying MORE than zero, so
+ * `resolveOne` refused to call them unsellable — a position sellable at a price must not
+ * be recorded as a dead pool. And the boot sweep cannot clear them either: it would try to
+ * sell as the BORROWED holder, exhaust, and halt the chain again.
+ *
+ * So they sit in `needs_exit` for ever, and a chain-wide halt with them.
+ *
+ * **THE WAY OUT IS TO STOP TREATING THEM AS POSITIONS.** A dry-run row was never
+ * broadcast, so WE HOLD NOTHING — and that is verifiable rather than assumed: our own
+ * balance of the token is read, and must be zero. The borrowed holder's balance is
+ * evidence about the borrowed holder, which is the right input for SIMULATING an exit and
+ * the wrong one for deciding whether we have exposure.
+ *
+ * TWO GATES, BOTH REQUIRED:
+ *   - the row's mode must be a DRY-RUN mode, by `isDryRunMode` — the one predicate the
+ *     `/trades` banner and the bot both use, so this cannot be pointed at a live row;
+ *   - OUR balance of the token must be ZERO. If it is not, we hold something and this is
+ *     a real position that must go through the ladder.
+ */
+async function resolveSimulated(
+  c: PoolClient, rpc: ReadOnlyRpc, tradeId: string, commit: boolean,
+): Promise<void> {
+  const r = await c.query<{
+    id: string; mode: string; status: string; token: string; exit_sim_from: string | null;
+  }>(
+    `select id::text, mode, status, token, exit_sim_from
+       from bot_trades where chain = $1 and id = $2`, [CHAIN, tradeId]);
+  const row = r.rows[0];
+  if (row === undefined) throw new Error(`no bot_trades row ${tradeId} on ${CHAIN}`);
+  if (row.status !== 'needs_exit') {
+    throw new Error(`trade ${tradeId} is '${row.status}', not 'needs_exit'`);
+  }
+  if (!isDryRunMode(row.mode)) {
+    throw new Error(`trade ${tradeId} is in mode '${row.mode}', which is NOT a dry-run `
+      + 'mode. A live position was really bought and really is exposure; it goes through '
+      + 'the ladder and is never written off as a simulation.');
+  }
+
+  const wallet = process.env['BOT_WALLET_ADDRESS'];
+  if (wallet === undefined || wallet.trim() === '') {
+    throw new Error('BOT_WALLET_ADDRESS is not set, so OUR balance cannot be read and the '
+      + 'premise of this resolution — that we hold nothing — cannot be established.');
+  }
+  const ours = await readTokenBalance(rpc, row.token, wallet.trim().toLowerCase());
+  const theirs = row.exit_sim_from === null ? null
+    : await readTokenBalance(rpc, row.token, row.exit_sim_from);
+
+  log.info('THE POSITION, AND WHOSE BALANCE DECIDES IT', {
+    trade: tradeId, mode: row.mode, token: row.token,
+    our_balance_raw: ours.toString(),
+    borrowed_holder: row.exit_sim_from,
+    borrowed_holder_balance_raw: theirs === null ? 'n/a' : theirs.toString(),
+    question: 'do WE hold any of this token? A dry-run row was never broadcast, so the '
+      + 'answer should be no — and the borrowed holder still holding is what made the '
+      + 'boot sweep mark it needs_exit in the first place.',
+  });
+
+  if (ours !== 0n) {
+    throw new Error(`WE HOLD ${ours} of ${row.token}. That is a real position however the `
+      + 'row is labelled, and it must go through the exit ladder rather than being '
+      + 'written off as a simulation.');
+  }
+
+  log.info('THE COUNTS THIS WRITE MUST PRODUCE',
+    { status_after: 'closed_simulated', rows_updated: 1 });
+  if (!commit) {
+    log.info('DRY RUN — NOTHING WRITTEN', { note: 'pass --commit to resolve' });
+    return;
+  }
+  const upd = await c.query(
+    `update bot_trades
+        set status = 'closed_simulated',
+            note = coalesce(note || ' | ', '')
+                   || 'resolve-unsellable --simulated: dry-run row, our balance of the '
+                   || 'token is 0 so we never held it; the borrowed holder''s balance is '
+                   || 'evidence about them, not exposure of ours',
+            updated_at = now()
+      where chain = $1 and id = $2 and status = 'needs_exit'`, [CHAIN, tradeId]);
+  if ((upd.rowCount ?? 0) !== 1) {
+    throw new Error(`the update touched ${upd.rowCount} rows where 1 was expected`);
+  }
+  log.info('RESOLVED', { trade: tradeId, status: 'closed_simulated' });
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const commit = args.includes('--commit');
@@ -257,7 +346,11 @@ async function main(): Promise<void> {
       if (!key) throw new Error('ALCHEMY_API_KEY is not set');
       const rpc = new ReadOnlyRpc(
         new RpcClient(RPC_URL.replace('{key}', key), 60000, 50_000));
-      await resolveOne(c, rpc, String(args[ti + 1] ?? ''), commit);
+      if (args.includes('--simulated')) {
+        await resolveSimulated(c, rpc, String(args[ti + 1] ?? ''), commit);
+      } else {
+        await resolveOne(c, rpc, String(args[ti + 1] ?? ''), commit);
+      }
     }
   } finally { c.release(); }
 
