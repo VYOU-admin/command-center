@@ -79,6 +79,8 @@ interface Script {
    * simulation could not pass without the grant.
    */
   simFailsUntilGranted?: boolean;
+  /** Make the first N receipt polls fail at the TRANSPORT, as a flaky endpoint does. */
+  receiptThrowsFirst?: number;
 }
 
 /** COMPUTED, never looked up. */
@@ -90,6 +92,7 @@ function abiString(t: string): string {
 function fakeRpc(script: Script): { rpc: ExitRpc; calls: string[] } {
   const calls: string[] = [];
   let receiptIdx = 0;
+  let thrown = 0;
   /* Flipped once a receipt has been served, so `grantLands` can make the RE-READ that
    * `ensureSellReadiness` performs come back covering. */
   let granted = false;
@@ -103,6 +106,10 @@ function fakeRpc(script: Script): { rpc: ExitRpc; calls: string[] } {
           data: swapData(10n ** 18n, -(10n ** 15n)) }];
       }
       if (method === 'eth_getTransactionReceipt') {
+        if (thrown < (script.receiptThrowsFirst ?? 0)) {
+          thrown += 1;
+          throw new Error('eth_getTransactionReceipt: response carried no result');
+        }
         const r = script.receipts[Math.min(receiptIdx, script.receipts.length - 1)]
           ?? null;
         receiptIdx += 1;
@@ -374,6 +381,34 @@ async function main(): Promise<void> {
       record('CONTROL: V4TooLittleReceived with allowances short -> NO grant attempted',
         sent.length === 0 && raised.includes('EXIT EXHAUSTED'),
         `sent=${sent.length} (a grant here would be gas on a pool that pays nothing)`);
+    }
+
+    /* ---- 6e. A FLAKY RECEIPT POLL IS RETRIED, NOT TREATED AS A VERDICT --- */
+    /*
+     * **THIS ENDED THE FIRST 240-MINUTE LIVE RUN AFTER NINETY SECONDS.** Trade 706's
+     * STEP 2 approval was broadcast and the next receipt poll answered
+     * `response carried no result` — neither a receipt nor a null. That threw out of
+     * `awaitReceipt`, the caller read it as an unresolved position, and the mode halted
+     * with a real position open. The transaction was fine; one poll was not.
+     *
+     * The deadline is still the arbiter — a timeout that never reads a status still
+     * returns `unknown` and is still unrecoverable — so this asserts only that a
+     * TRANSIENT no longer decides.
+     */
+    {
+      const s: Script = {
+        receipts: [{ status: '0x1', blockNumber: '0x3e8' }], receiptThrowsFirst: 3,
+      };
+      const { rpc } = fakeRpc(s);
+      const { b, sent } = fakeBroadcaster(s);
+      let out: Awaited<ReturnType<typeof executeExit>> | null = null;
+      let raised = '';
+      try { out = await executeExit({ ...ctxBase, rpc, broadcaster: b }, base); }
+      catch (e) { raised = (e as Error).message; }
+      record('a receipt poll that THROWS 3x is RETRIED -> the exit still FILLS',
+        out?.filled === true && sent.length === 1 && raised === '',
+        `filled=${String(out?.filled)} sends=${sent.length} raised="${raised.slice(0, 50)}" `
+        + '(before this fix ONE flaky poll halted the mode with a position open)');
     }
 
     /* ---- 7. LIVE, ALLOWANCES SHORT AND UNGRANTABLE: NO SELL IS SENT ----- */
