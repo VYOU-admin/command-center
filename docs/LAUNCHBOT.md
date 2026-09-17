@@ -188,11 +188,17 @@ enter at the first trade after +15 s, exit at the first trade after +45 s:
 > unrecoverable total losses. See "THE BACKTEST WAS MARK-TO-MARKET" in section 6 before
 > relying on any number in this table.
 >
-> **AND THE BRACKET THAT LEFT IS NOW CLOSED.** Simulating OUR OWN round trip at every
-> historical entry and exit block — 1,046 launches, 169,322 CU — the realisable median NET
-> of gas at $10 and the shipped +90 s horizon is **+0.246 MIDPOINT / +0.323 CALM / +0.174
-> SELLOFF**, with the mean agreeing in sign. Our sell would have executed on **71–77%** of
-> launches. See "THE BRACKET IS CLOSED" in section 6.
+> **~~AND THE BRACKET THAT LEFT IS NOW CLOSED~~ — THOSE FIGURES MEASURE THE POOL'S PRICING
+> CURVE AND NOT WHETHER A SELL WOULD EXECUTE.** `exit-simulate` used an unreachable
+> `amountOutMinimum`, which `SWAP_EXACT_IN_SINGLE` checks BEFORE `SETTLE_ALL` pulls the
+> token — so no transfer ever executed in any of the 1,046 launches. "+0.246 / +0.323 /
+> +0.174" and "our sell would have executed on 71–77%" are **INFERRED, not measured**.
+> Proven on CME: minOut 2^127 reports a healthy price at the same block where minOut 1
+> reverts `TRANSFER_FROM_FAILED`. See 6A.3.
+>
+> **AND THE LIVE RUN MEASURED THE ONE THING NONE OF IT DID: the T0 round trip is −1.989%
+> median, which IS the LP fee, so there is no edge before the hold — and 11 of 12 pools
+> became unsellable DURING the hold.** See 6A.
 
 **Costs, all measured, none assumed.** Median round-trip slippage from realised impact
 (see `ROBINHOOD.md` for the method): 0.52% / 0.20% / 0.26% at $10 across HOLDOUT / CALM
@@ -4732,6 +4738,169 @@ times. **The check is working as specified and the specification does not cover 
 **Every position was recovered to a truthful terminal state rather than left open**: 0
 HELD rows, $0 deployed, `net_pnl_usd` now -$120 and readable by the rail that should have
 stopped it. The chain-wide halt is SET.
+
+
+## 6A. POST-MORTEM OF THE LIVE RUN — NUMBERED, WITH COSTS — 2026-09-17
+
+**$120.01 of ETH went in across 12 real buys and ZERO came back.** Every figure below is
+read from the chain by `npm run post-mortem`, not from the bot's log, and each is tagged
+**MEASURED** or **INFERRED**. Read this before any return figure anywhere in this document.
+
+**THE POPULATION IS 12, NOT 13. [MEASURED]** `bot_trades` holds 13 live rows; row 704 is
+`sim_reverted` with `fill_status='dry-run'` and carries no `entry_tx` — it never bought.
+
+### 6A.1 THE ACCOUNTING
+
+`eth_in` 4.1046e15 wei each ($10.00 at $2436.31/ETH). `eth_recovered` **0 on all 12**.
+Every token is still held and every pool now reads `liquidity = 0`.
+
+| id | symbol | fee | liquidity at OUR buy | sell AT THE BUY BLOCK | would it EXECUTE at +90 s |
+|---|---|---|---|---|---|
+| 613 | OZZY | 10000 | 1.065e22 | **ok**, 4.0257e15 (−1.99%) | no — pool pays 0 |
+| 614 | CME | 100 | 3.464e22 | **ok**, 4.0794e15 (−0.68%) | **no — `Error("blacklisted")`** |
+| 705 | WORLDMONEY | 500 | 2.222e23 | **ok**, 4.1005e15 (−0.10%) | no — pool pays 0 |
+| 706 | INJ | 10000 | 8.234e21 | **ok**, 4.3641e15 (+6.32%) | no — pool pays 0 |
+| 798 | AMPL | 500 | 7.028e23 | **ok**, 4.1005e15 (−0.10%) | **YES**, 4.0393e15 (−1.59%) |
+| 799 | Fly | 10000 | 1.065e22 | **ok**, 4.0229e15 (−1.99%) | no — pool pays 0 |
+| 800 | Fly | 10000 | 1.065e22 | **ok**, 4.0229e15 (−1.99%) | no — pool pays 0 |
+| 801 | Fly | 10000 | 1.065e22 | **ok**, 4.0229e15 (−1.99%) | no — pool pays 0 |
+| 802 | Fly | 10000 | 1.065e22 | **ok**, 4.0229e15 (−1.99%) | no — pool pays 0 |
+| 803 | Fly | 10000 | 1.065e22 | **ok**, 4.0229e15 (−1.99%) | no — pool pays 0 |
+| 804 | PORTNOY | 500 | 1.414e23 | **ok**, 4.1005e15 (−0.10%) | no — pool pays 0 |
+| 805 | Fly | 10000 | 1.065e22 | **ok**, 4.0229e15 (−1.99%) | no — pool pays 0 |
+
+**THE STORAGE LAYOUT WAS VALIDATED RATHER THAN ASSERTED. [MEASURED]** `liquidity` is read
+by `extsload` on the PoolManager at `keccak(poolId ‖ 6) + 3`, a layout this project had
+never verified on this chain. It agrees with the router oracle on **12 of 12** records —
+`liquidity = 0` exactly where the pool pays nothing, 0 disagreements, 0 unreadable — so
+the layout is confirmed by twelve records rather than by a constant.
+
+### 6A.2 THE NUMBERED FAILURES
+
+**1. THE +90 SECOND HOLD IS THE ENTIRE LOSS. [MEASURED] — cost ~$110 of the $120.**
+**12 of 12 sells would have EXECUTED at the block we bought in. 11 of 12 would not 90
+seconds later.** Ten because the pool's liquidity went to zero during the hold; one
+(CME) because we were blacklisted during the hold. **The bot did not buy dead pools. It
+bought live pools and held them until they died.**
+
+**2. THERE IS NO EDGE AT T0, AND THE MEASURED COST IS EXACTLY THE LP FEE. [MEASURED] —
+this is why the strategy cannot work at $10.** Buying and selling in the SAME block:
+
+```
+median T0 round trip   -1.989%        mean  -0.715%
+the pool's fee, both legs, for that tier:
+  fee=10000  ->  -2.000%    measured -1.989%   difference 0.011%
+  fee=500    ->  -0.100%    measured -0.100%   difference 0.000%
+  fee=100    ->  -0.020%    measured -0.683%   difference -0.663%
+gas, one round trip, $0.177-$0.190 on $10   ->  -1.77% to -1.90%
+NET at T0 WITH A PERFECT INSTANT EXIT       ->  -3.82% median
+```
+
+**The T0 round trip IS the fee, to within a hundredth of a percent on 11 of 12.** So
+every penny of claimed edge came from price appreciation DURING the hold — and the hold
+is what made 11 of 12 unsellable. **A strategy whose T0 cost is −3.8% net needs the hold
+to work, and the hold is the thing that failed.**
+
+**3. THE ORACLE NEVER EXECUTED A TRANSFER, SO IT COULD NOT MEASURE SELLABILITY.
+[MEASURED] — this invalidates the method behind four separate decisions.** See 6A.3.
+
+**4. SIX OF TWELVE BUYS WERE ONE ACTOR AND THE BOT COUNTED THEM AS SIX BETS.
+[MEASURED] — cost ~$60.** Six rows carry the symbol `Fly` on six different token
+addresses, **all six ending `b3d3`**, and **five report an IDENTICAL T0 sell price of
+4022915396486724 wei** on five different pools. 613 (OZZY) carries the identical
+liquidity value as all six. One actor deployed the same template repeatedly over ~3,000
+blocks and the bot bought every instance, including five AFTER the first had already
+failed. **Nothing in the rule, the rails or the sellability check looks at whether a
+candidate is the same thing we just lost money on.**
+
+**5. NOTHING READABLE BEFORE THE BUY WOULD HAVE DISQUALIFIED ANY OF THE TWELVE.
+[MEASURED] — and this is the uncomfortable one.** Liquidity was non-zero on 12 of 12 and
+the sell would have executed on 12 of 12. **The claim that "Fly had $0 liquidity" is
+false of the moment we bought**: Fly's pools held 1.065e22 of liquidity and would have
+paid us 4.0229e15 wei. The pre-buy sellability check ran, gated the buy, and passed
+correctly. **A pre-buy check is the wrong instrument for this failure and cannot be made
+into the right one.**
+
+**6. THE ONE PROPERTY THAT SEPARATES A DRAINABLE POOL FROM A LOCKED ONE IS NEVER READ.
+[INFERRED — the lever is identified, its value is not yet measured].** Every loss in
+group 1 is liquidity removal. Whether an LP position can be withdrawn is a readable
+property of the position, and no call the bot makes looks at it. This is the only
+candidate lever that addresses failure 1 at the point of entry.
+
+**7. THE EXIT HORIZON WAS CHOSEN ON A SURVIVORSHIP METRIC. [MEASURED]** The horizon study
+scored `exit found` as "a swap exists in the window". A pool whose liquidity is pulled
+produces no swap, was counted as no-exit, and **no-exit scored 0 rather than −100%** — so
++90 s won a comparison computed over the pools that survived to be measured. The live run
+is that bias paying out: the horizon that maximised the metric is the horizon over which
+83% of pools died.
+
+**8. EVERY BACKTEST TREATED LAUNCHES AS INDEPENDENT DRAWS. [MEASURED via failure 4]**
+`daily-loss-derive` bootstrapped 20,000 trading days by sampling launches independently
+and reported that a $50 rail halts 4.0% of days. With one actor supplying half the
+population, a run of losses is far likelier than independent sampling implies. **Every
+halt probability in that derivation is a floor, and the floor is looser than stated.**
+
+**9. `fill-not-modelled` WAS THE WRONG ACCEPTED UNKNOWN. [MEASURED]** It was the last
+prerequisite and it was accepted on the argument that only live fills could close it. The
+live fills came in at **`fill_vs_quote` 0.92 to 1.00** — the fill was never the problem.
+**The prerequisite list named a risk that did not materialise and did not name the two
+that did** (the hold, and the status that blinded the rails).
+
+**10. `closed_unsimulatable` BLINDED ALL THREE CAPITAL RAILS. [MEASURED] — cost the
+difference between $50 and $120.** Recorded in full in the previous section.
+
+**11. `net_pnl_usd` WAS NEVER WRITTEN, SO THE DAILY-LOSS RAIL READ $0. [MEASURED]**
+Recorded in full in the previous section.
+
+### 6A.3 THE ORACLE DEFECT, IN FULL, BECAUSE FOUR DECISIONS REST ON IT
+
+An unreachable `amountOutMinimum` was used everywhere as an oracle for what a pool would
+pay, on the reasoning that `V4TooLittleReceived(min, actual)` reports the router's own
+output. **It does. And `SWAP_EXACT_IN_SINGLE` checks that bound INSIDE the swap action and
+reverts there — before `SETTLE_ALL` pulls the token.** So the call short-circuits before
+any transfer executes.
+
+**PROVEN ON CME AT ITS OWN EXIT BLOCK. Identical overrides, identical block, only the
+bound differing: [MEASURED]**
+
+```
+minOut = 2^127   ->  V4TooLittleReceived actual=4863353094845813    "a healthy price"
+minOut = 1       ->  Error("TRANSFER_FROM_FAILED")
+raw transfer     ->  Error("blacklisted")
+```
+
+**THE PRE-BUY HONEYPOT CHECK WOULD THEREFORE HAVE PASSED A HONEYPOT.** `bot/sellability.ts`
+used the unreachable bound, so the one thing it was built to catch is the one thing it
+could not see.
+
+**WHAT ELSE INHERITS IT, and each of these is now INFERRED rather than MEASURED:**
+
+| figure | what it actually measured |
+|---|---|
+| `exit-simulate`'s "+0.174 to +0.323 realisable median NET" | the pool's pricing curve. No transfer executed. |
+| "our sell would have executed on 71–77% of launches" | the curve quoted a non-zero price on 71–77%. **Not execution.** |
+| `revert-economics`' "what a refused trade would have filled at" | the curve, at that size |
+| `SLIPPAGE_BPS = 1000` and the `[1000, 1343]` ladder | derived from the same curve figures |
+
+**THE FIX IS TWO CALLS, NOT ONE.** `simulateSellAt` now takes the price from the
+unreachable bound AND the executability from a **reachable** bound of 1, which runs the
+whole path including the settle. They are reported separately because they answer
+different questions, and on CME they disagree.
+
+**AND IT CHANGES THE CME STORY. [MEASURED]** At the entry block CME's raw transfer
+SUCCEEDS and the sell RETURNS; at the exit block both fail. **We were blacklisted between
+the buy and the exit.** CME was not a readable honeypot — it is the delayed-activation
+class section 2E names as undetectable by any pre-buy check, and the earlier diagnosis
+that it "was a honeypot we should have caught" was wrong.
+
+### 6A.4 ONE MEASUREMENT CAVEAT, STATED RATHER THAN BURIED
+
+**The T0 sell is simulated against a pool state that does not contain our own buy.
+[INFERRED effect, bounded]** So it credits us with selling into the pre-buy price. On 11 of
+12 the T0 round trip lands within 0.011% of the LP fee, which bounds our impact at
+essentially nothing at $10. **INJ (706) is the exception at +6.32%** — the smallest pool in
+the set at 8.234e21 — where the gap says our $10 moved that pool ~8% and the simulation
+does not charge us for it. Read 706's T0 figure as optimistic by roughly that much.
 
 
 ---
