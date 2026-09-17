@@ -65,7 +65,6 @@
  */
 import { bootstrap } from '../bootstrap.js';
 import { errorFields, log } from '../logger.js';
-import { AbiCoder, id } from 'ethers';
 import { RpcClient } from '../adapters/token-updates/rpc.js';
 import { BroadcastRpc, ReadOnlyRpc } from '../bot/rpc.js';
 import { resolveMode } from '../bot/mode.js';
@@ -74,8 +73,10 @@ import { buildPermit2Approve, buildTokenApprove } from '../bot/calldata.js';
 import { PERMIT2, RAILS, UNIVERSAL_ROUTER } from '../bot/config.js';
 import { configuredWallet } from '../bot/wallet.js';
 import { awaitReceipt } from '../bot/receipt.js';
+import {
+  readErc20Allowance, readPermit2Allowance, readTokenBalance,
+} from '../bot/allowance.js';
 
-const abi = AbiCoder.defaultAbiCoder();
 const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
 /* The same figures exit-exec uses, and derived there: receipt availability measured at
  * 60 of 60 on the first ask with a 36 ms maximum, against an inclusion half that could
@@ -83,47 +84,18 @@ const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
 const RECEIPT_TIMEOUT_MS = 60_000;
 const RECEIPT_POLL_MS = 1_000;
 
-/** Selectors COMPUTED from keccak, never transcribed. A wrong one returns `0x`. */
-const ERC20_ALLOWANCE = id('allowance(address,address)').slice(0, 10);
-const PERMIT2_ALLOWANCE = id('allowance(address,address,address)').slice(0, 10);
-
-interface Read { raw: bigint | null; note: string }
-
-/** ERC-20 `allowance(owner, PERMIT2)`. `0x` is UNKNOWN, never zero. */
-async function erc20Allowance(
-  rpc: ReadOnlyRpc, token: string, owner: string, spender: string,
-): Promise<Read> {
-  const data = ERC20_ALLOWANCE
-    + owner.replace(/^0x/, '').toLowerCase().padStart(64, '0')
-    + spender.replace(/^0x/, '').toLowerCase().padStart(64, '0');
-  const r = await rpc.call('eth_call', [{ to: token, data }, 'latest']);
-  if (typeof r !== 'string' || r === '0x' || r === '') {
-    return { raw: null, note: `allowance() returned ${JSON.stringify(r)} — UNKNOWN, `
-      + 'not zero; refusing to treat an unreadable allowance as absent' };
-  }
-  return { raw: BigInt(r), note: 'read' };
-}
-
-/**
- * Permit2 `allowance(owner, token, spender)` -> `(uint160 amount, uint48 expiration,
- * uint48 nonce)`. The expiration is why this is not a plain ERC-20 allowance: a grant
- * that has expired reads as a non-zero amount and is worthless.
+/*
+ * THE ALLOWANCE READS USED TO BE DUPLICATED HERE, AND THAT WAS THE WORST PLACE FOR IT.
+ *
+ * `bot/allowance.ts` was extracted when `exit-exec` needed these reads, with a header
+ * saying that the side which GRANTS an allowance and the side which CHECKS it disagreeing
+ * about sufficiency "is how a bot sells into a revert it had already been told about" —
+ * and then this file, the granting side, was left on its own copy. Two implementations of
+ * the rule that decides what gets approved, in a tool about to sign a real transaction.
+ *
+ * Found by re-reading the path before the first real signature. Both sides now call
+ * `readErc20Allowance` and `readPermit2Allowance`, so the pair cannot drift.
  */
-async function permit2Allowance(
-  rpc: ReadOnlyRpc, owner: string, token: string, spender: string,
-): Promise<{ amount: bigint | null; expiration: number; note: string }> {
-  const data = PERMIT2_ALLOWANCE
-    + owner.replace(/^0x/, '').toLowerCase().padStart(64, '0')
-    + token.replace(/^0x/, '').toLowerCase().padStart(64, '0')
-    + spender.replace(/^0x/, '').toLowerCase().padStart(64, '0');
-  const r = await rpc.call('eth_call', [{ to: PERMIT2, data }, 'latest']);
-  if (typeof r !== 'string' || r === '0x' || r === '') {
-    return { amount: null, expiration: 0, note: `returned ${JSON.stringify(r)} — UNKNOWN` };
-  }
-  const [amount, expiration] = abi.decode(['uint160', 'uint48', 'uint48'], r) as
-    unknown as [bigint, bigint, bigint];
-  return { amount, expiration: Number(expiration), note: 'read' };
-}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -165,14 +137,9 @@ async function main(): Promise<void> {
   if (amountArg) {
     amount = BigInt(amountArg);
   } else {
-    const balData = id('balanceOf(address)').slice(0, 10)
-      + owner.replace(/^0x/, '').padStart(64, '0');
-    const b = await rpc.call('eth_call', [{ to: token, data: balData }, 'latest']);
-    if (typeof b !== 'string' || b === '0x') {
-      throw new Error(`balanceOf returned ${JSON.stringify(b)} for ${token}: the balance `
-        + 'is UNKNOWN, not zero, and an allowance will not be sized against an unknown.');
-    }
-    amount = BigInt(b);
+    /* The balance read is `bot/allowance.ts`'s too — a third copy of `balanceOf` in this
+     * file would have been the same defect one function along. */
+    amount = await readTokenBalance(rpc, token, owner);
     if (amount === 0n) {
       throw new Error(`the wallet holds NO ${token}. An approval for zero grants nothing, `
         + 'and sizing one against a zero balance would be approving a number rather than '
@@ -181,12 +148,13 @@ async function main(): Promise<void> {
   }
 
   /* ---- 2. READ WHAT IS ALREADY GRANTED ----------------------------------- */
-  const a1 = await erc20Allowance(rpc, token, owner, PERMIT2);
-  const a2 = await permit2Allowance(rpc, owner, token, UNIVERSAL_ROUTER);
+  const a1 = await readErc20Allowance(rpc, token, owner, PERMIT2);
+  const a2 = await readPermit2Allowance(rpc, owner, token, UNIVERSAL_ROUTER);
   const now = Math.floor(Date.now() / 1000);
   const p2Live = a2.amount !== null && a2.amount > 0n && a2.expiration > now;
 
-  const step1Needed = a1.raw === null ? 'UNREADABLE' : (a1.raw >= amount ? 'SKIP' : 'SEND');
+  const step1Needed = a1.amount === null ? 'UNREADABLE'
+    : (a1.amount >= amount ? 'SKIP' : 'SEND');
   const step2Needed = a2.amount === null ? 'UNREADABLE'
     : (p2Live && a2.amount >= amount ? 'SKIP' : 'SEND');
 
@@ -202,7 +170,7 @@ async function main(): Promise<void> {
     step_1: {
       what: `${token} .approve(${PERMIT2}, ${amount})`,
       spender: PERMIT2, spender_is: 'Permit2',
-      current_allowance: a1.raw === null ? a1.note : a1.raw.toString(),
+      current_allowance: a1.amount === null ? a1.note : a1.amount.toString(),
       verdict: step1Needed,
     },
     step_2: {
@@ -303,17 +271,18 @@ async function main(): Promise<void> {
    * fresh-connection rule in its on-chain form, and it is the same reason
    * `wallet_transactions` is re-counted after a write.
    */
-  const v1 = await erc20Allowance(rpc, token, owner, PERMIT2);
-  const v2 = await permit2Allowance(rpc, owner, token, UNIVERSAL_ROUTER);
+  const v1 = await readErc20Allowance(rpc, token, owner, PERMIT2);
+  const v2 = await readPermit2Allowance(rpc, owner, token, UNIVERSAL_ROUTER);
   log.info('VERIFIED BY RE-READING THE CHAIN', {
     sent,
-    step_1_allowance_now: v1.raw === null ? v1.note : v1.raw.toString(),
+    step_1_allowance_now: v1.amount === null ? v1.note : v1.amount.toString(),
     step_2_amount_now: v2.amount === null ? v2.note : v2.amount.toString(),
     step_2_expiration_now: v2.expiration,
-    covers_the_amount: v1.raw !== null && v2.amount !== null
-      && v1.raw >= amount && v2.amount >= amount,
+    covers_the_amount: v1.amount !== null && v2.amount !== null
+      && v1.amount >= amount && v2.amount >= amount,
   });
-  if (!(v1.raw !== null && v2.amount !== null && v1.raw >= amount && v2.amount >= amount)) {
+  if (!(v1.amount !== null && v2.amount !== null
+    && v1.amount >= amount && v2.amount >= amount)) {
     throw new Error('the allowances do NOT cover the amount after broadcasting. The '
       + 'transactions may be pending; do not sell against this state.');
   }
