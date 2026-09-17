@@ -2029,6 +2029,219 @@ That is expected for a dry run and it means **the loss half of the cap has never
 measured against anything real**, which is stated rather than left for someone to assume
 from a passing drill.
 
+### ARE THE REVERTS OPPORTUNITY OR PROTECTION? — MEASURED 2026-09-16
+
+**THEY ARE OPPORTUNITY. The bound is costing money, and it is costing it by ADVERSE
+SELECTION rather than by being slightly tight.** `npm run revert-economics`. The bound is
+NOT changed in this pass; this is the evidence for the operator to decide on.
+
+#### THE METHOD, AND WHY THE ENTRY PRICE OF A REFUSED TRADE IS EXACT
+
+`V4TooLittleReceived(uint256,uint256)` carries `(minAmountOutReceived, amountReceived)`, so
+an unreachable `amountOutMinimum` turns the router into an oracle for its own output at our
+size and block — the mechanism the quote fix already established. **Every launch is probed
+the same way, accepted and refused alike**, so nothing branches on the outcome being
+measured. Had the bound admitted a refused trade we would have filled at `amountIn /
+amountReceived`, which already contains the fee and our own impact, and the exit is the
+first trade strictly after the mark exactly as the published grid does.
+
+**Refusal is MONOTONE in the bound** — `minOut = floor(quoted x (10000-b)/10000)` — so each
+launch has one critical bound and every candidate bound is arithmetic over one simulation
+rather than another simulation. The accept test uses `minOut`'s own integer arithmetic and
+**the run asserts it agrees with the real `rule.minOut()` on all 100 launches: 0
+disagreements**, because a float threshold shadowing an integer policy is the trap this
+document records six times.
+
+```
+bot launches            107      ground truth obtained   100
+no oracle answer          7      all "execution reverted" for another reason — excluded
+                                 from every figure rather than folded in at zero
+9,202 CU = $0.0041
+```
+
+#### QUESTION 2: THE REFUSED TRADES ARE THE BETTER TRADES, IN EVERY POPULATION
+
+At the configured +90 s, denominator every qualifying launch, no-exit scoring zero:
+
+| population | n | accepted median | refused median | accepted exit | refused exit |
+|---|---|---|---|---|---|
+| **BOT, oracle ground truth** | 100 | +0.202 | **+0.462** | 90.5% | 78.4% |
+| HOLDOUT-ERA, modelled | 23,979 | +0.588 | **+0.764** | 66.6% | **83.2%** |
+| MIDPOINT | 483 | 0.000 | **+0.354** | 44.8% | **87.7%** |
+| CALM | 283 | 0.000 | **+0.499** | 50.7% | **83.7%** |
+| SELLOFF | 622 | +0.021 | **+0.430** | 59.4% | **76.2%** |
+| **POST-CORPUS pooled** | **1,388** | **0.000** | **+0.439** | **51.4%** | **80.5%** |
+
+**In the recent era — the one this document says is the expectation — the trades our bound
+ADMITS have a median return of exactly ZERO, and the ones it REFUSES have a median of
++0.44.** That is not a tight bound, it is a bound pointed the wrong way.
+
+**THE MECHANISM IS ADVERSE SELECTION, AND THE EXIT COLUMN IS WHERE IT SHOWS.** In all four
+historical windows the refused trades have BETTER exit availability than the accepted ones,
+and accepted exit-availability rises monotonically as the bound widens — 51.4% → 56.6% →
+60.5% → 62.2% at 300/500/1000/2000 bps in the post-corpus set. **The bound fires when a
+pool's price moved away from our quote in the seconds before execution, and a pool whose
+price is moving is a pool that is trading.** Our bound is therefore selecting, with some
+precision, for pools where nothing is happening.
+
+**THE BOT'S OWN SET IS THE ONE PLACE THE EXIT COLUMN POINTS THE OTHER WAY** — 78.4% refused
+against 90.5% accepted — and it is stated rather than smoothed. It is n=100 against 25,367,
+and it is the only disagreement between the two datasets.
+
+#### QUESTION 3: BANDED BY SHORTFALL, AND THE BANDS ARE NOT ALIKE
+
+Ground truth, 37 refused at 300 bps. `ratio` = our bound / what the pool would actually pay:
+
+| band | n | exit found | median | % positive |
+|---|---|---|---|---|
+| marginal `< 1.04` | 21 | 90.5% | +0.126 | 76.2% |
+| **mid `1.04–1.20`** | 13 | 76.9% | **+1.384** | 76.9% |
+| wide `1.20–2.55` | 1 | **0%** | 0 | 0% |
+| extreme `>= 2.55` | 2 | **0%** | 0 | 0% |
+
+**The bound is refusing 34 tradeable launches to avoid 3 dead pools.** The three in the
+wide and extreme bands have ZERO exit availability — nothing would have bought them at any
+price, which is exactly the "a retry ladder rescues a mispriced quote, not a dead pool"
+finding arriving from the entry side. That protection is real and it is 3% of the sample.
+
+**In the post-corpus historical set the extreme band is EMPTY — 0 of 590 refusals** — and
+the three populated bands run +0.343 / +0.586 / +0.359 on 82.8% / 76.4% / 90.4% exit
+availability. **There, the bound buys no protection at all.**
+
+#### THE INDIVIDUAL RECORDS, AND THE COUNTER-EXAMPLES ARE THE INTERESTING HALF
+
+A bound is a definition, and `CLAUDE.md` requires a definition change to be proven on
+individual records before an aggregate is acted on. The five best refused launches:
+
+```
+trade 124 pool 0x6b8dc58aa9f87b86… fee 500  shortfall x1.0620  1.825e-10 -> 8.228e-10  +350.8%
+trade 126 pool 0x4ffbc47125bc1a21… fee 500  shortfall x1.0733  2.448e-10 -> 7.238e-10  +195.7%
+trade 153 pool 0xe86f34219e6afbcd… fee 500  shortfall x1.0756  2.989e-10 -> 8.643e-10  +189.1%
+```
+
+**And every one of the three refused trades that LOST has one of the SMALLEST shortfalls in
+the set** — x1.0025, x1.0031, x1.0068, returning −15.8%, −19.6% and −20.9%:
+
+```
+trade 159 pool 0xc07b374d15e3f1a1… shortfall x1.0025  4.813e-11 -> 4.051e-11  -15.8%
+trade 143 pool 0x95483524455d740e… shortfall x1.0031  5.038e-11 -> 4.050e-11  -19.6%
+trade 156 pool 0x846f4da8f2e4c1b7… shortfall x1.0068  5.119e-11 -> 4.049e-11  -20.9%
+```
+
+**SO WITHIN THE REFUSED SET, MISSING BY MORE PREDICTED DOING BETTER** — which is the
+momentum reading of the whole finding, visible in individual records rather than inferred
+from a mean. **IT IS A HYPOTHESIS AND NOT ESTABLISHED**: the post-corpus bands are NOT
+monotone in the same way (mid +0.586 beats wide +0.359), so the pattern holds in n=29 and
+does not replicate cleanly at n=590.
+
+**One thing noticed and not chased:** those three losers exit at 4.049e-11, 4.050e-11 and
+4.051e-11 — three different pools agreeing to four significant figures. Consistent with a
+launchpad minting from one template, and recorded rather than passed over.
+
+#### QUESTION 4: THE DERIVED BOUND — AND THE OBJECTIVE AS SPECIFIED IS NOT USABLE
+
+Median return over every qualifying launch, refused scoring zero, no-fill zero:
+
+| bound | BOT median (n=100) | BOT revert | POST-CORPUS median (n=1,388) | POST-CORPUS revert |
+|---|---|---|---|---|
+| **300 (current)** | **+0.098** | **37%** | **0.000** | **42.5%** |
+| 500 | +0.155 | 18% | 0.000 | 30.8% |
+| 1000 | +0.181 | 7% | 0.000 | 14.6% |
+| 2000 | +0.205 | 3% | +0.091 | 5.2% |
+| argmax | +0.205 at **1350** | 3% | +0.184 at **3800** | 0.1% |
+
+**THE ARGMAX IS A PLATEAU, NOT A PEAK, AND REPORTING ITS LEFT EDGE WOULD BE PRESENTING A
+TIE AS A FINDING.** The objective is identical at every bound from 1350 to 9400 on the bot
+set and from 3800 to 9400 post-corpus. **The objective as specified therefore does not
+identify a bound** — it says only "wider than 300", and its maximum is wherever the loop
+happens to reach first.
+
+**AND IT SAYS 34% FOR A REASON THAT IS ARITHMETIC RATHER THAN ECONOMIC.** More than half of
+all launches contribute exactly zero at the current bound, so the median is pinned at 0 and
+jumps when widening pushes the zero mass below the 50th percentile. The objective is
+measuring *what fraction of launches produce a positive outcome*, not the size of returns.
+
+**THE ECONOMIC CEILING IS THE ONE THIS DOCUMENT ALREADY DERIVED FOR THE RETRY LADDER**, and
+it binds far below the plateau: the ladder stops at the p75 because *any bound past it
+guarantees a loss larger than the position's whole expected gain*. The recent-era median
+gross at +90 s is **+0.157 to +0.180**, so **a bound above roughly 1,600 bps is
+self-defeating by definition** — it accepts a haircut bigger than the trade's own expected
+return. **The defensible range is therefore 1,000–1,600 bps, and the operator decides
+inside it.** At 1,000 bps the bot-set revert rate falls 37% → 7% and the post-corpus falls
+42.5% → 14.6%.
+
+**THE `no-exit = 0` CONVENTION DID NOT CHANGE THE ANSWER, AND IT WAS CHECKED RATHER THAN
+ASSUMED.** A position nothing will buy is a total loss, not a flat trade, so the whole
+derivation was re-run at `no-exit = −1`: **identical at every bound, on both populations.**
+The reason is structural — the no-exit mass sits below the median either way, so the median
+never crosses it. That is a robustness result and it is the one place where a convention
+this document worried about turned out not to matter.
+
+#### QUESTION 5: THERE IS NO DRIFT TO EXPLAIN
+
+**29.2 → 31.3 → 32.4 → 40.6% IS SAMPLING NOISE AT n = 16–34.** Against the pooled 34.0%
+(36 of 106):
+
+| run | n | reverted | rate | standard error | z |
+|---|---|---|---|---|---|
+| 1 | 24 | 7 | 29.2% | 9.7% | −0.50 |
+| 2 | 16 | 5 | 31.2% | 11.8% | −0.23 |
+| 3 | 34 | 11 | 32.4% | 8.1% | −0.20 |
+| 4 | 32 | 13 | 40.6% | 8.4% | **+0.80** |
+
+**Every run is inside 0.8 standard errors of the pooled rate.** There is no trend here and
+there never was one; four points that each sit within one standard error of a constant are
+a constant.
+
+**The second check says the same thing from the other side.** Re-quoted with today's single
+quote implementation at the canonical entry block, the refusal rate per run is **35.9% /
+40.0% / 36.7%** — flat — and the two candidate causes are both absent:
+
+- **The over-quote did not grow.** Median 1.021 → 1.026 → 1.027, and the p90 FELL, 1.155 →
+  1.096 → 1.107.
+- **The launchpad mix moved and the rate did not follow.** `0x58daec31…` ran 54% → 27% →
+  40% of launches while the revert rate stayed inside 36–40%.
+- Pool depth did not move monotonically either: our size over the first swap's notional ran
+  0.074 → 0.089 → 0.059.
+
+**A caveat that belongs with this, not buried:** the re-quote is a reconstruction, not a
+replay — the live runs simulated at `latest` at the moment they decided, while this probes
+at the canonical entry block with one quote. **36 of 100 verdicts differ between the two**,
+which is why the as-run series and the re-quoted series are reported separately and neither
+is called the other.
+
+#### QUESTION 6: THE HISTORICAL WINDOWS, AND WHAT IS MODELLED IN THEM
+
+**25,367 launches across the four swept windows**, zero CU, on the pre-committed
+`md5(pool_id)` split. `actualOut` there is **MODELLED** as the price a real trade got at our
+entry mark — a genuine trade at a genuine price, missing only our own marginal impact,
+which is measured at a 0.17% median and has fired twice in 66 live trades. `b*` is nearly
+size-independent because `amountIn` cancels out of the quoted price except inside that
+impact term, so the reconstruction barely depends on each era's ETH/USD.
+
+**THE MODEL COULD NOT BE SCORED AGAINST THE ORACLE ON THE SAME POOLS, AND THAT IS STATED
+RATHER THAN SKIPPED.** The bot's launches sit at blocks 64,385,531–64,897,470 and the
+SELLOFF window ends at 64,216,393: **the overlap is exactly zero.** What the two give
+instead is arguably better — **two disjoint populations, two different methods, the same
+conclusion in the same direction.**
+
+**MIDPOINT IS THE ONE WINDOW WHERE WIDENING DOES NOTHING**, and it is the window this
+document already records as flat at every exit horizon: `median_all` is 0.000 at every bound
+from 0 to 9,400, and `beats_current` is FALSE. **A bound change is not a fix for a window
+where the entry has no edge** — the identical conclusion the exit-horizon study reached.
+
+#### WHAT THIS DOES NOT SETTLE
+
+- **Widening admits trades, it does not make them fill.** Every figure here is
+  mark-to-market against a later trade in the pool; `fill_status` is still the literal
+  `dry-run` and nothing models winning a fill against competing buyers in the same block.
+- **The exit leg is unchanged and still borrowed.** A wider entry bound puts the bot into
+  more positions, and the exit is the leg this document calls its most important open
+  question.
+- **Costs do not bind but they do not vanish.** A round trip is 1.8–1.9% of a $10 position;
+  at a 1,000 bps bound the accepted haircut is up to 10% on top of that, which is inside the
+  recent-era median gross and nowhere near it at 3,400.
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
@@ -2063,9 +2276,18 @@ category C.
 ### B. Unmeasured, so no figure here is a profit figure
 
 - **A 2–3% RESIDUAL OVER-QUOTE IS BOUNDED AND NOT IDENTIFIED**, and it is still the
-  revert mechanism: our 300 bps bound sits on top of it. The entry revert rate has now
-  run 29.2 / 31.3 / 32.4 / **40.6%** across four runs with no identified cause for the
-  spread.
+  revert mechanism: our 300 bps bound sits on top of it. **The "drift" in the revert rate
+  is CLOSED — it was never a trend.** 29.2 / 31.3 / 32.4 / 40.6% are all within 0.8
+  standard errors of the pooled 34.0% at n=16–34, and re-quoted under one implementation
+  the rate is flat at 35.9 / 40.0 / 36.7%. What remains open is the residual itself, not
+  its movement.
+- **THE 300 bps BOUND IS COSTING MONEY AND HAS NOT BEEN CHANGED.** Measured 2026-09-16 over
+  100 oracle-priced launches and 25,367 modelled ones: in the recent era the trades the
+  bound ADMITS have a median return of 0.000 and the ones it REFUSES have +0.439, and
+  refused trades have BETTER exit availability in all four historical windows. The
+  defensible range is **1,000–1,600 bps** — above the marginal and mid shortfall bands,
+  below the recent-era median gross return that makes a wider bound self-defeating.
+  **The operator decides; nothing in the code was touched.**
 - **The exit's success rate is measured on 17 attempts**, 10 clean. Better than the
   stale-quote baseline's 2 of 7, and both samples are too small to separate the fix from
   noise.
@@ -2095,6 +2317,16 @@ category C.
 - **`bot_horizon_prices` and `bot_exit_attempts` accumulate and nothing prunes them.**
 - **The +450 s peak on the bot's own trades contradicts the offline holdout**, where
   +450 s is exactly 0.00000 in every window and both halves. Unresolved.
+- **THE REFUSED-TRADE MOMENTUM PATTERN IS A HYPOTHESIS.** Within the bot's 29 refused
+  launches that had an exit, a LARGER shortfall predicted a better return — the three that
+  lost carry the three smallest shortfalls (x1.0025–x1.0068) and the five best missed by
+  6–8%. The post-corpus bands do not reproduce it monotonically (mid +0.586 beats wide
+  +0.359), so it holds at n=29 and not at n=590. **If it is real the shortfall is a signal
+  rather than only a cost**, which is a different change from widening a bound and is not
+  proposed here.
+- **Three refused losers exit at 4.049e-11, 4.050e-11 and 4.051e-11 on three different
+  pools** — four significant figures apart, consistent with one launchpad minting from a
+  template. Noticed, recorded, not chased.
 - **The stored `hooks` values are one byte short** on rows written before that decoder
   was fixed. Deterministic, so grouping is unaffected.
 - ~~Seven `exit_exhausted` rows are stranded in a status nothing sweeps~~ — **MIGRATED
