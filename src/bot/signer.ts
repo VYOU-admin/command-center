@@ -17,11 +17,17 @@
  * refusal below has been observed rather than asserted, and the arrival of a key changes
  * no code.
  *
- * **NOTHING HERE HAS EVER SIGNED OR BROADCAST A TRANSACTION.** The signing arithmetic is
- * `ethers`', not ours — `LAUNCHBOT.md` section 2 records why that dependency was chosen:
- * hand-rolling secp256k1, RLP and EIP-1559 is exactly what loses money. But the wiring
- * around it is untested against a real key by construction, and the first transaction it
- * is pointed at must be the bounded approval of `approve-setup`, not a trade.
+ * **THIS HAS NOW SIGNED AND SUBMITTED, AND THE NODE REJECTED IT** — 2026-09-16, on the
+ * first real attempt, for `max fee per gas less than block base fee`. Nothing landed and
+ * no gas was spent, and the fee construction below is what that rejection changed. The
+ * claim here used to read "nothing has ever signed or broadcast", which stopped being
+ * true the moment it did.
+ *
+ * The signing arithmetic is `ethers`', not ours — `LAUNCHBOT.md` section 2 records why
+ * that dependency was chosen: hand-rolling secp256k1, RLP and EIP-1559 is exactly what
+ * loses money. The wiring around it is what had to be got right, and the first
+ * transaction it was pointed at was deliberately the bounded approval of `approve-setup`
+ * rather than a trade — so the defect surfaced on a call that moved nothing.
  *
  * ---------------------------------------------------------------------------
  * THE NONCE IS READ FROM THE CHAIN, NEVER CARRIED
@@ -31,7 +37,7 @@
  * records containers being replaced mid-job twice, so a nonce held in memory is a nonce
  * that can be spent twice. It is fetched per transaction, from the chain.
  */
-import { Transaction, Wallet } from 'ethers';
+import { Wallet } from 'ethers';
 import type { BotMode } from './mode.js';
 import { LIVE_FLAG } from './mode.js';
 
@@ -139,22 +145,80 @@ export async function createBroadcaster(
       /* THE NONCE IS READ PER TRANSACTION, NEVER CARRIED. Section 2 rule 5. */
       const nonceHex = String(await rpc.call('eth_getTransactionCount',
         [address, 'pending']));
-      const gasHex = String(await rpc.call('eth_gasPrice', []));
       const estHex = String(await rpc.call('eth_estimateGas', [{
         from: address, to: tx.to, value: `0x${tx.value.toString(16)}`, data: tx.data,
       }]));
 
-      const signed = await wallet.signTransaction(Transaction.from({
-        to: tx.to,
-        data: tx.data,
-        value: tx.value,
-        nonce: Number(BigInt(nonceHex)),
-        gasLimit: BigInt(estHex),
-        gasPrice: BigInt(gasHex),
-        chainId: CHAIN_ID,
-        type: 0,
-      }).toJSON());
+      /*
+       * ---------------------------------------------------------------------
+       * EIP-1559, AND THE FIRST REAL TRANSACTION IS WHY
+       * ---------------------------------------------------------------------
+       *
+       * This built a LEGACY (type 0) transaction with `gasPrice` straight from
+       * `eth_gasPrice`, and the first real send was REJECTED BY THE NODE:
+       *
+       *   max fee per gas less than block base fee:
+       *   maxFeePerGas: 49556000  baseFee: 49626000
+       *
+       * Two defects in one line. **This chain has a base fee**, so a legacy transaction
+       * must carry a `gasPrice` at or above it — and `eth_gasPrice` was 0.14% BELOW the
+       * base fee by the time the node saw it. At a measured 100.52 ms block interval the
+       * base fee moves between the read and the send, so a figure used verbatim is a race
+       * this would lose again at random.
+       *
+       * **HEADROOM IS FREE UNDER EIP-1559 AND IS NOT UNDER LEGACY**, which is the reason
+       * to change type rather than just add a margin. A type-2 transaction is charged
+       * `baseFee + tip` and the rest of `maxFeePerGas` is never spent, so a generous
+       * ceiling costs nothing; a legacy transaction is charged its whole `gasPrice`, so
+       * the same margin would be paid on every transaction for ever.
+       *
+       * The fallback is stated rather than assumed: a chain with NO `baseFeePerGas` is
+       * pre-1559 and takes the legacy shape, with a margin, because there is nothing to
+       * be refunded from.
+       */
+      const blk = (await rpc.call('eth_getBlockByNumber', ['latest', false])) as
+        { baseFeePerGas?: string } | null;
+      if (blk === null || blk === undefined) {
+        throw new Error('eth_getBlockByNumber returned no head block, so the fee market '
+          + 'is UNKNOWN. Refusing to guess a gas price for a real transaction.');
+      }
 
+      const gasLimit = BigInt(estHex);
+      const base: Record<string, unknown> = {
+        to: tx.to, data: tx.data, value: tx.value,
+        nonce: Number(BigInt(nonceHex)), gasLimit, chainId: CHAIN_ID,
+      };
+
+      let fees: Record<string, unknown>;
+      if (blk.baseFeePerGas !== undefined) {
+        const baseFee = BigInt(blk.baseFeePerGas);
+        /*
+         * THE TIP IS ASKED FOR AND DERIVED ONLY IF THE METHOD IS ABSENT. `eth_gasPrice`
+         * on a 1559 chain is conventionally `baseFee + tip`, so the difference is the
+         * node's own view of the tip — a derivation from a real figure rather than a
+         * number chosen here. A floor applies only if that difference is non-positive.
+         */
+        let tip: bigint;
+        try {
+          tip = BigInt(String(await rpc.call('eth_maxPriorityFeePerGas', [])));
+        } catch {
+          const gp = BigInt(String(await rpc.call('eth_gasPrice', [])));
+          tip = gp > baseFee ? gp - baseFee : baseFee / 10n;
+        }
+        /* 2x the base fee plus the tip. Never spent above baseFee+tip, so the headroom
+         * absorbs a rising base fee at no cost. */
+        fees = {
+          type: 2,
+          maxPriorityFeePerGas: tip,
+          maxFeePerGas: baseFee * 2n + tip,
+        };
+      } else {
+        /* PRE-1559: legacy, with a margin, because nothing is refunded here. */
+        const gp = BigInt(String(await rpc.call('eth_gasPrice', [])));
+        fees = { type: 0, gasPrice: gp + gp / 10n };
+      }
+
+      const signed = await wallet.signTransaction({ ...base, ...fees });
       const hash = await rpc.call('eth_sendRawTransaction', [signed]);
       if (typeof hash !== 'string' || !hash.startsWith('0x')) {
         /* A broadcast whose result cannot be read is NOT a broadcast that failed — the
