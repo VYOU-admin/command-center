@@ -47,6 +47,7 @@
     "exit-simulate": "npm run build && node dist/cli/exit-simulate.js",
     "daily-loss-derive": "npm run build && node dist/cli/daily-loss-derive.js",
     "nonce-drill": "npm run build && node dist/cli/nonce-drill.js",
+    "recover-abandoned": "npm run build && node dist/cli/recover-abandoned.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
     "launch-economics": "node dist/cli/launch-economics.js",
