@@ -735,6 +735,47 @@ async function main(): Promise<void> {
       reportSplit('AT THE CONFIGURED HORIZON, no-exit = -1', bot, SLIPPAGE_BPS,
         CONFIGURED_H, -1);
 
+      /*
+       * THE RETRY LADDER, RE-DERIVED AT WHATEVER BOUND IS CONFIGURED.
+       *
+       * The rungs are the quantiles of the shortfall over the launches the FIRST rung
+       * still misses. That set is a function of the first rung, so a ladder calibrated
+       * against 300 bps describes a different problem the moment the bound moves — it
+       * would be answering "what clears the trades 300 bps missed" while the bot misses
+       * a different, smaller set.
+       *
+       * The critical bound per launch comes from the oracle: `b* = 1 - actual/quoted`,
+       * the exact bound at which that launch stops being refused. Reported in bps.
+       */
+      const critBps = (l: Launch): number =>
+        Math.ceil(10000 * (1 - Number(l.actualOut) / Number(l.quoted)));
+      const ladderFor = (rung1: number): Record<string, unknown> => {
+        const missed = bot.filter((l) => !acceptedAt(l, rung1));
+        const cb = missed.map(critBps);
+        const q = (x: number): number | null => {
+          const v = quantile(cb, x);
+          return v === null ? null : Math.round(v);
+        };
+        return {
+          rung_1_configured_bound: rung1,
+          launches_still_missed: missed.length,
+          share_of_all: bot.length === 0 ? null
+            : Number(((missed.length / bot.length) * 100).toFixed(1)),
+          shortfall_bps_quantiles: { p25: q(0.25), median: q(0.5), p75: q(0.75),
+            p90: q(0.9), max: cb.length ? Math.max(...cb) : null },
+          proposed_rungs: [rung1, q(0.25), q(0.5), q(0.75)],
+          stops_at_the_p75_because: 'a rung past it accepts a haircut larger than the '
+            + 'position\'s whole expected gain — the rule the 300 bps ladder already used',
+          of_the_missed_how_many_have_an_exit: missed.filter(
+            (l) => l.ret[CONFIGURED_H] !== null).length,
+        };
+      };
+      log.info('=== THE RETRY LADDER, RE-DERIVED — at the CURRENT bound ===',
+        ladderFor(SLIPPAGE_BPS));
+      for (const b of [500, 1000, 1600]) {
+        log.info(`=== THE RETRY LADDER if the bound were ${b} bps ===`, ladderFor(b));
+      }
+
       /* QUESTION 5: the drift, per run. */
       const byMode = new Map<string, Launch[]>();
       for (const l of bot) {
