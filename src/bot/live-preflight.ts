@@ -74,11 +74,20 @@ export const LIVE_PREREQUISITES: readonly Prerequisite[] = [
       + 'live fills',
   },
   {
-    id: 'stuck-rows-can-halt',
-    what: '7 `needs_exit` rows in mode `dry-run-r5` can halt the chain-wide kill switch',
-    why: 'the kill switch is keyed on CHAIN, so a dry-run boot that cannot clear a '
-      + 'stuck position halts LIVE trading too. Section 4 decides this stays chain-wide.',
-    closedBy: 'resolving those 7 rows before the first live run — see section 8',
+    id: 'dry-run-boot-halts-the-chain',
+    what: 'ANY dry run that ends with an open position leaves a row that halts the '
+      + 'CHAIN-WIDE kill switch at the next boot of its mode',
+    why: 'this replaced "7 needs_exit rows in dry-run-r5", which was RESOLVED on '
+      + '2026-09-16 — and resolving it demonstrated the hazard is not those seven rows '
+      + 'but the dry-run lifecycle. reconcileOnBoot reads the BORROWED holder\'s balance '
+      + '(deliberately, so hypothetical positions are not all reported closed), that '
+      + 'holder usually still holds, so the row becomes needs_exit; the sweep then tries '
+      + 'to sell a dead launch pool as somebody else, exhausts, and halts. It recurred '
+      + 'within minutes of the first cleanup, on rows a verification run had left.',
+    closedBy: 'an operator decision on section 4\'s open item — automatic halts scoped '
+      + 'to the mode that raised them, with manual halts staying chain-wide. Until then '
+      + 'every dry run must be left with no open position, and `resolve-unsellable` is '
+      + 'the way out when one is stuck',
   },
 ];
 

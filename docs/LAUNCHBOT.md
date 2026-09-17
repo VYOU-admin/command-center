@@ -62,13 +62,16 @@ STATUS              BUILT. LIVE MODE EXISTS AND IS PROVABLY OFF (2026-09-16).
 first dry run       2026-09-16, 65 minutes, 24 hypothetical trades recorded
 wallet address      0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a  (supplied by the
                     operator 2026-09-16)
+wallet variable     BOT_WALLET_ADDRESS IS SET as a Railway service variable, 2026-09-16,
+                    to that same address -- so createBroadcaster's address guard now
+                    COMPARES rather than being skipped, confirmed by re-running
+                    signer-check (the inert-guard warning is gone).
 signing key         BOT_PRIVATE_KEY IS SET as a Railway service variable, 2026-09-16.
                     CONFIRMED by npm run signer-check to control exactly that
                     address, on chainId 4663, through a transport that cannot
                     broadcast. The key is never logged, returned or transmitted;
                     only its length (66 = 0x + 64 hex) is ever reported.
-                    BOT_WALLET_ADDRESS is NOT set, and a live run now RAISES
-                    without it -- see section 2A.
+                    A live run RAISES without BOT_WALLET_ADDRESS -- see section 2A.
 wallet balance      $126.73, READ FROM THE CHAIN 2026-09-16 by npm run wallet-probe.
                     native 52,569,197,952,034,720 wei = 0.05256919795203472 ETH at
                     ETH/USD 2,410.735 from the chain's own series. WETH 0,
@@ -3023,6 +3026,92 @@ no monitor calls `createBroadcaster`. It is inert there rather than merely unuse
 deployment `4757e002`, pid 1 restarting at 01:52:54. Nothing was running, so nothing was
 lost; the commit was re-verified from `/app/dist` before any of the above ran.
 
+### THE 7 STUCK ROWS ARE RESOLVED, AND RESOLVING THEM FOUND THE REAL HAZARD — 2026-09-16
+
+`BOT_WALLET_ADDRESS` set to the wallet, and all 7 `needs_exit` rows resolved. **The
+interesting part is what the second half exposed.**
+
+#### THE SEVEN, AND HOW EACH WAS ESTABLISHED
+
+The boot sweep processes `order by id`, and **137 is first** — so if it exhausts, the other
+six are never reached. That was checked before booting rather than discovered:
+
+| | outcome | evidence |
+|---|---|---|
+| **137** | `closed_unsellable` | ladder exhausted with **`actual=0` at BOTH rungs** — the pool pays nothing |
+| 141, 144, 153, 157, 158, 162 | `closed_unfilled` | the borrowed holder holds none of the token; *"now holds nothing on chain"* |
+
+**All seven shared ONE borrowed holder**, which had sold six of the tokens and still held
+137's. The boot halted the chain on 137 exactly as section 4 said it would, the other six
+were untouched, and a second boot after 137 was resolved cleared them and reported *"every
+needs_exit row is resolved; the bot may now arm"*.
+
+**THE NEW 2-RUNG LADDER REACHED THE SAME ANSWER IN TWO ATTEMPTS** where the old four would
+have spent two more on a pool paying zero — the re-derivation earning its keep on its
+first real use.
+
+#### `resolve-unsellable` PROVES THE PREMISE, AND IT REFUSED TWICE
+
+A tool that marks a position unsellable because somebody said so is a tool for making an
+inconvenient loss disappear. So it re-establishes the premise through **`executeExit`
+itself**, with no broadcaster, and branches on what the chain says. **It refused on two of
+the five it was pointed at** — trades 334 and 335, whose pools reported paying MORE than
+zero:
+
+> *"exhausted the ladder but the pool did NOT report paying zero … that is a MISPRICED
+> QUOTE or a bound too tight, not a dead pool — the position is sellable at some price and
+> marking it unsellable would hide that."*
+
+**That refusal is the tool working**, and it is the ladder's own distinction — *a retry
+rescues a mispriced quote, not a dead pool* — arriving from the bookkeeping side.
+
+#### THE HAZARD IS THE DRY-RUN LIFECYCLE, NOT SEVEN ROWS — AND IT RECURRED IN MINUTES
+
+Four `holding` rows left by this session's own verification runs (their 1-minute windows
+ended before the +90 s exit came due) were cleaned up by booting their modes. **That
+re-created the exact condition and re-halted the chain**, and the mechanism is deterministic:
+
+```
+reconcileOnBoot reads the BORROWED holder's balance   (deliberate: asking OUR balance
+                                                       would report every hypothetical
+                                                       position as closed)
+  -> the borrowed holder usually still holds
+  -> the row becomes needs_exit
+  -> the sweep tries to sell a dead launch pool AS SOMEBODY ELSE
+  -> exhausts -> halt(), chain-wide
+```
+
+**So `stuck-rows-can-halt` was the wrong prerequisite.** It named seven rows; the condition
+is that **any dry run ending with an open position arms a landmine for its next boot.** It
+is renamed `dry-run-boot-halts-the-chain` and its closing condition is now section 4's open
+item — **automatic halts scoped to the mode that raised them** — not a one-off cleanup.
+
+#### AND A DRY-RUN ROW IS A SIMULATION, NOT A POSITION
+
+334 and 335 could be resolved by neither path: the unsellable route refused (their pools
+pay), and the boot sweep would exhaust and halt again. **They would have sat in
+`needs_exit` for ever with a chain-wide halt attached.**
+
+The way out is to stop treating them as positions. A dry-run row **was never broadcast, so
+we hold nothing** — and that is verified rather than assumed: `--simulated` reads OUR
+balance and requires zero, and refuses on a live mode by `isDryRunMode`. Both read 0 while
+their borrowed holders held 7.5e23 and 1.2e24, which is the whole point: **the borrowed
+holder's balance is evidence about the borrowed holder.** Resolved `closed_simulated`.
+
+#### FINAL STATE, ON A FRESH CONNECTION
+
+```
+the 7 rows        137 closed_unsellable | 141,144,153,157,158,162 closed_unfilled
+the 4 leftovers   333,338 closed_unsellable (actual=0) | 334,335 closed_simulated
+rows still HELD   RETURNED NO ROWS
+deployed capital  $0.00 over 0 positions
+kill switch       halted FALSE, reason names what was resolved and how
+```
+
+**The halt was cleared last, and only then** — the clearing guard refuses while any
+`needs_exit` row remains anywhere on the chain, which is why it had to be. It refused
+correctly when tried early.
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
@@ -3149,6 +3238,15 @@ category C.
   template. Noticed, recorded, not chased.
 - **The stored `hooks` values are one byte short** on rows written before that decoder
   was fixed. Deterministic, so grouping is unaffected.
+- **EVERY DRY RUN THAT ENDS WITH AN OPEN POSITION HALTS THE CHAIN AT ITS NEXT BOOT.**
+  Demonstrated twice on 2026-09-16, the second time within minutes of the first cleanup.
+  `reconcileOnBoot` reads the borrowed holder's balance — deliberately, so hypothetical
+  positions are not all reported closed — that holder usually still holds, the row becomes
+  `needs_exit`, and the sweep then tries to sell a dead launch pool as somebody else,
+  exhausts, and calls chain-wide `halt()`. **Until automatic halts are mode-scoped (section
+  4), a dry run must be left with no open position**, which in practice means running it
+  long enough for every position to reach its +90 s exit. `resolve-unsellable --simulated`
+  is the way out when one is stuck.
 - ~~Seven `exit_exhausted` rows are stranded in a status nothing sweeps~~ — **MIGRATED
   2026-09-16**, `exit_exhausted` 7 -> 0 and `needs_exit` 0 -> 7, all in mode
   `dry-run-r5`. What remains is not a defect but a consequence: **the next boot of
