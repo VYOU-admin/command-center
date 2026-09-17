@@ -642,14 +642,141 @@ to this bot.
 
 | id | what is missing | why arming anyway is unsafe |
 |---|---|---|
-| `sell-not-broadcast` | `exit-exec` simulates; no broadcaster is threaded through it | a live buy with a simulated sell opens positions the bot cannot close |
+| ~~`sell-not-broadcast`~~ | **CLOSED 2026-09-16** — the broadcaster is threaded through `exit-exec` and forwarded by both callers. See 2C. | — |
 | `approvals-not-executed` | neither setup transaction has ever run | without both allowances every exit reverts for a reason unrelated to the pool |
 | `fill-not-modelled` | `fill_status` is the literal `dry-run` | every return figure is mark-to-market; a live fill competes for the same block |
 | `stuck-rows-can-halt` | 7 `needs_exit` rows in `dry-run-r5` | the kill switch is chain-wide, so a dry-run boot failure would halt live trading |
 
+**THREE REMAIN, verified by running it:** `launchbot --live` exits 1 with
+*"REFUSING TO ARM IN LIVE MODE: 3 prerequisite(s) outstanding"* naming
+`approvals-not-executed`, `fill-not-modelled` and `stuck-rows-can-halt`.
+
 **An empty list does not mean the bot is safe**, and it is not a substitute for the
 operator's judgement — it means the things known to be missing are no longer missing.
 Section 7's categories B and C stay open regardless.
+
+### 2C. THE LADDER SENDS — `sell-not-broadcast` CLOSED 2026-09-16
+
+**The broadcaster is threaded through `exit-exec.ts` and forwarded by BOTH callers** — the
+boot sweep (`clearNeedsExit`) and the in-loop exit — so there is still ONE executor and
+one submission path. Nothing forks: the quote, the ladder, the bound, the calldata and the
+recording are the same objects in the same order, and the only difference is what happens
+after the simulation returns.
+
+#### THE LADDER CLIMBS ON SIMULATIONS AND SENDS ONLY THE RUNG THE POOL ACCEPTED
+
+Broadcasting each rung in turn is the obvious shape and it is worse in three ways:
+
+- **it pays gas for rungs that were always going to revert;**
+- **it loses the diagnosis.** A mined failure gives `status: 0` and nothing else, while an
+  `eth_call` gives the decoded `V4TooLittleReceived bound=… actual=…` that made these
+  numbers readable at all — the whole reason `revert-decode` had to be written;
+- **it turns every rung into an in-flight transaction**, which is the one failure the
+  ladder cannot safely retry.
+
+So the simulation runs **in live mode too** — free, fast, diagnostic — and only the
+accepted bound is signed and sent. The price is a race: the pool can move between the call
+and the broadcast, so a sent transaction can still revert. That is inherent, and it is
+handled rather than hidden — **a mined revert is an ordinary attempt failure and the ladder
+continues.**
+
+#### `ExitUnrecoverableError` — THE SAFETY PROPERTY THIS CHANGE REQUIRED
+
+**While `send` was an `eth_call`, every failure was safe to retry.** Nothing had been
+submitted, so climbing to a wider bound cost nothing. **Once `send` broadcasts, one failure
+mode stops being safe: a transaction whose outcome is unknown.** The ladder's ordinary
+behaviour would widen the bound and send a SECOND sell while the first may still be in
+flight — and two sells of one position is not a retry, it is a second position we do not
+have.
+
+So `send` now rejects in two distinguishable ways, and five conditions take the second:
+
+| condition | ladder | why |
+|---|---|---|
+| the simulation refused | **continues** | nothing was sent; the next rung is safe |
+| broadcast mined, `status: 0` | **continues** | settled, nothing in flight, the price moved between call and send |
+| **no receipt inside the timeout** | **STOPS** | the sell may still land. Neither confirmed nor failed. |
+| **the broadcast itself rejected** | **STOPS** | a throw is not proof nothing was sent — a transport error can arrive after the node accepted it |
+| **allowances do not cover the position** | **STOPS** | every rung fails identically; no bound fixes it. Nothing is sent. |
+| **`sellFrom` is not the signer** | **STOPS** | the simulation would be about another wallet while the broadcast is ours |
+| **`forceOptimism` set** | **STOPS** | a control that makes rungs fail on purpose must not touch real money |
+
+**The stop is RECORDED before it raises**, because that is the case a human has to
+reconstruct from the table afterwards.
+
+#### THREE THINGS THE WIRING HAD TO FIX RATHER THAN ASSUME
+
+**1. THE RECEIPT POLL NEEDED ITS OWN WAIT.** The in-loop caller passes a no-op for
+`ctx.wait` deliberately, so a dry run does not sleep 5 s between rungs. Had the receipt
+poll shared it, a live broadcast would have spun without delay against the endpoint —
+two different concerns behind one injection point, which is how a test control leaks into
+a live path.
+
+**2. BOTH CALLERS READ THE BORROWED HOLDER'S BALANCE.** `exit_sim_from` is the pool's
+first-swap sender, borrowed because in dry run we hold nothing. On a live path the balance
+to read and the account to sign as are both ours; getting that wrong would simulate
+someone else's ability to sell and then broadcast ours, with `amountIn` taken from their
+balance. Both callers now derive the seller from the broadcaster when one is present, and
+`executeExit` refuses if the two disagree — **the fix and the backstop, not one or the
+other.** Live also sells the WHOLE balance rather than capping at the stored quote, which
+is the documented rule the boot sweep already followed.
+
+**3. THE ALLOWANCE READS WERE INLINE IN `approve-setup`.** The exit path needs them, so
+they are extracted to `bot/allowance.ts` and both import `checkSellReadiness`. **The side
+that grants an allowance and the side that checks it disagreeing about sufficiency is how
+a bot sells into a revert it had already been told about** — and it would have been the
+eighth recorded instance of the two-implementations trap.
+
+#### THE DRILL: 10 OF 10, WITH A TEST DOUBLE, AND IT SAYS SO
+
+`npm run exit-broadcast-drill -- --commit`, on `chain='drill'`. No key exists, so the only
+way to run these branches is a **test double** in place of the broadcaster — and the drill
+prints what that proves and what it does not in its own output.
+
+```
+PASS  no broadcaster -> simulated, NOTHING sent            sent=0, 0 receipts polled
+PASS  live + simulation fails -> NOTHING sent, exhausts     sent=0
+PASS  live + simulation passes -> sent ONCE, status 1       filled on attempt 1
+PASS  live + status 0 -> ordinary failure, ALL RUNGS ran     sent=2 of 2
+PASS  live + NO RECEIPT -> UNRECOVERABLE, exactly ONE send  a second send here would be
+                                                            a second sell of one position
+PASS  live + broadcast rejects -> UNRECOVERABLE             attempted_sends=1
+PASS  live + allowances short -> UNRECOVERABLE, NOTHING sent
+PASS  live + sellFrom is a BORROWED holder -> refused        0 rpc calls at all
+PASS  live + forceOptimism -> refused
+PASS  the unrecoverable stop is RECORDED before it raises
+```
+
+**WHAT IT PROVES: the orchestration** — a simulation precedes every send, only the accepted
+rung is sent, a receipt decides, and an unconfirmed send stops the ladder at one
+transaction. **WHAT IT DOES NOT PROVE: signing, gas estimation, nonce handling, or the
+chain accepting our bytes.** Those stay untested until section 8's approval.
+
+#### THE DRILL'S FIRST RUN FOUND A DEFECT IN LIVE DATA, AND IT WAS NOT THE NEW CODE
+
+It failed 9 of 10 on *"the unrecoverable stop is RECORDED before it raises"* — 0 attempts
+found. The stop WAS recorded; it was recorded **under the wrong chain**.
+`exit-exec`'s attempt insert carried the literal `'robinhood'` rather than taking the chain
+from its caller, so a drill running on `chain='drill'` — and deleting `chain='drill'`
+afterwards — left **three orphan rows in the live chain's table**, one against trade id
+336, which is not a trade at all.
+
+**THAT MATTERS BECAUSE `bot_exit_attempts` IS A MEASUREMENT TABLE, NOT A LOG.** Run 4's
+rung table — *39 attempts across 17 trades, one rescued at rung 2* — was derived from these
+rows, so false rows there corrupt a future derivation rather than merely sitting around.
+
+`ExitExecContext.chain` is now **required rather than defaulted**, because a default is
+what made it possible: every caller already knows its chain, and one that does not should
+not be writing attempt rows. `npm run purge-orphan-attempts` removed what the defect had
+already written, reconciling **46 → 43 with 0 orphans remaining** — and **43 is exactly the
+legitimate count this document already records** (run 4's 39 plus the boot fixture's 4).
+
+**An orphan is defined by the JOIN, not by a date or a shape.** Deleting rows that "look
+like the drill's" would be a guess, and a guess that deletes a real attempt destroys
+evidence.
+
+**This is the drill earning its place on its first run**, and the defect it found was
+pre-existing rather than part of the change it was written to test.
 
 ### 2B. THE TWO SETUP TRANSACTIONS — `npm run approve-setup`
 
@@ -2773,6 +2900,9 @@ category C.
 ### C. Paths that exist and have never executed
 
 - **The impact term has fired twice in 66 live trades.** Effectively inert.
+- **NO EXIT HAS EVER BEEN BROADCAST.** The path exists and its orchestration is drilled,
+  but `bot_exit_attempts` contains no row whose detail came from a real receipt — every
+  attempt ever recorded is an `eth_call`.
 - **`quoteRefused` and `quoteReadFailed` are 0 across every run.** Both refusal branches
   are unexercised against live data.
 - **The nightly check has never delivered an alert.** Its thresholds have been exercised
@@ -2806,10 +2936,19 @@ category C.
   of 20) and confined statically (`check-live-gate`, over 132 files, proven able to fail),
   but **no line of the signing or broadcasting code has ever run against a real key**, and
   that stays true until section 8 step 5.
-- **`exit-exec` SIMULATES AND DOES NOT SEND, SO THE LIVE PATH IS DELIBERATELY INCOMPLETE.**
-  It is the single remaining code change that must precede a key (section 8 step 2), and
-  `bot/live-preflight.ts` refuses to arm while it is outstanding rather than leaving it to
-  a reader to notice.
+- ~~`exit-exec` simulates and does not send~~ — **CLOSED 2026-09-16.** The broadcaster is
+  threaded through and forwarded by both callers; the ladder climbs on simulations and
+  sends only the rung the pool accepted. Section 2C.
+- **THE SEND PATH IS PROVEN ONLY AGAINST A TEST DOUBLE.** `exit-broadcast-drill` is 10 of
+  10, and a double proves the ORCHESTRATION — simulation before send, one send per accepted
+  rung, a receipt deciding, an unconfirmed send stopping the ladder. **It proves nothing
+  about signing, gas estimation, nonce handling or the chain accepting our bytes.** No line
+  of `signer.ts` has run against a real key.
+- **THE RECEIPT TIMEOUT IS 60 SECONDS AND IS NOT MEASURED.** It is a bound chosen so the
+  poll terminates, not a figure derived from how long this chain takes to mine. At ~0.1 s
+  blocks it is many blocks, but the right value is whatever makes a false "no receipt"
+  rare, and that has never been measured. A false timeout is expensive: it stops the ladder
+  and leaves a position whose state must be reconciled by hand.
 - **The +450 s peak on the bot's own trades contradicts the offline holdout**, where
   +450 s is exactly 0.00000 in every window and both halves. Unresolved.
 - **THE REFUSED-TRADE MOMENTUM PATTERN IS A HYPOTHESIS.** Within the bot's 29 refused
@@ -2919,7 +3058,8 @@ gates; the bot cannot arm and no key exists.
 ### WHAT THE OPERATOR SUPPLIES — two things, and only the first is secret
 
 1. **A private key for `0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a`**, as
-   `BOT_PRIVATE_KEY`, 32 bytes of hex. `bot/signer.ts` is the only file that may read it
+   `BOT_PRIVATE_KEY`, 32 bytes of hex. **Step 2 below is now done, so nothing in the code
+   is waiting on anything but this.** `bot/signer.ts` is the only file that may read it
    and the build gate enforces that. **It must be the key for that exact address** — the
    signer refuses if it derives anything else, because every rail, balance read and
    reconciliation is about the configured address.
@@ -2939,7 +3079,7 @@ that should be made before step 3, not during it.
 | # | step | what it is | why it is here and not later |
 |---|---|---|---|
 | **1** | **Resolve the 7 stuck rows** | `dry-run-r5`'s `needs_exit` rows, via a boot of that mode or a scoped resolution | the kill switch is chain-wide: leave them and the first live run can be halted by a dry run's failure. Costs nothing and removes a whole class of confusion. |
-| **2** | **Close `sell-not-broadcast`** | thread the broadcaster through `exit-exec.ts` and `exit.ts` so the ladder SENDS | a live buy with a simulated sell opens positions the bot cannot close. **This is the one remaining code change that must precede a key**, and it must reuse the same executor the boot sweep uses. |
+| ~~**2**~~ | ~~Close `sell-not-broadcast`~~ | **DONE 2026-09-16** — the broadcaster is threaded through `exit-exec` and forwarded by both callers; 10 of 10 in `exit-broadcast-drill`. See 2C. | it was the one remaining code change that had to precede a key, and it is no longer outstanding |
 | **3** | **Supply the key** | `BOT_PRIVATE_KEY`, per the note above | after step 2, so the first thing the signer can be asked to do is already correct |
 | **4** | **Re-run the gates with the key present** | `npm run live-gate-drill` | case 6 becomes vacuous the moment a key exists and the drill SAYS SO. Everything else must still pass, and `--live` must still be refused by the prerequisites. |
 | **5** | **THE FIRST REAL TRANSACTION: a bounded approval** | `npm run approve-setup -- --token <a token already held> --live --commit` | see below |
