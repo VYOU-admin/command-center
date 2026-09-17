@@ -403,8 +403,17 @@ async function main(): Promise<void> {
       const { b, sent } = fakeBroadcaster(s);
       let out: Awaited<ReturnType<typeof executeExit>> | null = null;
       let raised = '';
-      try { out = await executeExit({ ...ctxBase, rpc, broadcaster: b }, base); }
-      catch (e) { raised = (e as Error).message; }
+      /*
+       * THIS CASE NEEDS A REAL DEADLINE AND THE OTHERS DO NOT. `ctxBase` carries
+       * `receiptTimeoutMs: 0` so the NO-RECEIPT case resolves in one poll; with zero
+       * there is no room for a retry to happen in, and this case would fail for the
+       * drill's own reason rather than the code's. The poll wait stays a no-op, so it
+       * spins through the three failures immediately rather than sleeping.
+       */
+      try {
+        out = await executeExit(
+          { ...ctxBase, receiptTimeoutMs: 5_000, rpc, broadcaster: b }, base);
+      } catch (e) { raised = (e as Error).message; }
       record('a receipt poll that THROWS 3x is RETRIED -> the exit still FILLS',
         out?.filled === true && sent.length === 1 && raised === '',
         `filled=${String(out?.filled)} sends=${sent.length} raised="${raised.slice(0, 50)}" `
