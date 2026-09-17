@@ -169,12 +169,14 @@ async function main(): Promise<void> {
         tokens_received: r.executed_out ?? `(quote ${r.quoted_out ?? 'null'})`,
         liquidity_at_entry: liqEntry === null ? 'UNREADABLE' : liqEntry.toString(),
         liquidity_now: liqNow === null ? 'UNREADABLE' : liqNow.toString(),
-        SELL_AT_BUY_BLOCK: atBuy === null ? 'n/a (no tokens)'
-          : `${atBuy.reason}${atBuy.ethOut === null ? '' : ` eth_out=${atBuy.ethOut}`}`
-            + `${atBuy.detail === null ? '' : ` [${atBuy.detail}]`}`,
-        SELL_AT_EXIT_BLOCK: atExit === null ? 'n/a'
-          : `${atExit.reason}${atExit.ethOut === null ? '' : ` eth_out=${atExit.ethOut}`}`
-            + `${atExit.detail === null ? '' : ` [${atExit.detail}]`}`,
+        BUY_BLOCK_price: atBuy === null ? 'n/a'
+          : `${atBuy.reason}${atBuy.ethOut === null ? '' : ` eth_out=${atBuy.ethOut}`}`,
+        BUY_BLOCK_would_execute: atBuy === null ? 'n/a'
+          : `${String(atBuy.executes)} (${atBuy.executeReason})`,
+        EXIT_BLOCK_price: atExit === null ? 'n/a'
+          : `${atExit.reason}${atExit.ethOut === null ? '' : ` eth_out=${atExit.ethOut}`}`,
+        EXIT_BLOCK_would_execute: atExit === null ? 'n/a'
+          : `${String(atExit.executes)} (${atExit.executeReason})`,
         eth_recovered: '0',
         still_held: balNow === null ? 'UNREADABLE' : balNow.toString(),
         stored_note: (r.note ?? '').slice(0, 110),

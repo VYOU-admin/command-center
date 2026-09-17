@@ -126,6 +126,26 @@ export async function simulateSellAt(
   },
 ): Promise<{
   ethOut: bigint | null; reason: string; detail: string | null;
+  /**
+   * WOULD THE SELL ACTUALLY EXECUTE — measured with a REACHABLE bound.
+   *
+   * **THE UNREACHABLE-`minOut` ORACLE CANNOT ANSWER THIS AND THAT WAS NOT KNOWN UNTIL
+   * 2026-09-17.** `SWAP_EXACT_IN_SINGLE` checks `amountOutMinimum` INSIDE the swap
+   * action and reverts `V4TooLittleReceived` there — before `SETTLE_ALL` pulls the
+   * token. So a bound of 2^127 short-circuits the call before any transfer runs, and a
+   * token that refuses every transfer reports a healthy price.
+   *
+   * PROVEN on CME at its own exit block, identical overrides, only the bound differing:
+   *
+   *     minOut = 2^127  ->  V4TooLittleReceived actual=4863353094845813
+   *     minOut = 1      ->  Error("TRANSFER_FROM_FAILED")
+   *     raw transfer    ->  Error("blacklisted")
+   *
+   * So the price and the executability are TWO measurements and both are taken. The
+   * reachable call runs the whole path including the settle; a honeypot reverts there
+   * and nowhere else.
+   */
+  executes: boolean | null; executeReason: string;
   balSlot: number | null; allowSlot: number | null; calls: number;
 }> {
   let calls = 0;
@@ -163,13 +183,10 @@ export async function simulateSellAt(
   if (balSlot === null || allowSlot === null) {
     return { ethOut: null, reason: 'slots_not_found',
       detail: `bal=${String(balSlot)} allow=${String(allowSlot)}`,
+      executes: null, executeReason: 'not_attempted',
       balSlot, allowSlot, calls };
   }
 
-  const tx = buildSwap({
-    pool: args.pool, zeroForOne: !args.zeroForOneBuy, amountIn: args.amount,
-    amountOutMinimum: UNREACHABLE, deadline: 0xffffffffffn,
-  });
   const p2slot = keccak256(concat([h32(UNIVERSAL_ROUTER),
     keccak256(concat([h32(token), mapSlot(owner, 1)]))]));
   const overrides = {
@@ -180,20 +197,46 @@ export async function simulateSellAt(
     } },
     [PERMIT2]: { stateDiff: { [p2slot]: h32((PERMIT2_EXPIRY << 160n) | MAXU160) } },
   };
+  const swapTx = (minOut: bigint): string => buildSwap({
+    pool: args.pool, zeroForOne: !args.zeroForOneBuy, amountIn: args.amount,
+    amountOutMinimum: minOut, deadline: 0xffffffffffn,
+  }).data;
+
+  /* ---- 1. THE PRICE, from the unreachable bound ------------------------- */
+  let ethOut: bigint | null = null;
+  let reason = 'reverts';
+  let detail: string | null = null;
   try {
-    await call([{ from: owner, to: tx.to, data: tx.data, value: '0x0' },
-      args.block, overrides]);
-    return { ethOut: null, reason: 'returned_unexpectedly', detail: null,
-      balSlot, allowSlot, calls };
+    await call([{ from: owner, to: UNIVERSAL_ROUTER, data: swapTx(UNREACHABLE),
+      value: '0x0' }, args.block, overrides]);
+    reason = 'returned_unexpectedly';
   } catch (err) {
     const d = decode(err);
     if (d.kind === 'v4_too_little' && d.actual !== undefined) {
-      return { ethOut: d.actual, reason: d.actual === 0n ? 'pays_zero' : 'ok',
-        detail: null, balSlot, allowSlot, calls };
-    }
-    return { ethOut: null, reason: 'reverts', detail: `${d.kind}: ${d.text}`,
-      balSlot, allowSlot, calls };
+      ethOut = d.actual;
+      reason = d.actual === 0n ? 'pays_zero' : 'ok';
+    } else detail = `${d.kind}: ${d.text}`;
   }
+
+  /* ---- 2. WOULD IT EXECUTE, from a REACHABLE bound ---------------------- */
+  /*
+   * A bound of 1 lets the swap action pass its own check, so execution continues into
+   * SETTLE_ALL — the step that actually pulls the token and the ONLY step a honeypot
+   * refuses. This is the measurement the unreachable bound cannot make.
+   */
+  let executes: boolean | null = null;
+  let executeReason = 'unknown';
+  try {
+    await call([{ from: owner, to: UNIVERSAL_ROUTER, data: swapTx(1n), value: '0x0' },
+      args.block, overrides]);
+    executes = true; executeReason = 'ok';
+  } catch (err) {
+    const d = decode(err);
+    executes = false;
+    executeReason = `${d.kind}: ${d.text}`.slice(0, 120);
+  }
+
+  return { ethOut, reason, detail, executes, executeReason, balSlot, allowSlot, calls };
 }
 
 /**
