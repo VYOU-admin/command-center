@@ -65,7 +65,8 @@
     "revert-economics": "node dist/cli/revert-economics.js",
     "check-live-gate": "node scripts/check-live-gate.mjs",
     "live-gate-drill": "node dist/cli/live-gate-drill.js",
-    "approve-setup": "node dist/cli/approve-setup.js"
+    "approve-setup": "node dist/cli/approve-setup.js",
+    "exit-broadcast-drill": "node dist/cli/exit-broadcast-drill.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

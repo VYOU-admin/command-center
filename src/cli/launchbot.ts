@@ -178,7 +178,8 @@ async function main(): Promise<void> {
       log.info('boot reconciliation', { ...rec, wallet_configured: wallet !== null });
 
       /* ---- 3. EXIT EVERY STUCK POSITION, BEFORE ARMING --------------------- */
-      const cleared = await clearNeedsExit(c, rpc, CHAIN, MODE, { forceOptimism });
+      const cleared = await clearNeedsExit(c, rpc, CHAIN, MODE,
+        { forceOptimism: broadcaster === null ? forceOptimism : 1, broadcaster });
       log.info('boot needs_exit sweep', { ...cleared });
     } finally { c.release(); }
   }
@@ -276,14 +277,34 @@ async function main(): Promise<void> {
             [d.id]);
           continue;
         }
-        /* The amount is what the borrowed holder actually holds, read from the chain. */
+        /*
+         * WHO SELLS, AND THEREFORE WHOSE BALANCE IS READ.
+         *
+         * In dry run this is the BORROWED holder — the pool's first-swap sender — because
+         * we hold nothing. **With a broadcaster it must be OUR OWN address**, or the
+         * simulation would be about a different wallet's ability to sell while the
+         * broadcast was signed by ours. `executeExit` guards this too and refuses; the
+         * guard is the backstop, this is the fix.
+         */
+        const seller = broadcaster === null ? d.exit_sim_from : broadcaster.address;
+
+        /* The amount is what the SELLER actually holds, read from the chain. */
         let sellAmt: bigint;
         try {
-          const balData = BALANCE_OF_SEL + '0'.repeat(24) + d.exit_sim_from.slice(2);
+          const balData = BALANCE_OF_SEL + '0'.repeat(24) + seller.slice(2);
           const bal = BigInt(String(await rpc.call('eth_call',
             [{ to: d.token, data: balData }, 'latest'])));
           const wanted = BigInt(d.quoted_out ?? '0');
-          sellAmt = bal === 0n ? 0n : (wanted > 0n && wanted < bal ? wanted : bal);
+          /*
+           * DRY RUN caps at the position we expected, because a borrowed holder may hold
+           * far more than our size and simulating theirs would measure the wrong trade.
+           * LIVE sells the WHOLE BALANCE — the documented rule is that the amount sold is
+           * the balance read from the chain and never the stored quote, because a quote is
+           * what we expected and a balance is what is there.
+           */
+          sellAmt = broadcaster !== null
+            ? bal
+            : (bal === 0n ? 0n : (wanted > 0n && wanted < bal ? wanted : bal));
         } catch (e) {
           stats.exitNotAttempted += 1;
           await c.query(
@@ -303,12 +324,22 @@ async function main(): Promise<void> {
 
         try {
           const outcome = await executeExit(
-            { rpc, client: c, forceOptimism, wait: async (): Promise<void> => {} },
+            {
+              rpc, client: c, broadcaster,
+              /*
+               * `forceOptimism` is a dry-run test control and `executeExit` REFUSES it
+               * alongside a broadcaster, so it is passed as 1 on a live path rather than
+               * relying on the operator never combining the two.
+               */
+              forceOptimism: broadcaster === null ? forceOptimism : 1,
+              /* The LADDER interval only. The receipt poll has its own wait. */
+              wait: async (): Promise<void> => {},
+            },
             {
               tradeId: d.id, poolId: d.pool_id, token: d.token, counter: d.counter,
               fee: d.fee, tickSpacing: d.tick_spacing, hooks: d.hooks,
               amountIn: sellAmt, firstSwapBlock: Number(d.first_swap_block),
-              sellFrom: d.exit_sim_from,
+              sellFrom: seller,
             },
           );
           stats.exitClean += 1;

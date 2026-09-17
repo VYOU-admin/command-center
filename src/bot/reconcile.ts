@@ -112,7 +112,17 @@ export async function reconcileOnBoot(
  */
 export async function clearNeedsExit(
   c: PoolClient, rpc: ExitRpc, chain: string, mode: string,
-  ctx: { forceOptimism?: number; wait?: (ms: number) => Promise<void> } = {},
+  /*
+   * `broadcaster` IS FORWARDED RATHER THAN CREATED HERE. `createBroadcaster` is the only
+   * way to obtain one and it refuses outside live mode, so this module cannot acquire the
+   * ability to send — it can only pass on what the boot sequence already decided. That
+   * keeps the boot sweep and the in-loop exit on ONE executor with one submission path.
+   */
+  ctx: {
+    forceOptimism?: number;
+    wait?: (ms: number) => Promise<void>;
+    broadcaster?: import('./signer.js').Broadcaster | null;
+  } = {},
 ): Promise<{ found: number; exited: number; filledOn: number[] }> {
   const rows = await c.query<{
     id: string; pool_id: string; token: string; counter: string; fee: number;
@@ -137,7 +147,15 @@ export async function clearNeedsExit(
   let exited = 0;
 
   for (const r of rows.rows) {
-    const sellFrom = r.exit_sim_from;
+    /*
+     * WITH A BROADCASTER, THE SELLER IS US — not the stored borrowed holder.
+     *
+     * `exit_sim_from` is the address the dry-run simulation borrowed because we hold
+     * nothing of the token. On a live path the balance to read and the account to sign as
+     * are both ours, and `executeExit` refuses if the two disagree — so getting this
+     * wrong would stop the boot sweep rather than sell someone else's position.
+     */
+    const sellFrom = ctx.broadcaster?.address ?? r.exit_sim_from;
     if (!sellFrom) {
       /* No address to sell as is not a reason to skip — it is a reason to stop. */
       await halt(c, chain, `needs_exit trade ${r.id} has no address to exit from`);

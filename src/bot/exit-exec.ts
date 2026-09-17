@@ -24,9 +24,9 @@
  * WHAT "SIMULATED" MEANS HERE, STATED SO IT IS NOT MISREAD LATER
  * ---------------------------------------------------------------------------
  *
- * In dry run nothing is broadcast: `send` is an `eth_call`, and `ReadOnlyRpc` refuses
- * every signing and broadcast method by name. The `from` address is supplied by the
- * caller because **the two callers borrow different addresses and for different
+ * With no broadcaster nothing is broadcast: `send` is an `eth_call`, and `ReadOnlyRpc`
+ * refuses every signing and broadcast method by name. The `from` address is supplied by
+ * the caller because **the two callers borrow different addresses and for different
  * reasons**, and conflating them would make the result unreadable:
  *
  *   - the in-loop exit borrows the pool's first-swap sender, because we do not hold the
@@ -36,15 +36,46 @@
  * Both are recorded per attempt. A clean simulation from a borrowed holder proves the
  * pool accepts the sell and the calldata is well formed; it does NOT prove our own
  * approval state, which section 2 measures separately.
+ *
+ * ---------------------------------------------------------------------------
+ * THE LIVE PATH: SIMULATE FIRST, ALWAYS, THEN BROADCAST THE RUNG THAT PASSED
+ * ---------------------------------------------------------------------------
+ *
+ * Added 2026-09-16, closing `sell-not-broadcast`. **Nothing forks.** The quote, the
+ * ladder, the bound, the calldata and the recording are the same objects and the same
+ * order on both paths; the ONLY difference is what happens after the simulation returns.
+ *
+ * **THE SIMULATION HAPPENS IN LIVE MODE TOO, AND THAT IS A DESIGN DECISION RATHER THAN
+ * LEFTOVER DRY-RUN CODE.** Broadcasting each rung in turn would be the obvious shape and
+ * it is worse in three ways:
+ *
+ *   - it pays gas for rungs that were always going to revert;
+ *   - it loses the diagnosis. A mined failure gives `status: 0` and nothing else, while
+ *     an `eth_call` gives the decoded `V4TooLittleReceived bound=… actual=…` that made
+ *     these numbers readable in the first place;
+ *   - it turns every rung into an in-flight transaction, which is the one failure mode
+ *     the ladder cannot safely retry.
+ *
+ * So the ladder climbs on simulations — free, fast, diagnostic — and only the bound the
+ * pool has just accepted is signed and sent. The price is a race: the pool can move
+ * between the call and the broadcast, so a sent transaction can still revert. That is
+ * inherent and it is handled rather than hidden — a mined revert is an ordinary attempt
+ * failure and the ladder continues.
+ *
+ * **A BROADCAST WHOSE RECEIPT NEVER ARRIVES STOPS THE LADDER.** It raises
+ * `ExitUnrecoverableError`, so no second sell is sent against a position that may already
+ * have been sold. Boot reconciliation against the chain is what settles it.
  */
 import { AbiCoder, id } from 'ethers';
 import { buildSwap } from './calldata.js';
 import { quote } from './quote.js';
 import type { PoolTick } from './quote.js';
 import { swapAmounts, tokenPrice } from './price.js';
-import { boundForAttempt, boundedMinOut, exitWithRetry } from './exit.js';
+import { ExitUnrecoverableError, boundForAttempt, boundedMinOut, exitWithRetry } from './exit.js';
 import type { ExitAttempt, ExitOutcome, ExitQuote } from './exit.js';
 import { POOL_MANAGER, UNIVERSAL_ROUTER } from './config.js';
+import { checkSellReadiness } from './allowance.js';
+import type { Broadcaster } from './signer.js';
 import { TOPICS } from '../adapters/token-updates/decode.js';
 import { log } from '../logger.js';
 import type { PoolClient } from '../store/db.js';
@@ -85,7 +116,34 @@ export interface ExitExecContext {
   forceOptimism?: number;
   /** Injected so a drill does not wait the real interval. */
   wait?: (ms: number) => Promise<void>;
+  /**
+   * PRESENT ONLY IN LIVE MODE. `createBroadcaster` is the sole way to obtain one and it
+   * refuses outside live mode and refuses without a key, so `null` here is not a
+   * configuration choice this module makes — it is the mode's decision arriving.
+   *
+   * When null, `send` simulates and nothing is broadcast. When present, `send` simulates
+   * AND THEN broadcasts the bound the simulation accepted.
+   */
+  broadcaster?: Broadcaster | null;
+  /**
+   * How long to wait for a receipt before the outcome is UNKNOWN. A bound is required:
+   * waiting for ever leaves a position open with a process attached to it, and treating a
+   * slow receipt as a failure would send a second sell.
+   */
+  receiptTimeoutMs?: number;
+  /** Injected so a drill can drive the receipt poll without real time. */
+  now?: () => number;
+  /**
+   * The RECEIPT POLL's wait, separate from `wait` (the ladder interval) on purpose. The
+   * in-loop caller passes a no-op ladder wait so a dry run does not sleep between rungs;
+   * if the receipt poll shared it, a live broadcast would spin without delay.
+   */
+  pollWait?: (ms: number) => Promise<void>;
 }
+
+/** Default receipt wait. At ~0.1 s blocks this is many blocks, not a tight race. */
+const RECEIPT_TIMEOUT_MS = 60_000;
+const RECEIPT_POLL_MS = 1_000;
 
 /** The pool's observed swaps up to `toBlock`. One filtered eth_getLogs, 60 CU. */
 export async function readPoolTicks(
@@ -124,6 +182,47 @@ export async function executeExit(
 ): Promise<ExitOutcome> {
   const tokenIsCurrency0 = pos.token.toLowerCase() < pos.counter.toLowerCase();
   const optimism = ctx.forceOptimism ?? 1;
+  const bcast = ctx.broadcaster ?? null;
+  const nowMs = ctx.now ?? ((): number => Date.now());
+  /*
+   * THE RECEIPT POLL HAS ITS OWN WAIT, AND SHARING `ctx.wait` WOULD HAVE BEEN A DEFECT.
+   *
+   * `ctx.wait` is the LADDER INTERVAL, and the in-loop caller passes a no-op for it
+   * deliberately so a dry run does not sleep 5 s between rungs. Reusing it here would
+   * make the receipt poll a busy loop hammering the endpoint the moment sends became
+   * real — two different concerns behind one injection point, which is the shape that
+   * makes a test control leak into a live path.
+   */
+  const pollWait = ctx.pollWait ?? ((ms: number): Promise<void> =>
+    new Promise((r) => { setTimeout(r, ms); }));
+
+  /*
+   * THE SIMULATION MUST RUN AS THE ACCOUNT THAT WILL SEND.
+   *
+   * `sellFrom` is a BORROWED address on the dry-run path — the pool's first-swap sender,
+   * because we hold nothing — and that is exactly what must never happen once sends are
+   * real: it would simulate someone else's ability to sell and then broadcast ours, and
+   * `amountIn` is derived from whoever `sellFrom` is. The guard makes a caller that
+   * forgot to switch it fail here rather than at the router.
+   */
+  if (bcast !== null && pos.sellFrom.toLowerCase() !== bcast.address.toLowerCase()) {
+    throw new ExitUnrecoverableError('LIVE EXIT MISCONFIGURED: the simulation would run '
+      + `as ${pos.sellFrom} while the broadcast would be signed by ${bcast.address}. `
+      + 'A live sell must simulate and send as the SAME account — otherwise the '
+      + 'simulation is about a different wallet and amountIn is someone else\'s balance. '
+      + 'Nothing was broadcast.');
+  }
+
+  /*
+   * THE TEST CONTROL CANNOT REACH A LIVE PATH. `--force-exit-optimism` deliberately
+   * inflates the re-quote so the early rungs must miss; on a broadcasting path that would
+   * mean deliberately signing a bound we expect to fail.
+   */
+  if (bcast !== null && optimism !== 1) {
+    throw new ExitUnrecoverableError(`forceOptimism ${optimism} is a DRY-RUN TEST CONTROL `
+      + 'and cannot be combined with a live broadcaster: it exists to make rungs fail on '
+      + 'purpose, which is not something to do with real money. Nothing was broadcast.');
+  }
 
   const deps = {
     /* RE-QUOTED PER ATTEMPT, FROM THE POOL'S STATE NOW. */
@@ -160,16 +259,21 @@ export async function executeExit(
         amountIn: pos.amountIn, amountOutMinimum: q.amountOutMinimum,
         deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
       });
+
+      /* ---- STEP 1: SIMULATE. ON BOTH PATHS, ALWAYS. ----------------------- */
       try {
         const r = await ctx.rpc.call('eth_call', [{
           from: pos.sellFrom, to: UNIVERSAL_ROUTER, value: '0x0', data: tx.data,
         }, 'latest']);
-        return `returned ${String(r).slice(0, 18)}`;
+        if (bcast === null) return `returned ${String(r).slice(0, 18)}`;
       } catch (err) {
         /*
          * DECODE THE REVERT RATHER THAN RECORDING "execution reverted".
          * A bare message is not a measurement — it is what made the first exit numbers
-         * unreadable until `revert-decode` was written.
+         * unreadable until `revert-decode` was written. This is also why the simulation
+         * runs in live mode: a mined failure gives `status: 0` and nothing else.
+         *
+         * An ORDINARY rejection: nothing was sent, so the next rung is safe.
          */
         const e = err as Error & { data?: unknown };
         const d = (e as { data?: unknown }).data;
@@ -179,6 +283,83 @@ export async function executeExit(
           throw new Error(`V4TooLittleReceived bound=${mn} actual=${got}`);
         }
         throw new Error(e.message.slice(0, 160));
+      }
+
+      /* ---- STEP 2: THE ALLOWANCES, BEFORE ANY GAS IS SPENT ---------------- */
+      /*
+       * The simulation ran as `pos.sellFrom`, which the guard above has already proved is
+       * the broadcaster's own address — so this asks about the account that will actually
+       * send. `checkSellReadiness` is shared with `approve-setup`, so the side that grants
+       * and the side that checks cannot disagree.
+       *
+       * UNRECOVERABLE, not an ordinary failure: every rung would fail identically, so
+       * climbing the ladder would waste the remaining attempts on a problem no bound can
+       * fix. Nothing has been sent at this point.
+       */
+      const ready = await checkSellReadiness(
+        ctx.rpc, pos.token, bcast.address, UNIVERSAL_ROUTER, pos.amountIn,
+        Math.floor(nowMs() / 1000),
+      );
+      if (!ready.ready) {
+        throw new ExitUnrecoverableError('CANNOT SELL — the approvals do not cover this '
+          + `position: ${ready.reason} Nothing was broadcast.`);
+      }
+
+      /* ---- STEP 3: BROADCAST THE BOUND THE POOL JUST ACCEPTED ------------- */
+      let hash: string;
+      try {
+        hash = await bcast.send({
+          to: UNIVERSAL_ROUTER, data: tx.data, value: 0n,
+          description: `EXIT trade ${pos.tradeId} minOut=${q.amountOutMinimum}`,
+        });
+      } catch (err) {
+        /*
+         * A REJECTED BROADCAST IS UNRECOVERABLE, because "the send threw" does not
+         * establish that nothing was sent. A transport error can arrive after the node
+         * already accepted the transaction — `signer.send` says exactly this about an
+         * unreadable result — and a second sell against a position that may be gone is
+         * the outcome this class exists to prevent.
+         */
+        throw new ExitUnrecoverableError('BROADCAST FAILED AND THE OUTCOME IS NOT '
+          + `ESTABLISHED: ${(err as Error).message.slice(0, 160)}. A transaction may or `
+          + 'may not be in flight; reconcile against the chain before selling again.');
+      }
+      log.warn('EXIT BROADCAST', {
+        trade: pos.tradeId, hash, min_out: q.amountOutMinimum.toString(),
+      });
+
+      /* ---- STEP 4: THE RECEIPT DECIDES, AND AN ABSENT ONE IS NOT A FAILURE - */
+      const deadline = nowMs() + (ctx.receiptTimeoutMs ?? RECEIPT_TIMEOUT_MS);
+      for (;;) {
+        const rec = (await ctx.rpc.call('eth_getTransactionReceipt', [hash])) as
+          { status?: string; blockNumber?: string } | null;
+        if (rec !== null && rec !== undefined && rec.status !== undefined) {
+          const status = Number(BigInt(rec.status));
+          if (status === 1) {
+            return `BROADCAST FILLED ${hash} in block `
+              + `${rec.blockNumber === undefined ? '?' : Number(BigInt(rec.blockNumber))}`;
+          }
+          /*
+           * MINED AND REVERTED. This IS an ordinary failure: the transaction is settled,
+           * nothing is in flight, and the next rung is safe to try. The price moved
+           * between the call and the broadcast, which is the race this design accepts.
+           */
+          throw new Error(`broadcast ${hash} MINED AND REVERTED (status 0) — the pool `
+            + 'moved between the simulation and the send');
+        }
+        if (nowMs() >= deadline) {
+          /*
+           * NO RECEIPT. The transaction is neither confirmed nor known to have failed, so
+           * the position's state is UNKNOWN. This must not advance the ladder and must
+           * not be recorded as a failure — both would be a plausible value on an error
+           * path, and the second would send another sell.
+           */
+          throw new ExitUnrecoverableError(`NO RECEIPT for ${hash} after `
+            + `${ctx.receiptTimeoutMs ?? RECEIPT_TIMEOUT_MS} ms. THE POSITION STATE IS `
+            + 'UNKNOWN: the sell may still land. The ladder has STOPPED and no second '
+            + 'transaction was sent. Boot reconciliation against the chain settles this.');
+        }
+        await pollWait(RECEIPT_POLL_MS);
       }
     },
 
@@ -201,6 +382,7 @@ export async function executeExit(
   const outcome = await exitWithRetry(deps, pos.poolId);
   log.info('EXIT COMPLETE', {
     trade: pos.tradeId, pool: pos.poolId.slice(0, 18),
+    path: bcast === null ? 'SIMULATED — nothing broadcast' : `BROADCAST as ${bcast.address}`,
     filled_on_attempt: outcome.filledOn,
     bound_that_cleared: outcome.filledOn ? boundForAttempt(outcome.filledOn) : null,
     attempts: outcome.attempts.length,

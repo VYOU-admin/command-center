@@ -44,16 +44,14 @@ export interface Prerequisite {
  * category A item.
  */
 export const LIVE_PREREQUISITES: readonly Prerequisite[] = [
-  {
-    id: 'sell-not-broadcast',
-    what: 'the SELL leg is simulated, never broadcast: `exit-exec` calls `eth_call` and '
-      + 'no broadcaster is threaded through it',
-    why: 'a live BUY with a simulated SELL opens real positions the bot cannot close. '
-      + 'That is worse than not trading: an unsellable position is not a loss of some '
-      + 'size, it is an unbounded one.',
-    closedBy: 'threading the broadcaster through `exit-exec.ts` and `exit.ts` so the '
-      + 'ladder sends rather than simulates, with the SAME executor the boot sweep uses',
-  },
+  /*
+   * `sell-not-broadcast` WAS HERE AND IS CLOSED — 2026-09-16.
+   *
+   * The broadcaster is threaded through `exit-exec.ts` and forwarded by BOTH callers, so
+   * the ladder sends. It is removed rather than struck through because this list is read
+   * by code and a commented-out entry would either still refuse or quietly stop
+   * refusing; LAUNCHBOT.md section 6 carries what it was and what closed it.
+   */
   {
     id: 'approvals-not-executed',
     what: 'neither setup transaction has ever been executed — token -> Permit2 and '

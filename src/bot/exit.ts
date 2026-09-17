@@ -73,10 +73,46 @@ export function boundedMinOut(expectedOut: bigint, boundBps: number): bigint {
   return out;
 }
 
+/**
+ * A FAILURE THAT MUST STOP THE LADDER RATHER THAN ADVANCE IT.
+ *
+ * **THIS IS THE MOST DANGEROUS THING IN THE EXIT PATH AND IT ONLY EXISTS ONCE SENDS ARE
+ * REAL.** While `send` was an `eth_call`, every failure was safe to retry: nothing had
+ * been submitted, so climbing to a wider bound cost nothing. Once `send` BROADCASTS, one
+ * failure mode stops being safe — **a transaction that was sent and whose outcome is
+ * unknown.** The ladder's ordinary behaviour would widen the bound and send a SECOND sell
+ * while the first may still be in flight, and two sells of one position is not a retry,
+ * it is a second position we do not have.
+ *
+ * So `send` may reject in two distinguishable ways:
+ *
+ *   - an ORDINARY rejection — the simulation refused, or a broadcast was mined and
+ *     reverted. Nothing is in flight and the next rung is safe.
+ *   - an `ExitUnrecoverableError` — something was sent and its result is not established,
+ *     or a precondition makes every rung fail identically. The ladder stops AT ONCE and
+ *     rethrows, leaving the chain to adjudicate through boot reconciliation.
+ *
+ * It rethrows rather than returning a status for the reason property 2 already gives: a
+ * caller that ignored a status field would carry on, and this is precisely the case where
+ * carrying on spends money twice.
+ */
+export class ExitUnrecoverableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExitUnrecoverableError';
+  }
+}
+
 export interface ExitDeps {
   /** Re-quote the pool at the CURRENT state. Must not reuse the entry quote. */
   quote: (attempt: number, boundBps: number) => Promise<ExitQuote>;
-  /** Submit or simulate. Resolves on success, REJECTS with the reason on failure. */
+  /**
+   * Submit or simulate. Resolves on success, REJECTS with the reason on failure.
+   *
+   * Reject with `ExitUnrecoverableError` when something was SENT and its outcome is not
+   * established, or when a precondition makes every rung fail identically. The ladder
+   * then stops instead of advancing.
+   */
   send: (q: ExitQuote, attempt: number) => Promise<string>;
   /** Persist one attempt before the next begins. */
   record: (a: ExitAttempt) => Promise<void>;
@@ -115,8 +151,25 @@ export async function exitWithRetry(deps: ExitDeps, poolId: string): Promise<Exi
         detail: (err as Error).message.slice(0, 200),
       };
       attempts.push(rec);
-      /* RECORDED BEFORE THE NEXT ATTEMPT, so a replaced container inherits the trail. */
+      /* RECORDED BEFORE THE NEXT ATTEMPT, so a replaced container inherits the trail.
+       * Recorded for an unrecoverable failure TOO, and before the rethrow, because that
+       * is the case a human will have to reconstruct from the table. */
       await deps.record(rec);
+
+      if (err instanceof ExitUnrecoverableError) {
+        /*
+         * STOP. Do not widen, do not send again. Something is in flight or every rung
+         * would fail the same way, and the next rung would be a second transaction
+         * against one position.
+         */
+        log.error('EXIT STOPPED — UNRECOVERABLE, THE LADDER DID NOT ADVANCE', {
+          pool: poolId, attempt: n, boundBps, reason: rec.detail,
+          note: 'the position state is NOT established by this outcome; boot '
+            + 'reconciliation against the chain is what settles it',
+        });
+        throw err;
+      }
+
       log.warn('EXIT ATTEMPT FAILED', {
         pool: poolId, attempt: n, boundBps, of: EXIT_RETRY.MAX_ATTEMPTS,
         reason: rec.detail,
