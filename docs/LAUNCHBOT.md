@@ -1064,6 +1064,241 @@ round-trip table in section 6 as a measured line rather than an external one.
 minutes old, so no allowance can predate the buy; the only way to pay it less often is an
 unlimited allowance, which section 2B refuses for reasons that have nothing to do with cost.
 
+### 2E. THE PRE-BUY SELLABILITY CHECK — SPECIFIED 2026-09-17, NOT YET BUILT
+
+**THIS IS A SPECIFICATION AND THE CODE DOES NOT IMPLEMENT ANY OF IT.** Written after
+CME cost $10, and written first per rule 2. It is listed in section 7C as a path that
+does not exist, and it must stay there until the code and its drill exist. **The
+feasibility measurements below were taken; the check itself was not built.**
+
+**NOTHING IN THE RULE ASKED WHETHER A TOKEN COULD BE SOLD BEFORE BUYING IT.** The entry rule
+is a launchpad, a fee tier and a creation-to-first-swap gap. The exit is simulated at +90 s
+from a BORROWED holder, which is ninety seconds after the money is committed. CME
+(`0x9261e120400445635590c15e632d6514dfe8fea8`, trade 614) is what that costs: every transfer
+path reverts `Error("blacklisted")`, the buy succeeded, and the position cannot be sold by us
+or by anyone else who bought it.
+
+**THE BUY LEG AND THE SELL LEG WERE NEVER THE SAME QUESTION, AND THE RULE ONLY EVER ASKED THE
+FIRST.** A honeypot is precisely a token where the first succeeds and the second cannot.
+
+#### THE RESEARCH FIRST, BECAUSE THE DESIGN HAD TO COME OUT OF IT
+
+**PREVALENCE IS NOT A TAIL RISK.** *Why Trick Me: The Honeypot Traps on Decentralized
+Exchanges* (arXiv 2309.13501) sampled **10,000 random Uniswap V2/V3 pools and found 8,443
+abnormal** — traders "can exchange valuable assets for fraudulent tokens in liquidity pools
+but are unable to exchange them back". Whatever definition sits behind that 84%, it places
+CME inside the normal case for a random launch pool rather than outside it.
+
+**THE FULL TAXONOMY, AND WHAT A PRE-BUY SIMULATION CAN DO ABOUT EACH.** GoPlus's token
+security schema is the most complete field enumeration available and is used here as the
+checklist rather than anybody's recollection:
+
+| mechanism | what the seller experiences | pre-buy simulation? |
+|---|---|---|
+| **blacklist** (`is_blacklisted`) | our address is refused on transfer | **YES** |
+| **whitelist-only** (`is_whitelisted`) | only privileged addresses may sell | **YES** |
+| **transfer disabled / pausable** (`transfer_pausable`) | `setTrading(false)`, `pause()` | **YES while off — NO once flipped later** |
+| **`cannot_sell_all`** | part of the balance sells, the whole balance does not | **ONLY AT FULL SIZE** |
+| **anti-whale / max-tx / max-wallet** (`is_anti_whale`) | a cap below our position | **ONLY AT FULL SIZE** |
+| **dynamic sell tax** (`slippage_modifiable`) | the tax is raised to 90–100% later | **NO** |
+| **PER-ADDRESS tax** (`personal_slippage_modifiable`) | a tax set for OUR address alone | **NO** |
+| **trading cooldown** (`trading_cooldown`) | a wait keyed to OUR purchase | **NO** |
+| **upgradeable proxy** (`is_proxy`) | implementation swapped after we are in | **PARTLY** — proxy-ness is visible, the swap is not |
+| **`owner_change_balance`** | our balance is rewritten | **NO** |
+| **mintable** (`is_mintable`) | dilution | **NO** |
+| **`external_call`** | sell behaviour depends on a contract that can change | **NO** |
+| **liquidity removal** | the pool pays nothing | **NO** — and it is not a token property |
+| **`can_take_back_ownership`, `hidden_owner`, `selfdestruct`** | ownership reappears | **NO** |
+
+**THE TWO THAT NEITHER THE OPERATOR NOR I NAMED, AND THEY ARE THE IMPORTANT HALF:**
+
+**1. `cannot_sell_all` IS A SEPARATE FLAG FROM `is_honeypot`, AND IT DEFEATS A SMALL-SIZE
+CHECK BY CONSTRUCTION.** GoPlus carries it as its own field precisely because a contract can
+permit a partial sale and refuse a complete one. **A check that passes on one raw unit and
+fails on the real position is worse than no check**, because it converts an unknown into a
+false assurance. OpenLiquid's guide describes the same shape from the seller's side: *"you
+can technically sell, but only fractions of a cent."* This is why the check below simulates
+the FULL expected position size and why the operator required it.
+
+**2. `personal_slippage_modifiable` — THE "SNIPER" TOKEN — SETS A TAX FOR ONE ADDRESS, AND
+CHOOSES THE ADDRESS AFTER IT BUYS.** GoPlus added the field in v1.1.12 after finding
+contracts with a function that sets a per-address transaction tax so that *"trades on these
+addresses cannot be implemented"*. Their description of who gets chosen is the part that
+matters: **"large coin holders are often set to a separate high tax rate"**, while the owner
+keeps the ability to pull liquidity.
+
+**NO PRE-BUY SIMULATION CAN SEE THIS, AND THE REASON IS STRUCTURAL: THE PENALTY DOES NOT
+EXIST FOR US UNTIL WE HOLD.** It is also the one mechanism where our own position size is a
+RISK FACTOR rather than merely a detection parameter. At $10 the bot is nobody's large
+holder, which is a mitigation by accident rather than by design, and it is recorded as an
+accident so that raising the position size is understood to raise this exposure with it.
+
+**AND THE CLASS THAT DEFEATS ANY PRE-BUY CHECK AT ALL: DELAYED ACTIVATION.** Multiple
+sources describe contracts that behave normally for the first N buys and then flip a switch
+that blocks sells — a timed blacklist keyed on block height or timestamp, a `setTrading(false)`
+kill switch pulled once liquidity has accumulated, or a sell tax raised to 100% after enough
+buyers are in. **The verdict at T0 is correct and then stops being correct.** A proxy makes
+it cheaper still: the bytecode a checker reads is benign and the implementation behind the
+`delegatecall` is swappable at will.
+
+**CME IS 181 BYTES OF CODE — A PROXY.** That was measured before the research, and the
+research says what it means: the contract we could have inspected was not the contract that
+refused us.
+
+**SO, STATED BEFORE ANY OF IT IS BUILT, WHAT THIS CHECK BUYS:**
+
+- It catches what is TRUE AT BUY TIME: blacklists, whitelist-only selling, transfer disabled,
+  size caps, a tax already set, and a pool that pays nothing.
+- **It cannot catch anything the owner does after we are in**, and the research says that
+  class is deliberate and designed to defeat exactly this check.
+- **That is why 2E-2 exists** — the same question asked again the moment the buy confirms, so
+  the window in which an owner must act to trap us is seconds rather than ninety.
+
+#### THE OBSTACLE, AND THE MEASUREMENT THAT REMOVED IT
+
+**WE CANNOT SELL TOKENS WE DO NOT HOLD, AND PRE-BUY WE HOLD NOTHING.** That is why the exit
+check borrows a holder in the first place. Borrowing one pre-buy would answer a different
+question than the operator asked — *can that address sell*, not *can we* — and it is the
+wrong question for exactly the per-address mechanisms above.
+
+The research's preferred answer is a buy-and-sell round trip inside one `eth_call`. **It does
+not work here:** our Permit2 allowance for a token we have never held is zero, so the sell leg
+would revert `AllowanceExpired(0)` on every token ever tested. **A check that refuses
+everything is the filter-matched-nothing failure with the sign flipped**, and it would have
+looked like a working honeypot detector.
+
+**SO THE PREREQUISITE WAS MEASURED RATHER THAN ASSUMED: DOES THIS RPC HONOUR `eth_call` STATE
+OVERRIDES?** It does, and the proof is not the absence of an error:
+
+```
+eth_call to an address with no code, NO override        -> 0x
+eth_call to the same address, code overridden with
+  604260005260206000f3  (PUSH1 0x42; MSTORE; RETURN)    -> 0x..0042
+```
+
+**A `0x` RESULT AND A SILENTLY-IGNORED PARAMETER ARE INDISTINGUISHABLE**, which is why the
+first probe — overriding a balance and calling a no-op — was thrown away as worthless. The
+code override returns a value that can only exist if the override was applied.
+
+**THAT MAKES THE OPERATOR'S REQUIREMENT LITERALLY ACHIEVABLE: THE SELL IS SIMULATED FROM OUR
+OWN ADDRESS, AT THE FULL EXPECTED POSITION SIZE**, with the balance and both allowances
+supplied by override rather than borrowed from somebody else.
+
+**EVERY OVERRIDE IS VERIFIED BY READING IT BACK THROUGH THE CONTRACT'S OWN VIEW FUNCTION.**
+A storage slot written at the wrong index is not an error — it is a silent no-op that leaves
+the real value in place, and the sell would then fail for want of a balance and be recorded
+as a honeypot. Measured on CME:
+
+```
+balance slot   12   keccak(us . 12)                     read back via balanceOf      VERIFIED
+allowance slot 13   keccak(permit2 . keccak(us . 13))   read back via allowance      VERIFIED
+permit2 slot    1   keccak(router . keccak(token .
+                      keccak(us . 1)))                  read back via allowance      VERIFIED
+                                                        28 RPC calls for all three
+```
+
+**THE SLOT INDEX IS DISCOVERED, NOT GUESSED.** CME keeps balances at slot 12 and allowances
+at 13 — not the 0 and 1 a hand-written constant would have assumed — so the discovery loop
+writes a magic value at each candidate index and asks the contract what it now believes.
+**If no index reads back, the answer is UNKNOWN and the candidate is DISQUALIFIED**, because
+a token whose storage we cannot model is a token whose sell we cannot simulate.
+
+#### THE DISQUALIFYING CONDITIONS, STATED EXPLICITLY
+
+```
+SELL REVERTS        the sell from OUR address at FULL size reverts   -> DISQUALIFY
+SELL PAYS NOTHING   actual out = 0                                   -> DISQUALIFY
+EXTREME TAX         out is below MAX_SELL_TAX_BPS of the buy's in    -> DISQUALIFY
+PROXY               token code is under PROXY_CODE_MAX_BYTES         -> DISQUALIFY
+SLOTS NOT FOUND     balance or allowance slot does not read back     -> DISQUALIFY (UNKNOWN)
+UNREADABLE          any probe returns 0x or errors                   -> DISQUALIFY (UNKNOWN)
+```
+
+**EVERY REVERT REASON IS DECODED RATHER THAN COUNTED.** `Error(string)` is unwrapped —
+`"blacklisted"` is the literal string CME returns — and a four-byte custom selector is matched
+against a table computed by `keccak`, never copied from a website: `V4TooLittleReceived`,
+`AllowanceExpired`, `TRANSFER_FROM_FAILED`. **A bare `execution reverted` with no payload is
+recorded as exactly that and is still disqualifying**: a failure we cannot name is not a
+failure we may ignore.
+
+**AN UNKNOWN DISQUALIFIES, WHICH IS THE OPPOSITE OF EVERY OTHER UNKNOWN IN THIS PROJECT.**
+Elsewhere `0x` means "do not treat this as zero" and the job raises rather than continues.
+Here the asymmetry runs the other way: refusing a good launch costs one missed trade, and
+admitting a honeypot costs the entire position. **The check fails CLOSED, and it records
+WHICH WAY it failed**, so a disqualification for want of evidence stays distinguishable from
+one on evidence — the two mean different things about the population and must not be summed.
+
+**IF IT DISQUALIFIES MOST LAUNCHES THAT IS A FINDING ABOUT THE POPULATION.** The arXiv figure
+is 84% abnormal, so a high rejection rate is the expected result and not grounds to loosen
+anything. The measured rate and its reason breakdown are recorded in section 6.
+
+#### 2E-2. THE RE-CHECK AFTER THE BUY, BECAUSE A PRE-BUY ANSWER HAS A SHELF LIFE
+
+**A pre-buy check cannot see an owner who flips a switch after we are in**, and the research
+says that class is engineered for exactly this. So the same simulation runs again **the moment
+the buy's receipt is mined** — now needing no overrides at all, because we finally hold the
+token and the approvals have just been granted. **It is the strongest form of the question and
+it is only available after the money is committed.**
+
+```
+BUY mined -> balanceOf -> APPROVALS -> RE-CHECK the sell at our REAL balance
+   sellable      -> `holding`; exit at +90 s as normal
+   NOT sellable  -> EXIT AT ONCE. Do not wait for the horizon.
+   cannot exit   -> `needs_exit`, HALT the mode, and say so
+```
+
+**WAITING OUT A HORIZON THAT CANNOT HELP IS THE FAILURE THIS CLOSES.** CME sat for ninety
+seconds and then entered a ladder that could never clear, because the obstacle was never the
+slippage bound. **An exit that is impossible does not become possible by waiting**, and those
+ninety seconds are ninety seconds in which an owner can do the other things in the table.
+
+**IT EXITS IMMEDIATELY RATHER THAN MARKING THE ROW AND MOVING ON.** If the sell is impossible
+the position is already lost and saying so early is all that is left; if it is merely
+*degraded* — a tax that now takes most of the output — the immediate exit takes what remains
+rather than what remains after another ninety seconds of the same. **The two are separated by
+the decoded reason, not by a status flag.**
+
+#### WHAT IT COSTS PER CANDIDATE
+
+```
+eth_getCode  proxy check                                     1 call     26 CU
+slot discovery, balance + allowance, worst case             48 calls 1,248 CU
+permit2 read-back                                            1 call     26 CU
+the buy simulation, for the expected position size           1 call     26 CU
+the SELL simulation, our address, full size, 3 overrides     1 call     26 CU
+                                                          ------------------
+worst case per qualifying candidate                         52 calls 1,352 CU = $0.0006
+measured on CME (slots at 12 and 13)                        31 calls   806 CU
+```
+
+**Against the loop's measured 156,872 CU for 34 qualifying trades**, adding ~27,000 CU worst
+case is a **17% increase in RPC cost** — and it is charged on QUALIFYING candidates only,
+after the launchpad, fee and gap filters, so it does not scale with the 516 candidates a run
+sees. **$0.02 a run against a loss measured at $10 on its first occurrence.**
+
+#### SOURCES
+
+- *Why Trick Me: The Honeypot Traps on Decentralized Exchanges*, arXiv 2309.13501 — 8,443 of
+  10,000 sampled Uniswap V2/V3 pools abnormal; taxonomy organised by attack effect; detection
+  by historical data analysis combined with transaction simulation.
+- *A Geth-based detection system for ERC20 honeypot contracts in Ethereum*, Discover Computing
+  (Springer, 2025) — blacklists keyed on the recipient being the DEX pool, with the sender
+  checked against a mapping; static data-flow analysis over bytecode.
+- **GoPlus Security token-security schema** — the field enumeration used as the checklist
+  above, including `cannot_sell_all`, `is_anti_whale`, `transfer_pausable`,
+  `trading_cooldown`, `slippage_modifiable` and `personal_slippage_modifiable`.
+- **GoPlus, "Why can't I sell my token when others can? — the Sniper token"** — a per-address
+  tax, targeted at large holders, shipped as `personal_slippage_modifiable` in v1.1.12.
+- *The contract is clean — for now* (dev.to) — timed blacklists by block height or timestamp,
+  `setTrading(false)` / `pause()` kill switches, fee escalation to 100%, proxy delegation with
+  a swappable implementation.
+- *I added live sell simulation to my token risk API* (dev.to) — temporal honeypots that behave
+  normally for the first N buys; static analysis reads bytecode at rest and cannot see runtime
+  sell-blocking.
+- *Honeypot Checker* (OpenLiquid) — max-sell-amount presenting as "you can technically sell,
+  but only fractions of a cent"; cooldown manipulation; balance manipulation where the
+  displayed balance is not the holdable one.
+
 ### RPC cost of running the bot
 
 **The read side is priced. The write side is not.**
@@ -4007,6 +4242,18 @@ category C.
 
 ### C. Paths that exist and have never executed
 
+- **THE PRE-BUY SELLABILITY CHECK (2E) IS SPECIFIED AND DOES NOT EXIST.** Nothing in
+  the loop asks whether a token can be sold before buying it. Its feasibility was
+  measured — state overrides are honoured and the storage slots are discoverable — but
+  no code, no drill and no measured qualifying rate exist. **Until it is built the rule
+  buys honeypots**, and that is the single largest known defect in this document.
+- **THE POST-BUY RE-CHECK (2E-2) IS SPECIFIED AND DOES NOT EXIST.** A position that
+  becomes unsellable after entry still waits out the full +90 s horizon.
+- **THE `exit-exec` ALLOWANCE DEADLOCK IS UNFIXED.** The Permit2 grant is attempted
+  only AFTER the rung simulation passes, and the simulation cannot pass without the
+  grant, so the exit path can never self-heal a missing approval.
+- **THE NONCE IS STILL RE-READ PER TRANSACTION.** `eth_getTransactionCount(pending)`
+  lagged a receipt already confirmed and killed the first live run at trade 614.
 - **The impact term has fired twice in 66 live trades.** Effectively inert.
 - **NO EXIT HAS EVER BEEN BROADCAST.** The path exists and its orchestration is drilled,
   but `bot_exit_attempts` contains no row whose detail came from a real receipt — every
@@ -4212,6 +4459,59 @@ below have shown for some time while this line went on denying it. Live mode exi
 is supplied and confirmed, the two setup transactions are mined, and **the prerequisites list
 is EMPTY as of 2026-09-16**. What remains is step 8, the first live run, and step 9,
 reconciling it.
+
+### STEP 8 HAPPENED, AND IT BOUGHT A HONEYPOT — 2026-09-17, cost $10
+
+**THE FIRST LIVE RUN MADE TWO TRADES AND NEITHER COULD BE SOLD. THE RULE AS WRITTEN BUYS
+TOKENS THAT CANNOT BE SOLD, AND NOTHING IN IT EVER ASKED.** Anyone reading this document to
+find out what the bot does must read that sentence before the ones about slippage bounds and
+exit ladders, because it is the larger fact about the strategy.
+
+| | trade 613 OZZY | trade 614 CME |
+|---|---|---|
+| entry | `0xaf9d5570…4ec0` | `0x72ad7ad9…c0a2` |
+| token | `0x149dc603…9675` | `0x9261e120…fea8` |
+| in | 0.004107 ETH ≈ $5 | 0.004107 ETH ≈ $5 |
+| out | 17,736.6 tokens | never read — the run died first |
+| why it cannot be sold | **the pool pays 0** at every rung | **the token refuses every transfer**: `Error("blacklisted")` |
+| status | `closed_unsellable` | `closed_unsellable` |
+
+**TOTAL REALISED LOSS $10, PLUS GAS.** It is inside the $15 mode halt, which is the rail
+doing its job, and it is the first money this project has lost.
+
+**THE TWO FAILURES ARE NOT THE SAME FAILURE, AND ONLY ONE IS A HONEYPOT.** OZZY's token
+transfers fine; its pool has nothing to pay with. CME's pool is busy — 211 transfers in 4,000
+blocks and 75 swaps after our own entry — and the token itself refuses to move. **A busy chart
+is what a honeypot looks like from outside, not evidence against one**, because the buys are
+real and only the sells are refused.
+
+**THE EVIDENCE ON CME, DECODED PER ADDRESS RATHER THAN INFERRED FROM OUR OWN FAILURE:**
+
+```
+transfer(…, balance) simulated from each holder
+  0x8366a39c…0951   the PoolManager     CAN transfer
+  0x66eb8af3…      an ordinary holder   execution reverted: blacklisted
+  0x63ad1742…      an ordinary holder   execution reverted: blacklisted
+  0xc033240a…      an ordinary holder   execution reverted: blacklisted
+```
+
+**ONLY THE POOL CAN MOVE THE TOKEN.** Buys therefore succeed and every buyer is trapped,
+which is the complete mechanism. Our own exit reverted `TRANSFER_FROM_FAILED` through the
+router, which names the symptom; the per-holder simulations name the cause, and the two were
+not the same finding. **The contract is 181 bytes — a proxy** — so the rules that refused us
+are not in the bytecode anyone could have read.
+
+**WHAT MADE IT COST THE FULL POSITION RATHER THAN PART OF IT** is that there was never a
+moment when selling would have worked. There is no earlier exit, no tighter bound and no
+faster ladder that recovers this; the only intervention that helps is **not buying**, which is
+why 2E is a pre-buy check and not a better exit.
+
+**AND THE RULE'S OWN MEASURED HISTORY DID NOT WARN US.** Four dry runs, 117 rows and an exit
+grid were all built on simulations from BORROWED holders — an address that had already sold
+successfully, and therefore an address that was never blacklisted. **Every exit figure in
+section 6 was measured on the population that could sell.** That is a selection effect in our
+own measurements, it was invisible until real money met a token that refused us, and it is
+recorded in section 7D so it is not rediscovered.
 
 ### WHAT THE OPERATOR SUPPLIES — two things, and only the first is secret
 
