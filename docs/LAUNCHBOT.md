@@ -3495,6 +3495,185 @@ different route.
 It is therefore replaced by **`approvals-not-inline`**, and the cost is now known rather
 than estimated: **$0.0128 per token per trade, 0.13% of a $10 position.**
 
+### THE APPROVALS ARE INLINE, AND THE BUY WAS NEVER BROADCAST — 2026-09-16
+
+The design is section 2D. This is what building and running it produced.
+
+#### THE FINDING THAT CAME FIRST: `broadcaster` NEVER REACHED THE ENTRY
+
+Reading the path end to end before wiring the approvals — which is what closing a
+prerequisite is supposed to involve — found that **`broadcaster` was referenced in exactly
+three places in `launchbot.ts`, and all three are the exit**: `clearNeedsExit`, the
+per-tick sweep's `seller`, and the `executeExit` call. The entry was an `eth_call` and then
+an insert.
+
+```
+grep -n "broadcaster" src/cli/launchbot.ts   ->  boot construction, then ONLY exit paths
+```
+
+So a live run would have opened a `holding` row carrying `fill_status = 'dry-run'` and an
+`exit_due_block`, for a position nothing had bought, and tried to sell it ninety seconds
+later. **Wiring approvals to that would have satisfied `approvals-not-inline`'s words
+exactly** — the loop would have granted allowances for a token it did not hold — which is
+the trap `approvals-not-executed` was replaced to avoid one pass earlier, arriving from the
+other side.
+
+**IT WAS MASKED BY THE PREREQUISITES LIST REFUSING TO ARM.** That is the second time a
+guard has hidden a defect on this bot: the wallet gate's missing raise surfaced only when
+the key arrived and somebody enumerated what a live run would do. **A guard that stops a
+run also stops anyone finding out what the run would have done**, so a list of what is
+missing is not a substitute for reading the path.
+
+#### AND THE SAME DEFECT AS THE FIRST REAL TRANSACTION WAS STILL LIVE IN THE LOOP
+
+`launchbot` built its broadcaster as `createBroadcaster(BOT_MODE, rpc)` — handing the
+signer the **`ReadOnlyRpc`**, which refuses `eth_sendRawTransaction` by name in every mode
+including live. That is the identical line that made the first real approval fail, and
+`approve-setup` was fixed on it the same day. **The other call site kept the defect and
+nothing reported it.**
+
+Every send the bot made would have been refused by its own deny-list — loudly, with nothing
+signed and no gas spent, which is the layered defence working and is not a reason to have
+shipped it. **Fixing a defect at the call site that failed leaves it at every other call
+site**, and the only thing that finds the others is reading them. Both now choose the
+transport explicitly and by name.
+
+#### THE DRY RUN: THE APPROVAL PATH IS REACHED ON EVERY TRADE AND NOTHING IS SENT
+
+`--run-label approvals --minutes 14`, mode `dry-run-approvals`:
+
+```
+ticks 164   initializes 46   candidates 40   qualified 6
+simulated 6   simClean 6   simReverted 0        skippedRail 0
+approvalPlanBuilt 6   approvalPlanFailed 0   approvalPlanSkipped 0
+buysBroadcast 0   approvalsGranted 0   entryReverted 0   entryUnresolved 0
+exitsDue 6   exitClean 3   exitReverted 3   ladderRungs {1: 3}
+23,748 CU = $0.01069
+```
+
+**6 of 6 reached the approval path and built both grants.** The allowances were READ from
+the real contracts for the real wallet and came back `0` and `0 expiring 0 (EXPIRED)` every
+time — which is the correct answer and the point of the design: *no allowance for a
+launch-minute token can predate the buy.* Both steps planned `SEND`, `will_send: false`,
+and **`approvalPlanFailed` and `approvalPlanSkipped` are both zero and are reported as
+zero.**
+
+**WHAT ONE TRADE WOULD HAVE SENT, in order, from the run's own log:**
+
+```
+1. BUY    amountIn=4142052944978300 minOut=16258709345086349298892
+2. APPROVE token->Permit2            amount=18065232605651499220992
+3. APPROVE Permit2->UniversalRouter  amount=18065232605651499220992
+4. (at +90 s) SELL amountIn=18065232605651499220992 minOut=3727847650480470
+
+approvals_amount_from: "the QUOTED output — HYPOTHETICAL, nothing was bought"
+```
+
+**THE AMOUNT'S PROVENANCE IS ON THE LINE, AND IT HAS TO BE.** A dry run has no balance to
+read, so the plan is sized on the QUOTE and says so. A live trade sizes on the BALANCE read
+after the buy mined — which is the whole reason the grant comes after the buy, and the two
+figures differ by exactly the quote error the bound exists to absorb. A log line that did
+not distinguish them would make a dry-run plan look like what a live trade approves.
+
+**NOTHING WAS BROADCAST, VERIFIED CHAIN-WIDE RATHER THAN PER MODE**: `entry_tx is not null`
+returns **0 rows across the whole of `bot_trades`**, `buysBroadcast` and `approvalsGranted`
+are 0, and every one of the run's 6 rows carries `fill_status = 'dry-run'`.
+
+#### THE FULL ROUND TRIP, NOW THAT EVERY LEG IS KNOWN
+
+Reported by the run itself rather than only by this document:
+
+| leg | $ | provenance |
+|---|---|---|
+| gas, buy | 0.0279–0.0405 | ESTIMATED — 200 real receipts per era, other traders |
+| **gas, both approvals** | **0.0128** | **MEASURED ON OUR OWN RECEIPTS** |
+| gas, sell | 0.04339 | ESTIMATED — median of 40 sampled real sells |
+| **gas total** | **0.0841–0.0967** | |
+| LP fee, both legs | 0.0654 | run 3's own fee mix, weighted |
+| slippage, both legs | 0.026 | realised impact at $10, SELLOFF |
+| RPC | 0.00178 | 23,748 CU / 6 trades, this run |
+| **TOTAL** | **$0.1773 – $0.1899** | **1.75%–1.88% of a $10 position** |
+
+**ONE OF THE FOUR GAS LEGS IS OURS AND THREE QUARTERS OF THE GAS IS STILL SOMEBODY
+ELSE'S.** `gas_usd` is NULL on all 113 stored rows. The figure moved by a tenth of a cent
+against the previous table and the conclusion did not move at all — **costs are still not
+the binding constraint** against a median gross of +0.374 at +90 s.
+
+#### 0 ENTRY REVERTS OF 6, AND 9 OF 9 CUMULATIVE AT THE NEW BOUND
+
+| run | bound | n | reverted | rate |
+|---|---|---|---|---|
+| 1–4 | 300 bps | 106 | 36 | **34.0% pooled** |
+| gate check | 1000 bps | 3 | 0 | 0% |
+| **this run** | **1000 bps** | **6** | **0** | **0%** |
+
+`revert-economics` predicted the rate would fall from 37% to about **7%** at 1,000 bps.
+**Nine consecutive clean simulations is consistent with 7% and is not evidence of it** —
+at a true 7% the chance of nine clean is 52%, so this run distinguishes nothing. It is
+recorded because it is the second sample in the predicted direction and because the figure
+to watch on the next full run is the rate against that 7%, not against zero.
+
+#### THE EXIT, AND THE LADDER DID NOT CLIMB ONCE
+
+**3 clean and 3 exhausted, every fill on rung 1.** The three exhausted are the familiar
+result rather than a new one: `V4TooLittleReceived … actual=0` at both rungs — *a retry
+ladder rescues a mispriced quote, not a dead pool.* The borrowed-holder confound is
+unchanged and these say nothing about whether our own exit would work.
+
+**The three `needs_exit` rows this produced were resolved rather than left**, because a dry
+run left with an open position arms its own next boot (section 7). `resolve-unsellable
+--simulated` read **OUR** balance as `0` on all three against borrowed holders still
+holding 2.2e23 — which is the distinction that makes the tool safe — and set
+`closed_simulated`. Verified on a fresh connection afterwards: **HELD rows anywhere on the
+chain RETURNED NO ROWS, deployed capital $0.00 over 0 positions, kill switch not halted.**
+
+#### THE DRILLS
+
+| drill | result |
+|---|---|
+| **`approval-drill`** (new) | **13 of 13** |
+| `exit-broadcast-drill` | **11 of 11**, including the two cases that changed |
+| `rail-drill` | 32 of 32 |
+| `live-gate-drill` | 20 of 20 |
+
+**THE ORDERING IS ASSERTED FROM A RECORDED TRACE, NOT FROM A SEND COUNT.** A count cannot
+tell "two sends, each confirmed" from "two sends fired back to back", and the second is the
+nonce hazard. Every send and every receipt poll is appended to one trace and the invariant
+is checked over the sequence — *between any two SENDs there must be a RECEIPT* — and **the
+checker is proven able to fail**, by being handed `SEND -> SEND -> RECEIPT` and rejecting
+it. A check nobody has made fail is not a check.
+
+**TWO OF THE DRILL'S FIRST THREE FAILURES WERE THE MODULE CORRECTLY REFUSING A FIXTURE I
+HAD MIS-SCRIPTED**, which is worth recording because it is the drill working in the
+direction nobody designs for:
+
+- The "both short" case granted both allowances and then RAISED, because the fixture left
+  the Permit2 expiration at 0 — so the re-read found a non-zero amount that had already
+  expired and refused to call it ready. **A real grant sets a future expiry; my fixture did
+  not, and `ensureSellReadiness` caught a worthless grant a test intended to be valid.**
+- The "expired grant" case did not fire because the drill's injected clock started at 0 and
+  the fixture's expiry was 1. The rule was right and the clock was wrong.
+
+The third was mine in the other direction: I scored a throwing broadcast as zero sends.
+**A throw is not proof nothing was sent** — the raise says exactly that — so counting it as
+zero would have been the plausible-value-on-an-error-path mistake inside the drill written
+to catch it. It counts as one send, and what is asserted is that nothing follows it.
+
+#### `exit-broadcast-drill` CASE 7 CHANGED MEANING, AND A NEW CASE PROVES THE CHANGE BOUGHT SOMETHING
+
+Case 7 asserted *allowances short -> UNRECOVERABLE, NOTHING sent*. `exit-exec` now GRANTS
+rather than refusing, so "nothing sent" would pass only by the exit having done nothing —
+which is what the change exists to stop. It now asserts **NO SELL was sent**, which is the
+property that actually matters, and a new case 7b shows the other half:
+
+```
+live + allowances short and UNGRANTABLE -> UNRECOVERABLE, NO SELL sent   sells=0
+live + allowances short but the GRANT LANDS -> approvals then ONE sell   approvals=2 sells=1
+```
+
+**Only the second shows that a position which WAS unsellable becomes sellable.** A
+refusal-only path can always be shown to refuse.
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
@@ -3816,6 +3995,101 @@ would fail informatively about none of them.
 
 **The second transaction is the matching `Permit2.approve(...)`.** Only after both have
 landed and been re-read from the chain does anything in step 8 have a working sell path.
+
+### WHAT LAUNCHING LIVE LOOKS LIKE — written 2026-09-16, before it has been done
+
+**ONE PREREQUISITE REMAINS AND IT IS NOT A CODE CHANGE.** `fill-not-modelled` is the
+operator ACCEPTING a known unknown: every return figure in this document is mark-to-market
+against a later trade in the pool, and a live fill competes for the same block. Nothing can
+close it but the first live fills or a decision to proceed without them. **Until it is
+removed from `bot/live-preflight.ts`, `launchbot --live` exits 1 and reads:**
+
+```
+REFUSING TO ARM IN LIVE MODE: 1 prerequisite(s) outstanding.
+  1. [fill-not-modelled] ...
+```
+
+#### THE COMMAND
+
+```
+npm run launchbot -- --live --minutes 10
+```
+
+**`--live` cannot be given by an environment variable, cannot be combined with
+`--run-label`, and every variable that looks like an attempt to enable it RAISES.** There
+is no other form of this command.
+
+#### WHAT IT DOES BEFORE IT TRADES, IN ORDER, AND WHAT STOPS IT AT EACH STEP
+
+| # | what | stops it if |
+|---|---|---|
+| 1 | `assertLiveReady` | any prerequisite is outstanding. **Before a balance is read or a compute unit is spent.** |
+| 2 | `createBroadcaster` over a `BroadcastRpc` | no `BOT_PRIVATE_KEY`; a malformed one; the endpoint's chain id is not 4663; the derived address is not `BOT_WALLET_ADDRESS` |
+| 3 | the wallet gate | `BOT_WALLET_ADDRESS` unset — a live run RAISES rather than arming unchecked; or the balance is below `MAX_CONCURRENT × MAX_POSITION_USD` = $50. **Exit code 3.** |
+| 4 | `reconcileOnBoot` | any non-terminal row cannot be adjudicated against the chain → HALT |
+| 5 | `clearNeedsExit` | any stuck position cannot be exited → HALT and RAISE, and the bot does not arm |
+| 6 | the loop arms | — |
+
+**Steps 4 and 5 now SELL FOR REAL**, which they never have. A `needs_exit` row reaching a
+live boot is exited with our own key, and the exit path grants any missing approvals first.
+
+#### WHAT A SINGLE TRADE THEN DOES
+
+```
+qualify -> rails -> quote -> SIMULATE the buy (eth_call, free)
+        -> INSERT the row as `intent`, committed, BEFORE anything is signed
+        -> BUY          send -> receipt   MINED is the only outcome that continues
+        -> balanceOf    the EXACT amount, ours, from the chain
+        -> APPROVE 1    send -> receipt
+        -> APPROVE 2    send -> receipt
+        -> `holding`, exit_due_block = the BUY'S OWN BLOCK + 900
+        ... 90 seconds ...
+        -> SELL         simulate the ladder, send the accepted rung -> receipt
+```
+
+**Never two transactions in flight.** A mined-and-reverted buy is terminal and costs the
+gas. Anything else that leaves the position possibly open marks it `needs_exit` and HALTS
+THE MODE.
+
+#### WHAT TO WATCH, IN THE ORDER IT MATTERS
+
+1. **`LIVE BROADCASTER CONSTRUCTED`** and the address on it. If that address is not
+   `0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a`, kill it.
+2. **The first `BUY BROADCAST` and its `BUY RECEIPT`.** This is the first swap this project
+   has ever signed. `receipt_wait_ms` should be tens of milliseconds — the two approvals
+   measured 20 ms and 16 ms, both on the first poll. **A wait in the seconds is new
+   information and the 60 s timeout is 3,000x what has been observed.**
+3. **`BUY FILLED` and its `fill_vs_quote`.** The quote is measured to over-quote by 2–3%;
+   this is the first time that has been checked against a fill we paid for. **It is also
+   the number that decides whether the 1,000 bps bound is right**, and nothing else can
+   produce it.
+4. **`APPROVALS — WHAT WILL BE GRANTED`, then two receipts.** Both should mine within a
+   block or two of each other, for about $0.0128.
+5. **`LIVE TRADE UNRESOLVED`** — the line that means a position is open and the mode has
+   halted. If it appears: **do not clear the halt.** Read `bot_trades` for the row, read
+   the wallet's balance of that token on the chain, and let the next boot of that mode
+   sweep it. `halt-control` refuses to clear a mode that still has `needs_exit` rows, which
+   is the guard pointing at the position rather than at the switch.
+6. **The exit at +90 s** — `EXIT BROADCAST`, then a receipt. `bot_exit_attempts` gets the
+   first `receipt_wait_ms` any exit has ever carried.
+
+#### THE STOP, FROM OUTSIDE, WITHOUT A DEPLOY
+
+```
+npm run halt-control -- --halt-chain "<why>" --commit
+```
+
+A row, re-read on a fresh connection every tick, chain-wide. **The bot cannot clear it.**
+
+#### WHAT IS STILL UNKNOWN WHEN THE FIRST LIVE TRADE ENDS
+
+- **Whether we won the fill** — that is `fill-not-modelled`, and accepting it is what
+  launching means.
+- **What our own slippage is.** Every figure behind the 1,000 bps bound is a simulation.
+- **Whether the exit works from our own wallet.** All 17 exit attempts to date were
+  simulated from a BORROWED holder. The first live exit is the first honest data point.
+- **What a buy and a sell cost us in gas.** Three quarters of the round-trip gas is still
+  other people's receipts, and `gas_usd` is NULL on every row.
 
 ### WHAT WILL STILL BE UNKNOWN AFTER ALL NINE STEPS
 
