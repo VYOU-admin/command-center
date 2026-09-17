@@ -690,6 +690,43 @@ async function main(): Promise<void> {
       log.info('=== QUESTION 3: BANDED BY SHORTFALL ===', {});
       reportBands(bot, SLIPPAGE_BPS, CONFIGURED_H);
 
+      /*
+       * INDIVIDUAL RECORDS, BECAUSE A BOUND IS A DEFINITION.
+       *
+       * CLAUDE.md: any proposed change to what a term means must first be proven on
+       * individual records, with identifiers the operator can open, counter-examples
+       * included. "The refused trades are winners" is a population claim that would
+       * justify the largest single change available to this bot, so the aggregate is a
+       * hypothesis until these lines can be re-derived by hand.
+       *
+       * Every field needed to reproduce the arithmetic is printed: the pool, the block,
+       * what we quoted, what the router said it would actually pay, and the two prices
+       * the return is a ratio of. Counter-examples -- refused trades that LOST -- are
+       * printed separately and are not omitted for being inconvenient.
+       */
+      const refused = bot.filter((l) => !acceptedAt(l, SLIPPAGE_BPS));
+      const withExit = refused.filter((l) => l.ret[CONFIGURED_H] !== null);
+      const sorted = [...withExit].sort((a, b) =>
+        retAt(b, CONFIGURED_H, 0) - retAt(a, CONFIGURED_H, 0));
+      const lines = (xs: Launch[]): string[] => xs.map((l) => {
+        const pxExit = l.pxFill * (1 + retAt(l, CONFIGURED_H, 0));
+        return `trade ${l.key} [${l.label}] pool ${l.poolId.slice(0, 18)}… fee ${l.fee}`
+          + ` | quoted ${l.quoted} vs pool would pay ${l.actualOut}`
+          + ` (shortfall x${shortfallRatio(l, SLIPPAGE_BPS).toFixed(4)})`
+          + ` | px_fill ${l.pxFill.toExponential(6)} -> px_+90s ${pxExit.toExponential(6)}`
+          + ` = ${(retAt(l, CONFIGURED_H, 0) * 100).toFixed(1)}%`;
+      });
+      log.info('INDIVIDUAL REFUSED LAUNCHES — the claim, re-derivable by hand', {
+        refused_total: refused.length,
+        refused_with_an_exit: withExit.length,
+        refused_with_NO_exit: refused.length - withExit.length,
+        best_five: lines(sorted.slice(0, 5)),
+        worst_five_COUNTER_EXAMPLES: lines(sorted.slice(-5).reverse()),
+        losers: lines(withExit.filter((l) => retAt(l, CONFIGURED_H, 0) < 0)),
+        note: 'return = px at the first trade after +90s divided by the price our own '
+          + 'fill would have got, which is amountIn / what the router said it would pay',
+      });
+
       log.info('=== QUESTION 4: THE DERIVED BOUND, GROUND TRUTH, no-exit = 0 ===',
         deriveBound(bot, CONFIGURED_H, 0));
       log.info('=== QUESTION 4b: THE SAME DERIVATION, no-exit = -1 (a total loss) ===',
