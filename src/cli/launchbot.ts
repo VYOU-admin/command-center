@@ -1,11 +1,20 @@
 /**
  * `npm run launchbot -- [--minutes N] [--run-label x] [--live]` — the launch bot.
  *
- * **DRY RUN UNLESS `--live` IS PASSED, AND `--live` CANNOT ARM TODAY.** Live mode exists
- * as of 2026-09-16 and is gated three deep: the prerequisites list in
- * `bot/live-preflight.ts` is non-empty so it refuses to arm; no key exists so no signer
- * can be constructed; and `ReadOnlyRpc` refuses every signing and broadcast method BY
- * NAME in every mode including live. `scripts/check-live-gate.mjs` fails the BUILD if any
+ * **DRY RUN UNLESS `--live` IS PASSED. SINCE 2026-09-16 `--live` CAN ARM AND TRADES REAL
+ * MONEY.** The prerequisites list in `bot/live-preflight.ts` is EMPTY — four entries closed
+ * with evidence and `fill-not-modelled` accepted by the operator — and `BOT_PRIVATE_KEY`
+ * exists and is confirmed to control `BOT_WALLET_ADDRESS` on chain 4663. **There is no
+ * second flag and nothing will ask.**
+ *
+ * What still gates it: the flag must be typed explicitly (an env var that looks like an
+ * attempt to enable live RAISES rather than being ignored), the key must derive the
+ * configured address, the balance must cover `MAX_CONCURRENT x MAX_POSITION_USD`, and the
+ * boot sweep must be clean. **What BOUNDS a mistake is the six rails, not the preflight.**
+ *
+ * The read transport stays a `ReadOnlyRpc`, which refuses every signing and broadcast
+ * method BY NAME in every mode including live; only the signer gets a `BroadcastRpc`, and
+ * only at the one call site below. `scripts/check-live-gate.mjs` fails the BUILD if any
  * file but `bot/signer.ts` reads a key or constructs a signer.
  *
  * ONE IMPLEMENTATION OF EVERY RULE, AND NOTHING FORKS FOR LIVE. The mode decides whether
@@ -112,10 +121,18 @@ async function main(): Promise<void> {
    *
    * Ordered first deliberately. A live run that is going to be refused must be refused
    * before it reads a balance, reconciles rows or spends a compute unit, and certainly
-   * before it arms. Two refusals in sequence, both of which MUST fire today:
+   * before it arms.
    *
-   *   assertLiveReady   -> the prerequisites list is non-empty, so live cannot arm
-   *   createBroadcaster -> there is no key, so no signer can be constructed
+   *   assertLiveReady   -> the prerequisites list. **EMPTY as of 2026-09-16, so this now
+   *                        PASSES.** It stays first so that any entry added later refuses
+   *                        at the cheapest possible moment.
+   *   createBroadcaster -> the key, its chain id, and that it derives the configured
+   *                        address. **A key exists, so this now SUCCEEDS** and returns a
+   *                        signer over a broadcast-capable transport.
+   *
+   * **SO REACHING THE LINE AFTER THIS BLOCK IN LIVE MODE MEANS THE BOT CAN SPEND MONEY.**
+   * Both of these used to refuse unconditionally and the comment said they MUST fire; that
+   * stopped being true when the key arrived and again when the list emptied.
    *
    * In dry-run both are no-ops: `assertLiveReady` returns immediately and
    * `createBroadcaster` is never called, so the key is not so much as looked for.
@@ -175,6 +192,12 @@ async function main(): Promise<void> {
          * implement is a defect in the code, always in that direction. It was masked only
          * because `assertLiveReady` refuses first; it would have surfaced the moment the
          * prerequisites list emptied, which is the worst possible time to find it.
+         *
+         * **THAT MOMENT ARRIVED ON 2026-09-16 AND THE PREDICTION HELD.** The list is now
+         * empty, so `assertLiveReady` no longer masks anything — and the list emptied onto
+         * this raise rather than onto a live run with no balance check, because the defect
+         * had been fixed two passes earlier. A comment that names WHEN a latent defect will
+         * surface is worth more than one that only names the defect.
          *
          * A dry run may still proceed: it holds nothing and broadcasts nothing, and the
          * balance is UNREAD rather than assumed.

@@ -75,16 +75,31 @@ export const LIVE_PREREQUISITES: readonly Prerequisite[] = [
    *
    * Removed rather than struck through, because this list is read by code.
    */
-  {
-    id: 'fill-not-modelled',
-    what: '`fill_status` is the literal `dry-run` on every row and nothing models '
-      + 'winning the fill against competing buyers in the same block',
-    why: 'every return figure in this document is mark-to-market against a later trade '
-      + 'in the pool. A live fill competes for the same block, and the measured edge has '
-      + 'never been tested against that.',
-    closedBy: 'accepted as a known unknown by the operator, or measured from the first '
-      + 'live fills',
-  },
+  /*
+   * `fill-not-modelled` WAS HERE AND WAS **ACCEPTED** — 2026-09-16, by the operator.
+   * LAUNCHBOT.md section 6.
+   *
+   * It is the only entry ever removed by acceptance rather than by work, and its own
+   * `closedBy` named that as one of its two conditions: *"accepted as a known unknown by
+   * the operator, or measured from the first live fills"*. **The second is unreachable
+   * from here** — the quantity is what our own fills cost, a transaction in a block
+   * carries no record of when it was offered, and the mempool is in none of the available
+   * methods. `receipt-timing` hit the same wall on the inclusion half of the receipt
+   * timeout and it only moved once we had sent something ourselves.
+   *
+   * So the choice was never "measure it or accept it". It was **accept it and measure it,
+   * or neither** — a prerequisite whose only evidence lies past itself never closes, and
+   * keeping it would have been a permanent refusal dressed as diligence.
+   *
+   * WHAT WAS ACCEPTED, so nobody has to reconstruct it: winning the fill against competing
+   * buyers in the same block, and our own marginal impact at the moment of it. Note that
+   * the published medians ALREADY score a measured 16.75%-24.21% no-fill rate as ZERO, so
+   * the population carries a fifth at zero for this reason; what is unknown is whether OUR
+   * rate is that one. `bot_trades.executed_out`, `realised_slippage_entry` and the loop's
+   * `fill_vs_quote` are the columns that answer it and every one is NULL today.
+   *
+   * Removed rather than struck through, because this list is read by code.
+   */
   /*
    * `dry-run-boot-halts-the-chain` WAS HERE AND IS CLOSED — 2026-09-16, by operator
    * decision: AUTOMATIC halts are now scoped to the mode that raised them and MANUAL
@@ -102,6 +117,28 @@ export const LIVE_PREREQUISITES: readonly Prerequisite[] = [
  * A NO-OP OUTSIDE LIVE MODE, deliberately: a dry run holds nothing and broadcasts
  * nothing, so none of these can cost anything there, and blocking dry runs on them would
  * stop the measurement that closes them.
+ *
+ * ---------------------------------------------------------------------------
+ * THE LIST IS EMPTY AS OF 2026-09-16, SO THIS NOW PASSES
+ * ---------------------------------------------------------------------------
+ *
+ * **`launchbot --live` no longer refuses here.** Four entries were closed with evidence —
+ * `sell-not-broadcast`, `approvals-not-executed`/`approvals-not-inline`,
+ * `stuck-rows-can-halt`/`dry-run-boot-halts-the-chain` — and the fifth was accepted.
+ *
+ * **IT IS STILL CALLED FIRST IN THE BOOT SEQUENCE AND THAT STILL MATTERS.** A live run
+ * that is going to be refused must be refused before it reads a balance, reconciles a row
+ * or spends a compute unit; an empty list makes that free rather than pointless, and any
+ * entry added later refuses at the cheapest possible moment without anything being
+ * rewired.
+ *
+ * **WHAT AN EMPTY LIST DOES NOT MEAN**, restated here because this is the function that
+ * stops refusing: it is not a claim that the bot is safe, and it is not the thing that
+ * bounds a mistake. **The SIX RAILS in `bot/config.ts` are** — $10 a position, 5
+ * concurrent, $100 deployed, 40 trades a day, $15 of realised loss, 3 consecutive reverts
+ * — plus a kill switch re-read on a fresh connection every tick. A stray `--live` is
+ * bounded at $15 of realised loss before the mode halts itself. The preflight was never
+ * what limited the damage; it was what stopped a HALF-BUILT path from running at all.
  */
 export function assertLiveReady(mode: BotMode): void {
   if (!mode.live) return;

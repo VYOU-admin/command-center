@@ -12,8 +12,11 @@
  * When a key arrives, the first question is "does it control the address we think it
  * does" — and no existing path could answer it safely:
  *
- *   - `launchbot --live` refuses at `assertLiveReady` BEFORE `createBroadcaster` is
- *     reached, so it never derives an address at all;
+ *   - `launchbot --live` refused at `assertLiveReady` BEFORE `createBroadcaster` was
+ *     reached, so it never derived an address at all. **THAT IS NO LONGER WHY: the
+ *     prerequisites list emptied on 2026-09-16 and `--live` now reaches the broadcaster.**
+ *     The reason this tool still exists is the stronger one below — a live boot goes on to
+ *     reconcile, sweep and ARM, so it is not a way to ask one question and stop;
  *   - `approve-setup --live` without `--commit` exits before the broadcaster is built, and
  *     WITH `--commit` it would BROADCAST. Confirming a key by sending a transaction is
  *     the opposite of confirming it first.

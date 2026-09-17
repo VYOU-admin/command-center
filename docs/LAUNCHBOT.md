@@ -50,15 +50,19 @@ as a GUESS. No figure gets in without one or the other.**
 *Updated on every change of state. This is the first thing a session needs.*
 
 ```
-STATUS              BUILT. LIVE MODE EXISTS AND IS PROVABLY OFF (2026-09-16).
-                    It cannot broadcast: live is off unless an explicit --live
-                    flag is passed, the prerequisites list in
-                    bot/live-preflight.ts refuses to arm while anything is
-                    outstanding, NO PRIVATE KEY EXISTS OR IS READ, and
-                    src/bot/rpc.ts refuses eth_sendRawTransaction and every
-                    signing method BY NAME in every mode INCLUDING live.
-                    scripts/check-live-gate.mjs fails the BUILD if any file but
-                    bot/signer.ts reads a key or constructs a signer.
+STATUS              BUILT, KEYED, AND ABLE TO ARM (2026-09-16). The preflight
+                    list is EMPTY: fill-not-modelled was accepted by the
+                    operator, so `launchbot --live` NO LONGER REFUSES.
+                    **npm run launchbot -- --live TRADES REAL MONEY.** There is
+                    no second flag and nothing will ask. What still gates it:
+                    an explicit --live (never an env var -- one that looks like
+                    an attempt RAISES), a key deriving BOT_WALLET_ADDRESS on
+                    chain 4663, a balance covering $50, and a clean boot sweep.
+                    What bounds a mistake is the SIX RAILS, not the preflight --
+                    $15 of realised loss halts the mode. src/bot/rpc.ts still
+                    refuses eth_sendRawTransaction BY NAME on the read path in
+                    every mode, and scripts/check-live-gate.mjs still fails the
+                    BUILD if any file but bot/signer.ts reads a key.
 first dry run       2026-09-16, 65 minutes, 24 hypothetical trades recorded
 wallet address      0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a  (supplied by the
                     operator 2026-09-16)
@@ -85,12 +89,12 @@ arming              PASSES BOTH. $126.73 against MAX_CONCURRENT 5 x $10 = $50
                     path armed for the first time on 2026-09-16 (mode
                     dry-run-capgate) -- every earlier run either had no wallet or
                     refused, so the ALLOW direction had never been observed.
-mode                dry-run by default and five dry runs to date (section 6).
-                    'live' EXISTS as of 2026-09-16 and CANNOT ARM: it needs an
+mode                dry-run by default and six dry runs to date (section 6).
+                    'live' EXISTS as of 2026-09-16 and CAN NOW ARM: it needs an
                     explicit --live flag, an empty prerequisites list and a key,
-                    and it has none of the three. There was a duplicate 'mode'
-                    line here saying "the only mode that exists"; it was already
-                    false and is now merged into this one.
+                    AND IT HAS ALL THREE as of 2026-09-16. It has never been
+                    run with the loop ticking; the boot path has, with
+                    --minutes 0, which armed and traded nothing.
 limits              the six rails of section 4, all enforced in bot/rails.ts and
                     all exercised by npm run rail-drill (32 of 32)
 kill switch         keyed (chain, mode) since 2026-09-16: AUTOMATIC halts are
@@ -101,8 +105,11 @@ slippage bound      1000 bps, changed from 300 on 2026-09-16 on measured
 exit retry ladder   [1000, 1343], two rungs, re-derived at the new bound
 live gate           20 of 20 cases in npm run live-gate-drill; the static gate
                     passes over 132 source files and is proven able to fail
-prerequisites       ONE outstanding: fill-not-modelled. approvals-not-inline was
-                    CLOSED 2026-09-16 (section 2D). Live still refuses to arm.
+prerequisites       ZERO outstanding. fill-not-modelled ACCEPTED by the operator
+                    2026-09-16; approvals-not-inline CLOSED the same day
+                    (section 2D). An empty list does NOT mean the bot is safe --
+                    it means the things known to be missing are no longer
+                    missing. Section 7 categories B, C and D stay open in full.
 the trade           FOUR transactions since 2026-09-16: BUY -> APPROVE -> PERMIT2
                     APPROVE -> (at +90 s) SELL, each confirmed by its receipt before
                     the next is sent. Section 2D. The BUY was never broadcast at all
@@ -118,13 +125,18 @@ capital approved    $100 total, $10 per position (operator, 2026-09-16), and sin
                     2026-09-16 ENFORCED as MAX_DEPLOYED_USD rather than stated here
 ```
 
-**NOTHING IN THIS REPOSITORY HAS EVER WRITTEN TO A CHAIN.** Still true on 2026-09-16
-after live mode was built AND after a key was supplied — the signer has been constructed
-and its address confirmed, and no transaction has been built, signed or sent. What changed is that the path now EXISTS and is gated rather
-than being absent: `eth_sendRawTransaction` is named in exactly two files — `bot/rpc.ts`
-to refuse it and gate the broadcast client, and `bot/signer.ts` as its one caller — and
-private-key handling exists in `bot/signer.ts` alone, where the build gate confines it.
-**No key is set, so the signer has never been constructed.**
+**~~NOTHING IN THIS REPOSITORY HAS EVER WRITTEN TO A CHAIN~~ — FALSE SINCE THE TWO
+APPROVALS OF 2026-09-16**, and this paragraph went on asserting it while ALSO saying four
+lines later that the signer had been constructed. **It contradicted itself inside itself**,
+which is what a paragraph edited three times without being re-read looks like.
+
+**WHAT IS TRUE NOW.** Two approvals have been signed and mined, `0x999fdb79…` and
+`0x178977d3…`, for $0.0128 of gas. **No TRADE has been signed**: no buy and no sell, so
+every return figure in this document is still a simulation. `eth_sendRawTransaction` is
+named in exactly two files — `bot/rpc.ts` to refuse it on the read path and to gate the
+broadcast client, and `bot/signer.ts` as its one caller — and private-key handling exists
+in `bot/signer.ts` alone, where the build gate confines it over 132 files and is proven able
+to fail.
 
 ---
 
@@ -505,16 +517,20 @@ adjudicator.**
 
 ### 2A. LIVE MODE — BUILT 2026-09-16, DEFAULTING OFF, AND PROVEN OFF
 
-**IT EXISTS AND IT CANNOT ARM.** The operator's requirement was that live mode be built
-and provably off *before* any key is added, so that when the key arrives there is nothing
-for it to do wrong. Nothing in this section has signed or broadcast anything.
+**IT EXISTS AND, SINCE 2026-09-16, IT CAN ARM.** The operator's requirement was that live
+mode be built and provably off *before* any key was added, so that when the key arrived
+there was nothing for it to do wrong. **That requirement is discharged**: the key arrived,
+the prerequisites emptied one at a time with evidence, and the last was accepted. This
+section describes the gates as they were built and as they still stand — what changed is
+that **gate 2 is now satisfied rather than refusing.** Nothing in this section signed or
+broadcast anything at the time it was written; the two approvals came later.
 
 #### FOUR INDEPENDENT GATES, AND EACH ONE ALONE IS SUFFICIENT
 
 | gate | where | what it refuses |
 |---|---|---|
 | 1. the mode | `bot/mode.ts` | live requires an explicit `--live`. Never a config file, never an env var, never a default. |
-| 2. the prerequisites | `bot/live-preflight.ts` | refuses to ARM while any listed item is outstanding. Four are. |
+| 2. the prerequisites | `bot/live-preflight.ts` | refuses to ARM while any listed item is outstanding. **ZERO are, as of 2026-09-16** — four were closed with evidence and the last was accepted. This gate no longer refuses. |
 | 3. the key | `bot/signer.ts` | the ONLY file that may read a key or construct a signer. None is set. |
 | 4. the transport | `bot/rpc.ts` | `ReadOnlyRpc` refuses every signing method BY NAME in every mode; `BroadcastRpc` cannot be CONSTRUCTED outside live. |
 
@@ -673,9 +689,11 @@ to this bot.
 | `fill-not-modelled` | `fill_status` is the literal `dry-run` | every return figure is mark-to-market; a live fill competes for the same block |
 | `stuck-rows-can-halt` | 7 `needs_exit` rows in `dry-run-r5` | the kill switch is chain-wide, so a dry-run boot failure would halt live trading |
 
-**THREE REMAIN, verified by running it:** `launchbot --live` exits 1 with
-*"REFUSING TO ARM IN LIVE MODE: 3 prerequisite(s) outstanding"* naming
-`approvals-not-executed`, `fill-not-modelled` and `stuck-rows-can-halt`.
+**~~THREE REMAIN~~ — NONE REMAIN as of 2026-09-16.** The three named here were
+`approvals-not-executed` (replaced by `approvals-not-inline`, then closed in section 2D),
+`stuck-rows-can-halt` (renamed `dry-run-boot-halts-the-chain`, closed by the kill-switch
+scope split) and `fill-not-modelled` (**accepted by the operator** — see section 6).
+`launchbot --live` no longer exits 1 here.
 
 **An empty list does not mean the bot is safe**, and it is not a substitute for the
 operator's judgement — it means the things known to be missing are no longer missing.
@@ -3674,6 +3692,143 @@ live + allowances short but the GRANT LANDS -> approvals then ONE sell   approva
 **Only the second shows that a position which WAS unsellable becomes sellable.** A
 refusal-only path can always be shown to refuse.
 
+### THE LAST PREREQUISITE IS ACCEPTED, AND THE LIST IS EMPTY — 2026-09-16
+
+**`fill-not-modelled` IS ACCEPTED BY THE OPERATOR.** That was always one of its two stated
+closing conditions — *"accepted as a known unknown by the operator, or measured from the
+first live fills"* — and it is the one that can be reached without trading, because the
+other requires the very thing it gates.
+
+```
+LIVE_PREREQUISITES.length === 0
+npm run launchbot -- --live   NO LONGER REFUSES AT THE PREFLIGHT
+```
+
+#### WHAT WAS ACCEPTED, STATED PRECISELY RATHER THAN AS A LABEL
+
+**Every return figure in this document is MARK-TO-MARKET against a later trade in the
+pool.** `fill_status` has been the literal `dry-run` on all 113 rows. The entry price is
+what a real trade got at our entry mark and the exit price is the first trade strictly after
+the horizon — both real prices from real trades, and **neither is a trade of ours.**
+
+What is therefore unmodelled is narrow and it is not small:
+
+- **WINNING THE FILL.** A live buy competes for the same block as everyone else who saw the
+  same launch. The measured +0.374 median at +90 s assumes we are in.
+- **OUR OWN MARGINAL IMPACT AT THE MOMENT OF THE FILL.** The impact term has fired twice in
+  66 live trades, because at +15 s after a pool's first swap almost no pool has the four
+  consecutive swaps it needs. So the quote is fee-only in practice and our own $10 moves the
+  price by an amount nothing has measured.
+- **THE NO-FILL RATE, WHICH IS MEASURED AND IS THE HONEST HALF.** 16.75%–24.21% of rule
+  launches never filled in the offline grids, and those were scored ZERO rather than
+  dropped. So the published medians already carry a fifth of the population at zero for
+  exactly this reason. **What is unmodelled is whether OUR no-fill rate is that one.**
+
+#### WHY IT CANNOT BE CLOSED ANY OTHER WAY, WHICH IS THE WHOLE ARGUMENT
+
+**The quantity is unobservable from outside a live trade.** A transaction in a block carries
+no record of when it was offered, the mempool is in none of the available methods, and
+`receipt-timing` already established that watching somebody else's transaction cannot
+substitute — the same wall that stopped the inclusion half of the receipt timeout being
+measured until we sent something ourselves.
+
+So the choice was never "measure it or accept it". It was **accept it and measure it, or
+neither.** A prerequisite whose only evidence lies past itself is a prerequisite that never
+closes, and keeping it would have been a permanent refusal dressed as diligence.
+
+#### WHAT IS NOW THE ONLY THING BETWEEN `--live` AND A REAL TRADE
+
+This is the part that must be stated plainly rather than left to be inferred. **The
+preflight was the gate that could not be satisfied by accident; it is gone.** What remains
+is four gates that CAN all be satisfied, and on this container three of them already are:
+
+| gate | satisfied today? |
+|---|---|
+| an explicit `--live` on the command line, never an env var, never a default | **it is the operator typing it** |
+| `BOT_PRIVATE_KEY`, deriving `BOT_WALLET_ADDRESS`, on chain id 4663 | **YES** — confirmed by `signer-check` |
+| `BOT_WALLET_ADDRESS` set, balance ≥ `MAX_CONCURRENT × MAX_POSITION_USD` = $50 | **YES** — $126.73 |
+| boot reconciliation and the `needs_exit` sweep both clean | **YES** — HELD rows RETURNED NO ROWS |
+
+**SO `npm run launchbot -- --live` NOW TRADES REAL MONEY.** There is no further
+confirmation, no second flag, and nothing that will ask. That is the intended state and it
+is the reason this entry exists: the document should not have to be read backwards to
+discover it.
+
+#### WHAT BOUNDS A MISTAKE, AND IT IS THE RAILS RATHER THAN THE PREFLIGHT
+
+An accidental `--live` — a stray flag, a copied command — is bounded by six hard-coded
+rails, every one of them exercised in `rail-drill` (32 of 32):
+
+```
+MAX_POSITION_USD        $10 per position
+MAX_CONCURRENT          5          -> $50 of open basis at once
+MAX_DEPLOYED_USD        $100       -> cost basis + the day's realised LOSSES
+MAX_TRADES_PER_DAY      40
+MAX_DAILY_LOSS_USD      $15        -> HALTS, does not skip
+MAX_CONSECUTIVE_REVERTS 3          -> HALTS
+kill switch             a row, re-read on a fresh connection every tick
+```
+
+**The worst case of a stray `--live` left running is therefore bounded at $15 of realised
+loss before the mode halts itself**, plus whatever open basis is mid-flight, against a
+wallet holding $126.73. `--minutes` defaults to 60, so it does not run for ever either.
+**That bound is real and it is the reason accepting this prerequisite is not the same as
+removing the last protection** — the preflight was never what limited the damage.
+
+#### WHAT MEASURES IT ONCE THE FIRST LIVE TRADES EXIST
+
+Accepting it does not make it known, and the columns that will answer it already exist:
+
+| what | where |
+|---|---|
+| did we fill, and what did we get | `bot_trades.executed_out` against `quoted_out`, and `BUY FILLED`'s `fill_vs_quote` |
+| how long inclusion took | `bot_trades.entry_block` against the block we decided in |
+| the realised entry slippage | `realised_slippage_entry`, NULL on all 113 rows today |
+| our own no-fill rate | a mined-and-reverted buy is `closed_unfilled` with `fill_status='live-reverted'` |
+
+**The figure to watch is `fill_vs_quote` on the first live buy**, because it is the first
+check of the 2–3% over-quote against a fill we paid for, and the 1,000 bps bound rests
+entirely on simulations of it.
+
+#### AND THE PREFLIGHT'S OWN HEADER IS NOW THE OPERATIVE SENTENCE
+
+`bot/live-preflight.ts` has said this since it was written, and an empty list is exactly
+when it starts mattering:
+
+> **THIS IS NOT A SUBSTITUTE FOR THE OPERATOR'S JUDGEMENT** and it is not a claim that an
+> empty list means the bot is safe. It means the things known to be missing are no longer
+> missing.
+
+**Section 7's categories B, C and D stay open in full.** No buy or sell of ours has ever
+been broadcast, every exit attempt to date was simulated from a borrowed holder, `gas_usd`
+is NULL on every row, and the inline approval path is proven only against a test double.
+
+#### FOUR CLAIMS IN THE CODE AND THREE IN THIS DOCUMENT WERE STALE BEFORE THIS CHANGE
+
+Emptying the list meant re-reading everything that asserted it was non-empty, and most of
+what was found had already stopped being true one or two passes earlier:
+
+| where | claimed | when it stopped being true |
+|---|---|---|
+| section 0 | *"LIVE MODE EXISTS AND IS PROVABLY OFF"* | the key arrived |
+| section 0 | *"NOTHING IN THIS REPOSITORY HAS EVER WRITTEN TO A CHAIN … No key is set, so the signer has never been constructed"* | **the two real approvals** — and the paragraph contradicted ITSELF, saying four lines earlier that the signer *had* been constructed |
+| section 2A | *"refuses to ARM while any listed item is outstanding. Four are."* | three passes of closures ago |
+| section 8 | *"NOTHING IN THIS LIST HAS BEEN DONE … the bot cannot arm and no key exists"* | steps 1–6 are struck through immediately below it |
+| `launchbot.ts` header | *"gated three deep: … no key exists so no signer can be constructed"* | the key arrived |
+| `launchbot.ts` boot | *"assertLiveReady -> the prerequisites list is non-empty, so live cannot arm"* | this change |
+| `signer-check.ts` | *"`launchbot --live` refuses at `assertLiveReady` BEFORE `createBroadcaster`"* | this change |
+
+**THE WALLET-GATE COMMENT PREDICTED THIS EXACT MOMENT AND THE PREDICTION HELD.** It reads:
+*"It was masked only because `assertLiveReady` refuses first; it would have surfaced the
+moment the prerequisites list emptied, which is the worst possible time to find it."* That
+moment is now, and the defect it describes was fixed two passes ago — so the list emptied
+onto a raise rather than onto a live run with no balance check. **A comment that names when
+a latent defect will surface is worth more than one that names the defect**, and this is the
+first time one of them has come due here.
+
+**A claim about state has to be re-checked against the state whenever the state changes** —
+`ROBINHOOD.md`'s own rule, applied to a document that had drifted three ways at once.
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
@@ -3727,8 +3882,15 @@ category C.
   measurements — but the APPROVAL half is now measured from our own transactions at
   $0.0128 for the pair, against the $0.015 those external receipts implied, so that
   estimate is 17% high and the rest of them are probably close too.
-- **`fill_status` is always the literal `dry-run`.** Nothing models winning the fill
-  against competing buyers in the same block.
+- **`fill_status` is the literal `dry-run` on all 113 rows, and nothing models winning the
+  fill against competing buyers in the same block.** ~~It is a live prerequisite~~ —
+  **ACCEPTED BY THE OPERATOR 2026-09-16** and removed from `bot/live-preflight.ts`. It stays
+  here because accepting it did not measure it: what is unmodelled is winning the fill and
+  our own marginal impact at the moment of it, and the only thing that can close it is live
+  fills. **The published medians already score a measured 16.75%–24.21% no-fill rate as
+  ZERO**, so the population carries a fifth at zero for this reason; what is unknown is
+  whether OUR rate is that one. `executed_out`, `realised_slippage_entry` and
+  `BUY FILLED`'s `fill_vs_quote` are the columns that will answer it, and all are NULL.
 - **Every exit is still simulated from a BORROWED holder.** In dry run we hold nothing,
   so a clean exit proves the pool accepts the sell and not that our approvals would
   permit it. Two setup transactions are measured in section 2; neither has been executed.
@@ -3935,8 +4097,11 @@ surface as a spend rather than as an error.
 *Written 2026-09-16, before any of it has started. The sequence is here so it can be
 reviewed in advance rather than reconstructed afterwards.*
 
-**NOTHING IN THIS LIST HAS BEEN DONE.** Live mode exists and is refused by four independent
-gates; the bot cannot arm and no key exists.
+**~~NOTHING IN THIS LIST HAS BEEN DONE~~ — STEPS 1 TO 7 ARE DONE**, which the strikethroughs
+below have shown for some time while this line went on denying it. Live mode exists, the key
+is supplied and confirmed, the two setup transactions are mined, and **the prerequisites list
+is EMPTY as of 2026-09-16**. What remains is step 8, the first live run, and step 9,
+reconciling it.
 
 ### WHAT THE OPERATOR SUPPLIES — two things, and only the first is secret
 
@@ -3970,7 +4135,7 @@ that should be made before step 3, not during it.
 | ~~**4**~~ | ~~Re-run the gates with the key present~~ | **DONE 2026-09-16** — 20 of 20, with case 6 flipping its assertion and reporting that it did. | — |
 | ~~**5**~~ | ~~THE FIRST REAL TRANSACTION: a bounded approval~~ | **DONE 2026-09-16.** `0x999fdb79…` and `0x178977d3…`, both mined, $0.0128. Two defects surfaced on a call that moved nothing, which is exactly what this step was for. | — |
 | ~~**6**~~ | ~~Verify the approval from the chain~~ | **DONE** — the CLI re-read both allowances (1 and 1, expiry set) and an independent process re-read both receipts, nonces and the gas actually paid. | — |
-| ~~**7**~~ | ~~Clear the prerequisites list~~ | **PARTLY DONE 2026-09-16** — `approvals-not-inline` removed with the evidence in section 2D. **`fill-not-modelled` REMAINS and is the only one**, so live still refuses to arm. Closing it is the operator ACCEPTING a known unknown, not a code change. | it is data, not a comment, and each removal is an edit somebody signs off |
+| ~~**7**~~ | ~~Clear the prerequisites list~~ | **DONE 2026-09-16.** `approvals-not-inline` removed with the evidence in section 2D; **`fill-not-modelled` ACCEPTED by the operator** and removed. `LIVE_PREREQUISITES.length === 0` and `launchbot --live` no longer refuses at the preflight. Exercised with `--minutes 0`: the live boot ran end to end and traded nothing. | it is data, not a comment, and each removal is an edit somebody signs off |
 | **8** | **One live run, bounded hard** | `npm run launchbot -- --live --minutes <small>` | the rails already bound it: $10 a position, 5 concurrent, $100 deployed, 40 trades a day, $15 daily loss |
 | **9** | **Reconcile from a fresh connection** | rows, allowances, balance, `bot_control` | a clean exit is not evidence; this is the standing rule and it applies hardest here |
 
@@ -3998,16 +4163,13 @@ landed and been re-read from the chain does anything in step 8 have a working se
 
 ### WHAT LAUNCHING LIVE LOOKS LIKE — written 2026-09-16, before it has been done
 
-**ONE PREREQUISITE REMAINS AND IT IS NOT A CODE CHANGE.** `fill-not-modelled` is the
-operator ACCEPTING a known unknown: every return figure in this document is mark-to-market
-against a later trade in the pool, and a live fill competes for the same block. Nothing can
-close it but the first live fills or a decision to proceed without them. **Until it is
-removed from `bot/live-preflight.ts`, `launchbot --live` exits 1 and reads:**
+**NO PREREQUISITE REMAINS.** `fill-not-modelled` was ACCEPTED by the operator on
+2026-09-16 — every return figure in this document is mark-to-market against a later trade
+in the pool, a live fill competes for the same block, and nothing but live fills can close
+it. Section 6 carries what was accepted and what still measures it.
 
-```
-REFUSING TO ARM IN LIVE MODE: 1 prerequisite(s) outstanding.
-  1. [fill-not-modelled] ...
-```
+**SO THE COMMAND BELOW NOW TRADES REAL MONEY.** It does not refuse, there is no second
+flag, and nothing will ask.
 
 #### THE COMMAND
 
@@ -4023,7 +4185,7 @@ is no other form of this command.
 
 | # | what | stops it if |
 |---|---|---|
-| 1 | `assertLiveReady` | any prerequisite is outstanding. **Before a balance is read or a compute unit is spent.** |
+| 1 | `assertLiveReady` | any prerequisite is outstanding — **none is, so this now PASSES.** It still runs first, before a balance is read or a compute unit is spent, so a future entry added to that list refuses at the cheapest possible moment. |
 | 2 | `createBroadcaster` over a `BroadcastRpc` | no `BOT_PRIVATE_KEY`; a malformed one; the endpoint's chain id is not 4663; the derived address is not `BOT_WALLET_ADDRESS` |
 | 3 | the wallet gate | `BOT_WALLET_ADDRESS` unset — a live run RAISES rather than arming unchecked; or the balance is below `MAX_CONCURRENT × MAX_POSITION_USD` = $50. **Exit code 3.** |
 | 4 | `reconcileOnBoot` | any non-terminal row cannot be adjudicated against the chain → HALT |
