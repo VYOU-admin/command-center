@@ -121,16 +121,38 @@ async function resolveOne(
     id: string; mode: string; status: string; pool_id: string; token: string;
     counter: string; fee: number; tick_spacing: number; hooks: string;
     first_swap_block: string; exit_sim_from: string | null; position_usd: string | null;
+    exit_due_block: string | null;
   }>(
     `select id::text, mode, status, pool_id, token, counter, fee, tick_spacing, hooks,
-            first_swap_block::text, exit_sim_from, position_usd::text
+            first_swap_block::text, exit_sim_from, position_usd::text,
+            exit_due_block::text
        from bot_trades where chain = $1 and id = $2`, [CHAIN, tradeId]);
   const row = r.rows[0];
   if (row === undefined) throw new Error(`no bot_trades row ${tradeId} on ${CHAIN}`);
-  if (row.status !== 'needs_exit') {
+  const headBlock = Number(BigInt(String(await rpc.call('eth_blockNumber', []))));
+  /*
+   * `holding` IS ACCEPTED FOR A LIVE ROW PAST ITS HORIZON, AND THE REASON IS AN ORDERING
+   * DEFECT RATHER THAN A LOOSENING.
+   *
+   * The path that turns `holding` into `needs_exit` is boot reconciliation — and the
+   * boot runs the ARMING GATE first, which refuses when the balance is below
+   * `MAX_CONCURRENT x MAX_POSITION_USD`. So a wallet drained by its own open positions
+   * cannot boot to recover them: **the guard that stops new trades also stops the
+   * recovery of existing ones.** That is the same shape as the abandon defect it is
+   * being used to clean up after, and it is recorded in section 7 rather than fixed
+   * here under time pressure.
+   *
+   * The narrowing that keeps this safe: LIVE only, and only once `exit_due_block` has
+   * actually passed. A dry-run row or a position still inside its horizon is refused
+   * exactly as before.
+   */
+  const overdue = row.status === 'holding' && !isDryRunMode(row.mode)
+    && row.exit_due_block !== null && Number(row.exit_due_block) <= headBlock;
+  if (row.status !== 'needs_exit' && !overdue) {
     throw new Error(`trade ${tradeId} is '${row.status}', not 'needs_exit'. This tool only `
-      + 'resolves a position the boot sweep could not sell; anything else is a different '
-      + 'question and must not be marked unsellable.');
+      + 'resolves a position the boot sweep could not sell, or a LIVE `holding` row whose '
+      + 'exit horizon has already passed; anything else is a different question and must '
+      + 'not be marked unsellable.');
   }
   /*
    * WHOSE POSITION IS IT? A LIVE ROW CARRIES NO `exit_sim_from` AND THAT IS DELIBERATE.
@@ -278,7 +300,7 @@ async function resolveOne(
                    || 'resolve-unsellable: ' || $5 || ' ('
                    || $3 || '); ' || $4,
             updated_at = now()
-      where chain = $1 and id = $2 and status = 'needs_exit'`,
+      where chain = $1 and id = $2 and status in ('needs_exit', 'holding')`,
     [CHAIN, tradeId, `${EXIT_RETRY.BOUND_BPS.join('/')} bps`, detail.slice(0, 120),
       paysNothing ? 'pool pays 0 at every rung'
         : `the TOKEN refuses our transfer: ${refusal ?? ''}`]);
