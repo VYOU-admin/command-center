@@ -72,7 +72,7 @@ arming              PASSES BOTH. $126.73 against MAX_CONCURRENT 5 x $10 = $50
                     refused, so the ALLOW direction had never been observed.
 mode                dry-run only. Five runs to date; see section 6.
 limits              the six rails of section 4, all enforced in bot/rails.ts and
-                    all exercised by npm run rail-drill (24 of 24)
+                    all exercised by npm run rail-drill (26 of 26)
 trades to date      0 REAL. 107 hypothetical rows across every dry-run mode.
 capital approved    $100 total, $10 per position (operator, 2026-09-16), and since
                     2026-09-16 ENFORCED as MAX_DEPLOYED_USD rather than stated here
@@ -1864,10 +1864,10 @@ so one of those two fires first every time. **The cap is a backstop against thos
 raised** — which makes it precisely the kind of rail that gets written wrong and never
 noticed, and precisely the kind this document says must be tripped deliberately.
 
-#### THE DRILL: 24 of 24, AND EIGHT OF THEM ARE THE NEW RAIL
+#### THE DRILL: 26 of 26, AND TEN OF THEM ARE THE NEW RAIL
 
-`npm run rail-drill -- --commit`, on `chain='drill'` so nothing it does can touch the live
-dry run. **Every cap case holds FOUR positions, one below `MAX_CONCURRENT`, so the cap is
+`npm run rail-drill -- --commit`, **26 of 26**, on `chain='drill'` so nothing it does can
+touch the live dry run. **Every cap case holds FOUR positions, one below `MAX_CONCURRENT`, so the cap is
 the only rail that can fire** — otherwise a case would pass its BLOCK expectation while
 testing concurrency. The cap admits while `deployed + $10 <= $100`, so $90 deployed is the
 last admissible state:
@@ -1884,6 +1884,8 @@ PASS  $91 deployed WITH a +$50 profitable day                     BLOCK   <- NO 
 PASS  an open position with a NULL position_usd                   BLOCK   <- UNKNOWN
         MAX_DEPLOYED_USD: deployed capital is UNKNOWN -- 1 open position(s) carry a
                           null position_usd, which sum() would silently treat as $0
+PASS  $91 of 'needs_exit' positions, MAX_CONCURRENT seeing 0     BLOCK
+PASS  $91 of 'exit_exhausted' positions, same                    BLOCK
 ```
 
 **THE LOSS CASES USE $11, WHICH IS BELOW `MAX_DAILY_LOSS_USD`'S $15, DELIBERATELY.** A
@@ -1932,6 +1934,55 @@ rows now carry a real basis unless the case is specifically about its absence.
 own report: `bot_trades` on `chain='drill'` **0**, `bot_control` **0**. And on the live
 chain, **0 open rows and 0 open rows with a null `position_usd`** — so the new unknown-basis
 branch cannot block the running dry run.
+
+#### RE-AUDITING THE CAP FOUND A HOLE IN IT, AND THE DOCUMENT WAS WRONG ABOUT THE STORE
+
+**The first version of the cap summed `position_usd` over `NON_TERMINAL`, and a position
+the exit ladder COULD NOT SELL is not in that set.** `NON_TERMINAL` answers "what must
+boot reconciliation resolve"; the cap asks a different question — *what is our money still
+in* — and a stuck position is the clearest possible yes to the second while sitting
+outside the first. **It is the worst kind of deployed capital, not the least**: money in a
+token nothing has managed to sell. The cap would have read **$0 deployed** over it.
+
+**AND `exit_exhausted` IS WORSE THAN `needs_exit`, BECAUSE NOTHING SWEEPS IT AT ALL.**
+Section 6 above records the fix that replaced it: *"They were first written as
+`exit_exhausted`, which is not in `NON_TERMINAL` — so the next boot would never have
+looked at them again … They are now `needs_exit`."* **The code changed and the seven rows
+did not.** Read from the store on 2026-09-16:
+
+```
+status                  n  with_basis  with_pnl   sum(position_usd)
+simulated              51     51          0             510
+sim_reverted           36     36          0             360
+closed                 10     10          0             100
+exit_exhausted          7      7          0              70   <- the seven
+closed_unsimulatable    2      2          0              20
+closed_unsellable       1      1          0              10
+```
+
+**Seven positions the ladder could not sell are, right now, in a status no set contains** —
+not `NON_TERMINAL`, so boot reconciliation never examines them; not `needs_exit`, so
+`clearNeedsExit` never sweeps them. This document asserted they had been migrated. They
+had not. `ROBINHOOD.md`'s rule applies exactly: **a claim about stored state has to be
+re-checked against the store whenever the store changes**, and "they are now `needs_exit`"
+was a description of a code change written as though it were a description of data.
+
+**The cap now uses a new `HELD` set** — `NON_TERMINAL` plus `needs_exit` and
+`exit_exhausted` — and the drill guards it in the shape that would have hidden the hole:
+`$91` of stuck positions **with `MAX_CONCURRENT` seeing 0 open**. Under the old set every
+one of those cases would have returned ALLOW.
+
+**`MAX_CONCURRENT` STILL USES THE NARROWER SET AND WAS DELIBERATELY NOT CHANGED.**
+Widening a rail that has already been exercised changes what that rail means, and that is
+an operator's decision rather than a side effect of adding a different one. It is carried
+as open in section 7.
+
+**THE THIRD THING THE STORE SAID: `net_pnl_usd` IS NULL ON ALL 107 ROWS.** No dry run has
+ever realised a PnL, so the cap's loss term — and `MAX_DAILY_LOSS_USD` with it — reads
+exactly $0 on live data no matter what happened. Both are exercised only in the drill.
+That is expected for a dry run and it means **the loss half of the cap has never been
+measured against anything real**, which is stated rather than left for someone to assume
+from a passing drill.
 
 ## 7. Rules here the code does not implement
 
@@ -2001,6 +2052,24 @@ category C.
   +450 s is exactly 0.00000 in every window and both halves. Unresolved.
 - **The stored `hooks` values are one byte short** on rows written before that decoder
   was fixed. Deterministic, so grouping is unaffected.
+- **SEVEN `exit_exhausted` ROWS ARE STRANDED IN A STATUS NOTHING SWEEPS.** They carry
+  $70 of cost basis between them. `NON_TERMINAL` does not contain the status, so boot
+  reconciliation never examines them, and `clearNeedsExit` looks only for `needs_exit`.
+  The fix of 2026-09-16 changed the code and never migrated the rows, and this document
+  said otherwise until the store was read. **They now count toward `MAX_DEPLOYED_USD`**
+  via the `HELD` set, which is the exposure half; **nothing yet tries to exit them**,
+  which is the other half, and migrating them to `needs_exit` would make the next boot
+  attempt exactly that. It is a write to live state and is left to the operator.
+- **`MAX_CONCURRENT` COUNTS A NARROWER SET THAN THE CAPITAL CAP DOES.** Concurrency uses
+  `NON_TERMINAL`; the cap uses `HELD`, which also contains `needs_exit` and
+  `exit_exhausted`. So five stuck positions plus five open ones is ten positions against
+  a `MAX_CONCURRENT` of 5. Widening an exercised rail is a change to what it means and
+  was not made as a side effect of adding a different rail.
+- **`net_pnl_usd` IS NULL ON ALL 107 STORED ROWS, so the day's realised loss is
+  structurally $0 on live data.** Both `MAX_DAILY_LOSS_USD` and the capital cap's loss
+  term therefore read zero whatever happens, and both have only ever been exercised
+  against seeded drill rows. A dry run realises nothing, so this is expected — but no
+  figure either rail produces on the live path is a measurement of anything.
 - **`MAX_DEPLOYED_USD` CANNOT BIND ON THE LIVE PATH AS THE RAILS STAND.** `MAX_CONCURRENT
   5 x $10` of open basis plus `MAX_DAILY_LOSS_USD $15` caps deployed capital at **$65**
   against a $100 cap, so one of those two always fires first. It is a backstop against
