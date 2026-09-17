@@ -63,6 +63,22 @@ interface Sample {
   polls: number;
   /** ms of wall clock since the previous head advance. */
   headGapMs: number | null;
+  /**
+   * HOW MANY BLOCKS HEAD ADVANCED at this observation.
+   *
+   * **WITHOUT THIS, `headGapMs` MEASURES THE POLL RATE RATHER THAN THE CHAIN.** The first
+   * run of this tool reported a 155 ms median "between new blocks" against the ~101 ms
+   * `ROBINHOOD.md` measures over 935,564 blocks — because at a ~115 ms effective poll
+   * period head sometimes advances TWO blocks between observations, and counting that as
+   * one gap inflates the interval by however often it happens. The true interval is total
+   * elapsed over total blocks, which is immune to the poll rate.
+   *
+   * This is the failure shape this project records twice already: a bound of mine
+   * presented as a fact about the market — `surv_1h` reading 0.02% because it measured its
+   * own window cap, and the +600 s horizon reading exactly 0.00000 because it asked for a
+   * trade after its own last tick.
+   */
+  blocksAdvanced: number;
   /** The block's own timestamp minus the previous block's, in seconds. */
   tsGapS: number | null;
   txCount: number;
@@ -140,6 +156,7 @@ async function main(): Promise<void> {
 
     const nowAt = Date.now();
     const headGapMs = prevHeadAt === null ? null : nowAt - prevHeadAt;
+    const blocksAdvanced = h - prevHead;
     prevHead = h; prevHeadAt = nowAt;
 
     /* The new block, WITH its transactions, so a receipt can be asked for. */
@@ -185,7 +202,7 @@ async function main(): Promise<void> {
     if (!got && !capped) throw new Error('receipt loop exited without an answer');
 
     out.push({
-      block: h, receiptLagMs: lag, polls, headGapMs, tsGapS,
+      block: h, receiptLagMs: lag, polls, headGapMs, blocksAdvanced, tsGapS,
       txCount: txs.length,
       gasUsed: blk.gasUsed === undefined ? 0 : Number(BigInt(blk.gasUsed)),
       gasLimit: blk.gasLimit === undefined ? 0 : Number(BigInt(blk.gasLimit)),
@@ -222,10 +239,30 @@ async function main(): Promise<void> {
       + `reads as up to ${pollMs} ms. The first-ask count is the figure that is not.`,
   });
 
+  /*
+   * THE TRUE BLOCK INTERVAL IS ELAPSED OVER BLOCKS, NOT THE MEDIAN OBSERVATION GAP.
+   * Only samples with a known preceding observation contribute to both sides.
+   */
+  const paired = out.filter((s) => s.headGapMs !== null);
+  const totalGapMs = paired.reduce((a, s) => a + (s.headGapMs ?? 0), 0);
+  const totalBlocks = paired.reduce((a, s) => a + s.blocksAdvanced, 0);
+  const multi = paired.filter((s) => s.blocksAdvanced > 1).length;
+
   log.info('A. INCLUSION — NOT MEASURED, BOUNDED FROM WHAT IS OBSERVABLE', {
-    observed_wall_clock_between_new_blocks_ms: {
+    block_interval_ms_TRUE: {
+      value: totalBlocks === 0 ? null : r2(totalGapMs / totalBlocks),
+      derivation: `${totalGapMs} ms of wall clock over ${totalBlocks} blocks across `
+        + `${paired.length} observations`,
+      note: 'elapsed over BLOCKS, not the median observation gap — the latter measures '
+        + 'the poll rate whenever head advances more than one block between polls',
+      observations_where_head_advanced_more_than_one_block: multi,
+      robinhood_md_reference: '~101 ms, measured over 935,564 blocks / 94,548 s',
+    },
+    observation_gap_ms_NOT_the_block_interval: {
       median: r2(quantile(headGaps, 0.5)), p90: r2(quantile(headGaps, 0.9)),
       max: headGaps.length ? Math.max(...headGaps) : null,
+      note: 'kept only to show the difference. This is how often THIS TOOL looked, and '
+        + 'reporting it as the block interval is what the first run got wrong.',
     },
     block_timestamp_gap_seconds: {
       median: r2(quantile(tsGaps, 0.5)), max: tsGaps.length ? Math.max(...tsGaps) : null,
@@ -234,8 +271,19 @@ async function main(): Promise<void> {
         + 'better one',
     },
     congestion: {
-      gas_used_pct_of_limit_median: r2(quantile(fullness, 0.5)),
-      gas_used_pct_of_limit_max: fullness.length ? r2(Math.max(...fullness)) : null,
+      /*
+       * RAW FIGURES BESIDE THE PERCENTAGE. The first run reported 0% for BOTH the median
+       * and the max, which tells a reader nothing except that the ratio is small — and a
+       * statistic that reads zero at every quantile is indistinguishable from one that
+       * was never computed.
+       */
+      gas_used_median: r2(quantile(out.map((s) => s.gasUsed), 0.5)),
+      gas_used_max: Math.max(...out.map((s) => s.gasUsed)),
+      gas_limit_median: r2(quantile(out.map((s) => s.gasLimit), 0.5)),
+      gas_used_pct_of_limit_median: quantile(fullness, 0.5) === null ? null
+        : Number((quantile(fullness, 0.5) ?? 0).toFixed(4)),
+      gas_used_pct_of_limit_max: fullness.length
+        ? Number(Math.max(...fullness).toFixed(4)) : null,
       tx_per_block_median: r2(quantile(out.map((s) => s.txCount), 0.5)),
       tx_per_block_max: Math.max(...out.map((s) => s.txCount)),
     },
