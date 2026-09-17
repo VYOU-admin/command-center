@@ -136,11 +136,39 @@ async function main(): Promise<void> {
       /* ---- 1. THE WALLET GATE --------------------------------------------- */
       const wallet = configuredWallet();
       if (wallet === null) {
+        /*
+         * A LIVE RUN WITHOUT A CONFIGURED WALLET NOW RAISES, AND THIS USED TO BE A NOTE
+         * THAT PROMISED IT WOULD.
+         *
+         * The text here said "a dry run may proceed without one ... a live mode must not,
+         * and none exists" — written when live mode did not exist, so the second clause
+         * was a description of the world rather than a guarantee. Live mode exists as of
+         * 2026-09-16 and NOTHING ENFORCED IT: the branch warned and carried on, so a live
+         * run would have armed with **no balance check at all**, and the capital rails
+         * would have been bounded by running out of money rather than by the rails.
+         *
+         * That is ROBINHOOD.md rule 3 exactly — a documented guarantee the code does not
+         * implement is a defect in the code, always in that direction. It was masked only
+         * because `assertLiveReady` refuses first; it would have surfaced the moment the
+         * prerequisites list emptied, which is the worst possible time to find it.
+         *
+         * A dry run may still proceed: it holds nothing and broadcasts nothing, and the
+         * balance is UNREAD rather than assumed.
+         */
+        if (BOT_MODE.live) {
+          throw new Error('REFUSING TO ARM IN LIVE MODE WITH NO BOT_WALLET_ADDRESS. The '
+            + 'arming gate exists to confirm the wallet covers what the rails can put at '
+            + `risk (${requiredUsd()} USD); with no address there is nothing to read a `
+            + 'balance for, so the bot would arm without checking its funds and the '
+            + 'capital rails would be bounded by running out of money instead. It is also '
+            + 'what createBroadcaster compares the key\'s derived address against, so '
+            + 'without it the guard against signing for the wrong account is inert.');
+        }
         log.warn('NO WALLET CONFIGURED', {
           required_usd: requiredUsd(),
           note: 'BOT_WALLET_ADDRESS is unset. A dry run may proceed without one because '
-            + 'it holds nothing and broadcasts nothing; a live mode must not, and none '
-            + 'exists. The balance is UNREAD rather than assumed.',
+            + 'it holds nothing and broadcasts nothing. A LIVE run raises above rather '
+            + 'than arming without a balance check. The balance is UNREAD, not assumed.',
         });
       } else {
         walletState = await readWalletState(rpc, c, wallet);

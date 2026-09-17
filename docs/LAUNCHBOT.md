@@ -61,7 +61,14 @@ STATUS              BUILT. LIVE MODE EXISTS AND IS PROVABLY OFF (2026-09-16).
                     bot/signer.ts reads a key or constructs a signer.
 first dry run       2026-09-16, 65 minutes, 24 hypothetical trades recorded
 wallet address      0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a  (supplied by the
-                    operator 2026-09-16; ADDRESS ONLY -- no key, no signing path)
+                    operator 2026-09-16)
+signing key         BOT_PRIVATE_KEY IS SET as a Railway service variable, 2026-09-16.
+                    CONFIRMED by npm run signer-check to control exactly that
+                    address, on chainId 4663, through a transport that cannot
+                    broadcast. The key is never logged, returned or transmitted;
+                    only its length (66 = 0x + 64 hex) is ever reported.
+                    BOT_WALLET_ADDRESS is NOT set, and a live run now RAISES
+                    without it -- see section 2A.
 wallet balance      $126.73, READ FROM THE CHAIN 2026-09-16 by npm run wallet-probe.
                     native 52,569,197,952,034,720 wei = 0.05256919795203472 ETH at
                     ETH/USD 2,410.735 from the chain's own series. WETH 0,
@@ -94,7 +101,8 @@ capital approved    $100 total, $10 per position (operator, 2026-09-16), and sin
 ```
 
 **NOTHING IN THIS REPOSITORY HAS EVER WRITTEN TO A CHAIN.** Still true on 2026-09-16
-after live mode was built. What changed is that the path now EXISTS and is gated rather
+after live mode was built AND after a key was supplied — the signer has been constructed
+and its address confirmed, and no transaction has been built, signed or sent. What changed is that the path now EXISTS and is gated rather
 than being absent: `eth_sendRawTransaction` is named in exactly two files — `bot/rpc.ts`
 to refuse it and gate the broadcast client, and `bot/signer.ts` as its one caller — and
 private-key handling exists in `bot/signer.ts` alone, where the build gate confines it.
@@ -2934,6 +2942,87 @@ That is the shape `ROBINHOOD.md` records for `token_swap_logs`. The second bug w
 the comment explaining the first used backticks to quote SQL identifiers, and `BOT_SCHEMA`
 is a backtick template literal, so it terminated the string and broke the build instantly.
 
+### THE KEY ARRIVED, AND WHAT WAS CONFIRMED — 2026-09-16
+
+`BOT_PRIVATE_KEY` is set as a Railway service variable. **The signer reads it, and it
+controls exactly the expected address.**
+
+```
+npm run signer-check -- --live --expect 0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a
+
+key_variable            BOT_PRIVATE_KEY    present, 66 chars (= 0x + 64 hex)
+derived_address         0x4ab56f6a15b7b17948c624c68462c2b825d2cb4a
+expected_address        0x4ab56f6a15b7b17948c624c68462c2b825d2cb4a
+MATCHES                 TRUE
+chain_id_confirmed      4663
+builds_a_transaction    false          60 CU, exit 0
+```
+
+**THE KEY IS NEVER LOGGED, RETURNED OR TRANSMITTED.** Only its LENGTH is reported, because
+a wrong-length value is the likeliest way a key is mis-pasted and a length is not secret.
+Nothing in this document, any log line or any stored row contains any part of it.
+
+#### WHY THIS NEEDED A NEW CLI RATHER THAN AN EXISTING PATH
+
+Neither existing route could answer "does this key control the address we think it does"
+safely. `launchbot --live` refuses at `assertLiveReady` **before** `createBroadcaster` is
+reached, so it never derives an address at all. `approve-setup --live` without `--commit`
+exits before the broadcaster is built, and **with** `--commit` it would BROADCAST —
+**confirming a key by sending a transaction is the opposite of confirming it first.**
+
+`signer-check` calls the one function the live path uses, reports the address, and stops.
+
+**IT CANNOT BROADCAST, STRUCTURALLY.** It hands `createBroadcaster` a **`ReadOnlyRpc`**,
+so the signer it returns has a transport that refuses all 8 broadcast and signing methods
+by name — even a future edit calling `.send()` there would be refused by the transport
+rather than by this file's good intentions. No calldata, no nonce read, no gas estimate.
+
+**`--expect` IS REQUIRED AND ITS COMPARISON IS THE TOOL'S OWN.** The guard inside
+`createBroadcaster` compares the derived address against `BOT_WALLET_ADDRESS` — and is
+**skipped entirely when that variable is unset**, so relying on it would let "confirmed"
+mean "nothing was compared".
+
+#### THE DRILL'S CASE 6 LOST ITS PREMISE, AND SAID SO
+
+`live-gate-drill` asserted *live mode with no key refuses at startup*. A key now exists, so
+that premise is gone — and **section 8 step 4 predicted this in advance**: *"case 6 becomes
+vacuous the moment a key exists and the drill SAYS SO."*
+
+The expectation now follows the world and **asserts the opposite instead**: with a key
+present, live mode must CONSTRUCT a signer. That is not a softer test, it is a different
+and equally real one — **it is the only way to tell "the gate is off" from "the feature was
+never built"**. The drill reports which assertion it made, so a pass here cannot be read as
+proof of the other. **20 of 20**, and the no-key refusal stands on the runs made before the
+key arrived, recorded in 2A.
+
+#### AND ENUMERATING THE PREREQUISITES FOUND A DEFECT THE KEY MADE LIVE
+
+`launchbot`'s wallet gate carried this note: *"a dry run may proceed without one ... **a
+live mode must not, and none exists**"*. It was written when live mode did not exist, so
+the second clause was a description of the world rather than a guarantee — **and nothing
+enforced it.** The branch warned and carried on.
+
+**So a live run would have armed with no balance check at all**, leaving the capital rails
+bounded by running out of money rather than by the rails. `ROBINHOOD.md` rule 3 exactly: a
+documented guarantee the code does not implement is a defect in the code, always in that
+direction.
+
+**It was masked only because `assertLiveReady` refuses first** — it would have surfaced the
+moment the prerequisites list emptied, which is the worst possible time to find it. A live
+run with no `BOT_WALLET_ADDRESS` now RAISES, naming both consequences: no balance to gate
+on, and the in-signer address guard inert.
+
+#### WHAT THE KEY'S PRESENCE CHANGES ELSEWHERE, STATED RATHER THAN ASSUMED
+
+The variable is on the SERVICE, so it is in the environment of **every** process in that
+container — including the scheduler running the nine monitors. **Nothing in that path can
+reach it**: `check-live-gate` confines every read of the variable to `bot/signer.ts`, and
+no monitor calls `createBroadcaster`. It is inert there rather than merely unused.
+
+**And setting it replaced the container**, as `ROBINHOOD.md` says a variable change does —
+deployment `4757e002`, pid 1 restarting at 01:52:54. Nothing was running, so nothing was
+lost; the commit was re-verified from `/app/dist` before any of the above ran.
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
@@ -3154,9 +3243,13 @@ gates; the bot cannot arm and no key exists.
 
 ### WHAT THE OPERATOR SUPPLIES — two things, and only the first is secret
 
-1. **A private key for `0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a`**, as
-   `BOT_PRIVATE_KEY`, 32 bytes of hex. **Step 2 below is now done, so nothing in the code
-   is waiting on anything but this.** `bot/signer.ts` is the only file that may read it
+1. ~~**A private key**~~ — **SUPPLIED 2026-09-16 and CONFIRMED.** `BOT_PRIVATE_KEY` is a
+   Railway service variable and `signer-check` verified it controls
+   `0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a` on chainId 4663, without building or
+   sending anything.
+1b. **`BOT_WALLET_ADDRESS`, set to that same address.** Not yet set. Without it the arming
+   gate has no balance to check and `createBroadcaster`'s address guard is inert — **a
+   live run now RAISES rather than proceeding**, so this is required rather than advisable. `bot/signer.ts` is the only file that may read it
    and the build gate enforces that. **It must be the key for that exact address** — the
    signer refuses if it derives anything else, because every rail, balance read and
    reconciliation is about the configured address.
