@@ -29,14 +29,19 @@ export interface TradeRow {
   exitSimStatus: string | null;
   px30s: number | null; px300s: number | null;
 }
-/**
- * THE ONE PREDICATE for "is this mode hypothetical". Exported so a test can exercise it
- * and so no caller re-implements it as an equality check, which is how the banner came
- * to announce live trades over a dry run.
+/*
+ * THE ONE PREDICATE for "is this mode hypothetical" NOW LIVES IN `bot/mode.ts`, the module
+ * that decides the mode in the first place, and is re-exported here so existing importers
+ * keep working without a second copy.
+ *
+ * It was defined in this file, and when live mode was built the obvious move was to write
+ * the same two-line test into the mode module — which would have put the page's idea of
+ * "is this real money" and the bot's idea of it in two places that can drift. The banner
+ * already announced "THIS PAGE CONTAINS LIVE TRADES" over 34 hypothetical rows once,
+ * because a caller re-implemented this as an equality check.
  */
-export function isDryRunMode(mode: string): boolean {
-  return mode === 'dry-run' || mode.startsWith('dry-run-');
-}
+export { isDryRunMode } from '../bot/mode.js';
+import { isDryRunMode } from '../bot/mode.js';
 
 export interface TradeTotals {
   mode: string; trades: number; wins: number; netPnl: number; gas: number;

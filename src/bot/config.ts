@@ -107,24 +107,43 @@ export const RAILS = {
 } as const;
 
 /**
- * THE SLIPPAGE BOUND, AND IT IS OURS RATHER THAN THEIRS.
+ * THE SLIPPAGE BOUND. **CHANGED 2026-09-16 FROM 300 TO 1000 bps, OPERATOR-APPROVED, ON
+ * MEASURED EVIDENCE.** LAUNCHBOT.md section 4 and section 6 carry the whole derivation.
  *
- * Measured: `amountOutMinimum` was 0 in 9 of 9 native-ETH buys observed on this chain.
- * Those buyers take NO protection. That is not copied -- an unprotected buy into a pool
- * that moves against us is how a $10 position becomes $3.
+ * WHY IT MOVED, AND IT IS NOT A TUNED CONSTANT. `revert-economics` priced every launch
+ * the bot has ever simulated against the router's own output — an unreachable
+ * `amountOutMinimum` makes `V4TooLittleReceived` report what the pool would actually have
+ * paid — and then asked what the refused trades would have DONE:
  *
- * Derivation, from figures already in LAUNCHBOT.md section 1:
- *   p90 ROUND-TRIP slippage at $10   1.085% HOLDOUT / 0.350% CALM / 0.549% SELLOFF
- *   per leg, roughly half            0.18% .. 0.54%
- *   observed per-tick price movement ~0.8%  (~30 ticks carrying +27% over 450 blocks)
- *   detection runs at 5 s, so several ticks can pass between the last observed trade
- *   and ours landing -- allow three
- *     0.54% + 3 x 0.8% = 2.94%  ->  300 bps
+ *   post-corpus, n=1,388   ACCEPTED median +0.000   REFUSED median +0.439
+ *   bot ground truth n=100 ACCEPTED median +0.202   REFUSED median +0.462
  *
- * IT IS A FIRST VALUE, NOT A MEASUREMENT OF ITSELF. Every trade logs its realised
- * slippage precisely so this can be re-derived from live data rather than argued.
+ * **THE BOUND WAS SELECTING AGAINST POOLS THAT WERE TRADING.** Refused trades had BETTER
+ * exit availability than accepted ones in all four historical windows, and accepted
+ * exit-availability rose monotonically as the bound widened. The bound fires when a pool's
+ * price moved away from our quote, and a pool whose price is moving is a pool that is
+ * trading — so at 300 bps it was refusing 34 tradeable launches to avoid 3 dead ones.
+ *
+ * WHY 1000 AND NOT MORE. The measured defensible range is 1,000–1,600 bps. Above roughly
+ * 1,600 the accepted haircut exceeds the recent-era median gross return of +0.157–0.180,
+ * at which point a filled trade loses more than the trade makes — the same reasoning that
+ * stops the retry ladder. **1,000 is the conservative end of the range and is taken for
+ * that reason**, exactly as +90 s was taken over +180 s for the exit horizon.
+ *
+ * WHY NOT THE OBJECTIVE'S OWN ARGMAX. Maximising median return over all launches says
+ * 1,350 bps on the bot set and 3,800 post-corpus — but the objective is FLAT from there to
+ * 9,400, so it does not identify a bound at all, and its answer is arithmetic rather than
+ * economic: over half of launches score zero, so the median jumps when the zero mass
+ * crosses the 50th percentile. A plateau is a tie, not a finding.
+ *
+ * IT REMAINS OURS AND NOT THEIRS. The 9 of 9 native-ETH buys observed on this chain set
+ * `amountOutMinimum` to 0 and take no protection whatever; that is still not copied.
+ * `buildSwap` still REFUSES a non-positive bound rather than defaulting it.
+ *
+ * WHAT WOULD MOVE IT AGAIN: logged LIVE slippage, which no trade has yet produced. Every
+ * figure behind this number is a simulation against historical state.
  */
-export const SLIPPAGE_BPS = 300;
+export const SLIPPAGE_BPS = 1000;
 
 /**
  * THE MINIMUM CONSECUTIVE SWAPS NEEDED TO MEASURE A POOL'S DEPTH.
@@ -143,64 +162,55 @@ export const SLIPPAGE_BPS = 300;
 export const IMPACT_MIN_OBSERVATIONS = 3;
 
 /**
- * EXIT RETRY. An exit that reverts leaves the bot holding a token with no way out,
- * which is the worst outcome available to it — worse than a bad fill, because a
- * position that cannot be sold is not a loss of some size, it is an unbounded one.
+ * EXIT RETRY. An exit that reverts leaves the bot holding a token with no way out, which
+ * is the worst outcome available to it — worse than a bad fill, because a position that
+ * cannot be sold is not a loss of some size, it is an unbounded one.
  *
- * EVERY NUMBER HERE IS DERIVED FROM THE 11 DECODED ENTRY REVERTS OF 2026-09-16, not
- * picked. `revert-decode` established that 11 of 12 dry-run reverts were
- * `V4TooLittleReceived(uint256,uint256)` — the v4 router reporting that OUR OWN
- * `amountOutMinimum` rejected the trade — and the error's two words state what bound
- * would have cleared. The measured distribution of (our bound / what the pool would
- * actually have paid):
+ * **RE-DERIVED 2026-09-16 WHEN THE BOUND MOVED TO 1000 bps, AND IT GOT SHORTER RATHER
+ * THAN RESCALED.** The rungs are the shortfall over the launches the FIRST rung still
+ * misses, and that set is a function of the first rung — so a ladder calibrated against
+ * 300 bps was answering "what clears the trades 300 bps missed" while the bot now misses
+ * a different and much smaller set. It was `[300, 449, 608, 1343]`; two of those rungs are
+ * now BELOW the entry bound and subsumed by it.
  *
- *     min 1.0151   p25 1.0406   median 1.2248   p75 2.5432   p90 13.70   max 31.71
+ * **THE NEW LADDER IS A NATURAL BREAK, NOT A QUANTILE, AND THAT IS WHY IT IS TWO RUNGS.**
+ * At a 1,000 bps first rung exactly 7 of 100 oracle-priced launches still miss, and they
+ * split perfectly:
  *
- * which is an implied one-leg slippage of 1.49% / 3.90% / 18.35% / 60.7% / 92.7% / 96.85%.
+ *     4 launches need EXACTLY 1343 bps   — all four have an exit, all return +138.4%
+ *     3 launches need 6067 / 6401 / 8445 — all three have NO EXIT AT ALL
  *
- * THE LADDER IS THOSE QUANTILES, IN ORDER. Each attempt clears the cases up to its own
- * quantile and no more, so the schedule is the data rather than a doubling:
+ * There is a clean gap between 1,343 and 6,067 bps and **it coincides exactly with the
+ * dead-pool boundary**. Every launch a third rung could reach is a pool nothing will buy
+ * at any price, which is the finding the drill and the boot fixture both produced from the
+ * other direction: a retry ladder rescues a mispriced quote, not a dead pool.
  *
- *     attempt 1   300 bps   the configured bound (p90 round-trip slippage + drift)
- *     attempt 2   449 bps   the p25 shortfall
- *     attempt 3   608 bps   the MEDIAN shortfall — half of all remaining misses clear
- *     attempt 4 1,343 bps   the p75 shortfall — the last rung worth climbing
+ * **THE STOPPING RULE IS UNCHANGED IN INTENT AND SHARPER IN EFFECT.** It stopped at the
+ * p75 because a rung past it accepts a haircut larger than the position's whole expected
+ * gain. Here the p75 is 6,234 bps — a 62% haircut against a recent-era median gross of
+ * +16-18% — so the p75 and the economic rule now DISAGREE, and the economic rule wins
+ * because it is the reason the p75 rule existed. 1,343 bps sits just under the median
+ * gross; 6,234 is four times above it.
  *
- * **RE-DERIVED 2026-09-16 AFTER THE QUOTE WAS CORRECTED.** The rungs were originally
- * [300, 400, 1835, 6070], the quantiles of the shortfall under the OLD quote — which
- * had no fee term. A rung calibrated against a quote that has since been corrected is
- * a rung calibrated against a defect, so `quote-check` re-measured the same quantiles
- * under the corrected quote, over exactly the trades whose corrected bound still
- * misses (n=14 of 39):
+ * **THE NAIVE QUANTILES WOULD HAVE PRODUCED A DEFECT.** p25 and median are both 1,343 at
+ * n=7, so the mechanical derivation gives `[1000, 1343, 1343, 6234]` — a DUPLICATE rung,
+ * which `exitWithRetry`'s own contract calls one attempt logged twice, plus a final rung
+ * past the stopping rule. Reading the individual launches rather than an interpolated
+ * quantile is what caught it.
  *
- *     p25 449 bps   median 608 bps   p75 1,343 bps   p90 6,067 bps   max 8,445 bps
- *
- * The ladder is 4.5x tighter at its top rung, which is the correction showing through:
- * the trades that still fail now fail by far less, and a rescue no longer has to accept
- * a 60% haircut to land.
- *
- * **IT STOPS AT THE p75 DELIBERATELY, and the corrected figures make that stopping
- * rule sharper rather than weaker.** The p90 is now 6,067 bps — a 60.7% haircut —
- * against a measured median gross return of +16% (recent era) to +56% (corpus era), so
- * a rung past the p75 still guarantees a loss larger than the position's whole expected
- * gain. The p75 itself, 13.4%, now sits just BELOW the recent-era median gross return
- * rather than four times above it, so the last rung is for the first time an economically
- * coherent one rather than a pure damage limit.
- *
- * **n IS 11.** That is a thin base for a four-rung ladder and it is stated rather than
- * buried; these values are a first schedule to be re-derived from logged live exits,
+ * **n IS 4 FOR THE SECOND RUNG.** Thinner than the 11 the old ladder rested on, and
+ * stated rather than buried: these are a schedule to be re-derived from logged LIVE exits,
  * exactly as SLIPPAGE_BPS is.
  *
- * THE INTERVAL IS 5 SECONDS, from the measured median exit fill delay of 1.1–4.5 s
- * across all ten horizons in the 2026-09-16 grid: long enough that a new trade has
- * landed and the quote has genuinely moved, so a retry is a fresh attempt rather than
- * the same one repeated. Four attempts therefore complete within ~15 s.
+ * THE INTERVAL IS 5 SECONDS, from the measured median exit fill delay of 1.1-4.5 s: long
+ * enough that a new trade has landed and the quote has genuinely moved, so a retry is a
+ * fresh attempt rather than the same one repeated. Two attempts complete within ~5 s.
  */
 export const EXIT_RETRY = {
-  MAX_ATTEMPTS: 4,
+  MAX_ATTEMPTS: 2,
   INTERVAL_MS: 5000,
   /** One bound per attempt. Length MUST equal MAX_ATTEMPTS; asserted at load. */
-  BOUND_BPS: [300, 449, 608, 1343],
+  BOUND_BPS: [1000, 1343],
 } as const;
 
 if (EXIT_RETRY.BOUND_BPS.length !== EXIT_RETRY.MAX_ATTEMPTS) {

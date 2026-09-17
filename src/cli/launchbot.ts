@@ -1,14 +1,19 @@
 /**
- * `npm run launchbot -- [--minutes N]` — the launch bot, DRY RUN ONLY.
+ * `npm run launchbot -- [--minutes N] [--run-label x] [--live]` — the launch bot.
  *
- * IT CANNOT BROADCAST. No private key is read anywhere in this build, and the RPC
- * wrapper refuses `eth_sendRawTransaction` and every signing method by name (bot/rpc).
- * "We did not write the call" is weaker than "the call is refused".
+ * **DRY RUN UNLESS `--live` IS PASSED, AND `--live` CANNOT ARM TODAY.** Live mode exists
+ * as of 2026-09-16 and is gated three deep: the prerequisites list in
+ * `bot/live-preflight.ts` is non-empty so it refuses to arm; no key exists so no signer
+ * can be constructed; and `ReadOnlyRpc` refuses every signing and broadcast method BY
+ * NAME in every mode including live. `scripts/check-live-gate.mjs` fails the BUILD if any
+ * file but `bot/signer.ts` reads a key or constructs a signer.
  *
- * ONE IMPLEMENTATION OF EVERY RULE, and the dry run exercises exactly the code a live
- * path would: calldata from `bot/calldata`, the entry rule, sizing and the slippage
- * bound from `bot/rule`, the rails from `bot/config`. A dry run over different code
- * proves nothing about the live path.
+ * ONE IMPLEMENTATION OF EVERY RULE, AND NOTHING FORKS FOR LIVE. The mode decides whether
+ * a broadcaster exists and nothing else: the quote (`bot/quote`), the rails
+ * (`bot/rails`), the entry rule and sizing (`bot/rule`), the calldata (`bot/calldata`),
+ * the exit executor (`bot/exit-exec`) and the reconciliation (`bot/reconcile`) are the
+ * same objects on both paths. A dry run over different code proves nothing about the live
+ * path, which is why there is no second code path to run.
  *
  * ITS OWN PROCESS, at a 5 s cadence. The scheduler runs 15-30 minute monitors; coupling
  * a metered fast loop to nine slow jobs would make a rate limit on one stop the other.
@@ -34,35 +39,27 @@ import { quoteRate, swapAmounts, tokenPrice } from '../bot/price.js';
 import { ReadOnlyRpc } from '../bot/rpc.js';
 import { clearNeedsExit, reconcileOnBoot } from '../bot/reconcile.js';
 import { configuredWallet, readWalletState, requiredUsd } from '../bot/wallet.js';
+import { resolveMode } from '../bot/mode.js';
+import { assertLiveReady } from '../bot/live-preflight.js';
+import { createBroadcaster } from '../bot/signer.js';
 import { executeExit } from '../bot/exit-exec.js';
 
 /*
- * THE MODE IS ALWAYS A DRY-RUN MODE, AND A RUN LABEL ONLY SUFFIXES IT.
+ * THE MODE COMES FROM `bot/mode.ts` AND IS NOT DECIDED HERE.
  *
- * `MAX_TRADES_PER_DAY` counts per (chain, mode) per calendar day, which is right for a
- * risk limit and wrong for a test harness: dry run 2 was truncated to 16 trades because
- * dry run 1 had already spent the day's budget, and LAUNCHBOT.md section 7 records the
- * remedy as "a drill mode that runs against a separate mode value". This is that.
+ * This file used to parse `--run-label` and build the mode string itself. When live mode
+ * was added that would have become a SECOND place deciding whether the bot is about to
+ * spend real money, which is the two-implementations trap with money attached — the
+ * failure this project has recorded seven times, most recently a price convention
+ * implemented twice as reciprocals that reported a median return of -1.0000.
  *
- * **THE LABEL CANNOT PRODUCE A NON-DRY-RUN MODE.** It is a SUFFIX on the literal
- * 'dry-run', not a replacement for it, so no argument can make this process write a row
- * that reads as live. The rail is not weakened — it is still enforced in full within
- * whatever mode is running; it simply gives a test run its own budget rather than
- * making two runs share one.
- *
- * `/trades` already groups totals per mode and never sums across them, so a labelled
- * run cannot be added to any other run's figures.
+ * `resolveMode` owns all of it: live requires the explicit flag, an env var that looks
+ * like an attempt to enable live RAISES rather than being ignored, a label can only
+ * SUFFIX 'dry-run' so no argument can produce a live label, and `--live` cannot be
+ * combined with a label because a label grants its own MAX_TRADES_PER_DAY budget.
  */
-const RUN_LABEL = ((): string => {
-  const i = process.argv.indexOf('--run-label');
-  if (i < 0) return '';
-  const raw = String(process.argv[i + 1] ?? '');
-  if (!/^[a-z0-9-]{1,24}$/.test(raw)) {
-    throw new Error(`--run-label must match [a-z0-9-]{1,24}, got "${raw}"`);
-  }
-  return raw;
-})();
-const MODE = RUN_LABEL ? `dry-run-${RUN_LABEL}` : 'dry-run';
+const BOT_MODE = resolveMode(process.argv.slice(2), process.env);
+const MODE = BOT_MODE.label;
 const CHAIN = 'robinhood';
 const PRICING = [
   '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
@@ -105,6 +102,31 @@ async function main(): Promise<void> {
    *   3. EXIT every stuck position, before arming
    * Any of the three failing stops the process rather than arming beside a problem.
    */
+  /*
+   * ---- 0. THE LIVE GATE, BEFORE ANYTHING ELSE -----------------------------
+   *
+   * Ordered first deliberately. A live run that is going to be refused must be refused
+   * before it reads a balance, reconciles rows or spends a compute unit, and certainly
+   * before it arms. Two refusals in sequence, both of which MUST fire today:
+   *
+   *   assertLiveReady   -> the prerequisites list is non-empty, so live cannot arm
+   *   createBroadcaster -> there is no key, so no signer can be constructed
+   *
+   * In dry-run both are no-ops: `assertLiveReady` returns immediately and
+   * `createBroadcaster` is never called, so the key is not so much as looked for.
+   */
+  let broadcaster: Awaited<ReturnType<typeof createBroadcaster>> | null = null;
+  if (BOT_MODE.live) {
+    log.warn('LIVE MODE REQUESTED', {
+      mode: BOT_MODE.label,
+      note: 'the explicit flag was passed. Every gate below must clear before anything '
+        + 'can be signed, and no key exists in this build.',
+    });
+    assertLiveReady(BOT_MODE);
+    broadcaster = await createBroadcaster(BOT_MODE, rpc);
+    log.warn('LIVE BROADCASTER CONSTRUCTED', { address: broadcaster.address });
+  }
+
   let walletState = null as Awaited<ReturnType<typeof readWalletState>> | null;
   {
     const c = await pool.connect();
@@ -162,14 +184,20 @@ async function main(): Promise<void> {
   }
 
   log.info('launchbot starting', {
-    mode: MODE, minutes,
+    mode: MODE, live: BOT_MODE.live, minutes,
+    broadcaster: broadcaster === null
+      ? 'NONE — no signer exists in this process and no key was read'
+      : broadcaster.address,
     rails: RAILS, slippage_bps: SLIPPAGE_BPS,
     wallet: walletState === null ? 'NOT CONFIGURED' : walletState.address,
     wallet_balance_usd: walletState === null ? null
       : Number(walletState.balanceUsd.toFixed(2)),
     force_exit_optimism: forceOptimism,
     exit_delay_blocks: EXIT_DELAY_BLOCKS,
-    broadcast: 'IMPOSSIBLE -- no key is read and sendRawTransaction is refused by name',
+    broadcast: broadcaster === null
+      ? 'IMPOSSIBLE in this mode -- ReadOnlyRpc refuses sendRawTransaction by name and '
+        + 'BroadcastRpc cannot be constructed outside live mode'
+      : 'POSSIBLE -- a live broadcaster exists',
   });
 
   let cursor = Number(await rpc.call('eth_blockNumber', []).then((h) => BigInt(String(h))));
