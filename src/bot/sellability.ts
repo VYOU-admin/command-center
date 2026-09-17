@@ -109,6 +109,94 @@ function decode(err: unknown): Decoded {
 }
 
 /**
+ * SIMULATE OUR SELL OF A GIVEN AMOUNT, AT A GIVEN BLOCK.
+ *
+ * Extracted from `checkSellable` so the post-mortem can ask the same question of a
+ * HISTORICAL block — "would the pool have paid us at the moment we bought" — without a
+ * second implementation of the override machinery or the calldata. `checkSellable` calls
+ * it too, so there is exactly one place that knows how to simulate our own sell.
+ *
+ * Returns the ETH the pool would have paid, or a decoded reason it would not.
+ */
+export async function simulateSellAt(
+  rpc: SellabilityRpc,
+  args: {
+    pool: PoolKey; token: string; owner: string; amount: bigint;
+    zeroForOneBuy: boolean; block: string;
+  },
+): Promise<{
+  ethOut: bigint | null; reason: string; detail: string | null;
+  balSlot: number | null; allowSlot: number | null; calls: number;
+}> {
+  let calls = 0;
+  const call = async (params: unknown[]): Promise<string> => {
+    calls += 1;
+    return String(await rpc.call('eth_call', params));
+  };
+  const owner = args.owner.toLowerCase();
+  const token = args.token.toLowerCase();
+  const ethBal = { [owner]: { balance: `0x${(10n ** 20n).toString(16)}` } };
+
+  /* Slot discovery AT THAT BLOCK, verified by reading the contract's own view back. */
+  const balData = `0x70a08231${owner.slice(2).padStart(64, '0')}`;
+  let balSlot: number | null = null;
+  for (let i = 0; i < MAX_SLOT; i += 1) {
+    try {
+      const r = await call([{ to: token, data: balData }, args.block,
+        { [token]: { stateDiff: { [mapSlot(owner, i)]: h32(MAGIC) } } }]);
+      if (BigInt(r) === MAGIC) { balSlot = i; break; }
+    } catch { /* falls through to UNKNOWN */ }
+  }
+  const alData = `0xdd62ed3e${owner.slice(2).padStart(64, '0')}`
+    + PERMIT2.slice(2).padStart(64, '0');
+  let allowSlot: number | null = null;
+  if (balSlot !== null) {
+    for (let i = 0; i < MAX_SLOT; i += 1) {
+      const slot = keccak256(concat([h32(PERMIT2), mapSlot(owner, i)]));
+      try {
+        const r = await call([{ to: token, data: alData }, args.block,
+          { [token]: { stateDiff: { [slot]: h32(MAGIC) } } }]);
+        if (BigInt(r) === MAGIC) { allowSlot = i; break; }
+      } catch { /* same */ }
+    }
+  }
+  if (balSlot === null || allowSlot === null) {
+    return { ethOut: null, reason: 'slots_not_found',
+      detail: `bal=${String(balSlot)} allow=${String(allowSlot)}`,
+      balSlot, allowSlot, calls };
+  }
+
+  const tx = buildSwap({
+    pool: args.pool, zeroForOne: !args.zeroForOneBuy, amountIn: args.amount,
+    amountOutMinimum: UNREACHABLE, deadline: 0xffffffffffn,
+  });
+  const p2slot = keccak256(concat([h32(UNIVERSAL_ROUTER),
+    keccak256(concat([h32(token), mapSlot(owner, 1)]))]));
+  const overrides = {
+    ...ethBal,
+    [token]: { stateDiff: {
+      [mapSlot(owner, balSlot)]: h32(args.amount),
+      [keccak256(concat([h32(PERMIT2), mapSlot(owner, allowSlot)]))]: h32((1n << 256n) - 1n),
+    } },
+    [PERMIT2]: { stateDiff: { [p2slot]: h32((PERMIT2_EXPIRY << 160n) | MAXU160) } },
+  };
+  try {
+    await call([{ from: owner, to: tx.to, data: tx.data, value: '0x0' },
+      args.block, overrides]);
+    return { ethOut: null, reason: 'returned_unexpectedly', detail: null,
+      balSlot, allowSlot, calls };
+  } catch (err) {
+    const d = decode(err);
+    if (d.kind === 'v4_too_little' && d.actual !== undefined) {
+      return { ethOut: d.actual, reason: d.actual === 0n ? 'pays_zero' : 'ok',
+        detail: null, balSlot, allowSlot, calls };
+    }
+    return { ethOut: null, reason: 'reverts', detail: `${d.kind}: ${d.text}`,
+      balSlot, allowSlot, calls };
+  }
+}
+
+/**
  * Simulate the round trip. `latest`, because the question is about trading NOW.
  *
  * The ONE implementation of the calldata is `buildSwap`; nothing here re-encodes a swap.
