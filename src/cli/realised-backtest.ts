@@ -94,8 +94,12 @@ const ENTRY_OFF = 15 * BPS;
  */
 const HOLDS = [30 * BPS, 90 * BPS];
 
-/** How long past the exit mark the bounded column will wait for a sell. */
-const SELL_WINDOW = 300 * BPS;
+/**
+ * How long past the exit mark to wait for a sell. TWO values, deliberately:
+ * +10 s is the bot's real ladder, +300 s is the generous bound. The gap between the
+ * two columns is the waiting bias, which is otherwise invisible.
+ */
+const SELL_WINDOWS = [10 * BPS, 300 * BPS];
 
 const WINDOWS: Array<{ name: string; from: number; to: number }> = [
   { name: 'HOLDOUT-ERA', from: 15115267, to: 42695454 },
@@ -188,7 +192,10 @@ async function main(): Promise<void> {
                round(100.0*count(*) filter (where n_sells=0)/nullif(count(*),0),2)::text
                  as PCT_NEVER_SELLABLE,
                round(100.0*count(*) filter (where n_swaps=1)/nullif(count(*),0),2)::text
-                 as pct_traded_exactly_once
+                 as pct_traded_exactly_once,
+               count(*) filter (where first_swap + ${ENTRY_OFF + Math.max(...HOLDS)
+                 + Math.max(...SELL_WINDOWS)} > ${COV_HI})::int
+                 as TRUNCATED_BY_END_OF_COVERAGE
           from lau`);
 
       /*
@@ -212,7 +219,7 @@ async function main(): Promise<void> {
 
       /* Swaps in the observation span, priced and directed. */
       await c.query('drop table if exists sw');
-      const MAXOFF = ENTRY_OFF + Math.max(...HOLDS) + SELL_WINDOW;
+      const MAXOFF = ENTRY_OFF + Math.max(...HOLDS) + Math.max(...SELL_WINDOWS);
       await c.query(`create temp table sw as
         select s.pool_id, (s.block_number - l.first_swap)::bigint off, s.log_index,
                s.block_number,
@@ -227,68 +234,71 @@ async function main(): Promise<void> {
       for (const hold of HOLDS) {
         const exitOff = ENTRY_OFF + hold;
 
-        await c.query('drop table if exists tr');
-        await c.query(`create temp table tr as
-          with entry as (
-            select distinct on (pool_id) pool_id, price p_in, off e_off
-              from sw where off >= ${ENTRY_OFF} and not is_sell and price > 0
-             order by pool_id, off asc, log_index asc),
-          exit_bounded as (
-            select distinct on (pool_id) pool_id, price p_out_b, off x_off_b
-              from sw where off >= ${exitOff} and off <= ${exitOff + SELL_WINDOW}
-                       and is_sell and price > 0
-             order by pool_id, off asc, log_index asc)
-          select l.pool_id, l.first_swap, l.n_sells, l.n_buys, l.last_sell,
-                 e.p_in, e.e_off, x.p_out_b, x.x_off_b,
-                 -- UNBOUNDED: the first sell anywhere after the exit mark, to the end of coverage
-                 (select case when l.c0_is_counter then abs(s2.amount0)/abs(s2.amount1)
-                                              else abs(s2.amount1)/abs(s2.amount0) end
-                    from v4_swaps_all s2
-                   where s2.pool_id = l.pool_id
-                     and s2.block_number >= l.first_swap + ${exitOff}
-                     and s2.amount0 <> 0 and s2.amount1 <> 0
-                     and (case when l.c0_is_counter then s2.amount1 else s2.amount0 end) < 0
-                   order by s2.block_number asc, s2.log_index asc limit 1) as p_out_u,
-                 (l.first_swap + ${exitOff} + ${SELL_WINDOW} > ${COV_HI}) as censored
-            from lau l
-            left join entry e on e.pool_id = l.pool_id
-            left join exit_bounded x on x.pool_id = l.pool_id`);
-        /* The unbounded lookup needs the price expressed the same way. */
-        await c.query(`update tr set p_out_u = null where p_out_u is not null and p_out_u <= 0`);
-        await c.query('analyze tr');
+        /* The entry is the FIRST BUY at or after the entry mark. It does not depend
+         * on the sell window, so it is built once per hold. */
+        await c.query('drop table if exists ent');
+        await c.query(`create temp table ent as
+          select distinct on (pool_id) pool_id, price p_in, off e_off
+            from sw where off >= ${ENTRY_OFF} and not is_sell and price > 0
+           order by pool_id, off asc, log_index asc`);
+        await c.query('alter table ent add primary key (pool_id); analyze ent');
 
-        await show(`${w.name} 3. CORRECTED RETURN, entry +${ENTRY_OFF / BPS}s hold +${hold / BPS}s`, `
-          with r as (
-            select pool_id, censored,
-                   p_in is null as no_entry_fill,
-                   n_sells = 0 as never_sellable,
-                   case when p_in is null then null
-                        when p_out_b is not null then p_out_b / p_in - 1
-                        else -1.0 end as ret_bounded,
-                   case when p_in is null then null
-                        when p_out_u is not null then p_out_u / p_in - 1
-                        else -1.0 end as ret_unbounded
-              from tr)
-          select
-            (select count(*) from lau)::int                                as rule_launches,
-            count(*) filter (where no_entry_fill)::int                     as NO_BUY_TO_ENTER_ON,
-            count(*) filter (where censored)::int                          as truncated_by_coverage,
-            count(*) filter (where not no_entry_fill)::int                 as scored,
-            count(*) filter (where not no_entry_fill and ret_bounded = -1.0)::int
-                                                                          as SCORED_MINUS_100,
-            count(*) filter (where not no_entry_fill and never_sellable)::int
-                                                                          as of_which_NEVER_SELLABLE,
-            count(*) filter (where not no_entry_fill and ret_bounded > -1.0)::int
-                                                                          as actually_exited,
-            round(percentile_cont(0.25) within group (order by ret_bounded)::numeric,5)::text as p25,
-            round(percentile_cont(0.50) within group (order by ret_bounded)::numeric,5)::text as MEDIAN,
-            round(percentile_cont(0.75) within group (order by ret_bounded)::numeric,5)::text as p75,
-            round(100.0*count(*) filter (where ret_bounded>0)/nullif(count(*) filter (where not no_entry_fill),0),2)::text as PCT_POSITIVE,
-            round(percentile_cont(0.50) within group (order by ret_unbounded)::numeric,5)::text as median_UNBOUNDED_wait,
-            round(percentile_cont(0.50) within group (order by ret_bounded)
-                  filter (where ret_bounded > -1.0)::numeric,5)::text      as median_GIVEN_AN_EXIT,
-            round(100.0*count(*) filter (where ret_bounded>0)/nullif(count(*) filter (where ret_bounded>-1.0),0),2)::text as pct_positive_GIVEN_AN_EXIT
-          from r`);
+        /*
+         * TWO SELL WINDOWS, AND THE COMPARISON BETWEEN THEM IS THE POINT.
+         *
+         * +300 s is generous to the point of being a different strategy: it lets the
+         * trader wait five minutes past their own horizon for SOMEBODY ELSE to sell,
+         * and in a pool still climbing that sell prints at a higher price. +10 s is
+         * what the bot actually does -- a ladder of a few attempts over seconds.
+         * The gap between the two columns is the size of the waiting bias.
+         */
+        for (const win of SELL_WINDOWS) {
+          await c.query('drop table if exists ex');
+          await c.query(`create temp table ex as
+            select distinct on (pool_id) pool_id, price p_out, off x_off
+              from sw where off >= ${exitOff} and off <= ${exitOff + win}
+                        and is_sell and price > 0
+             order by pool_id, off asc, log_index asc`);
+          await c.query('alter table ex add primary key (pool_id); analyze ex');
+
+          await show(
+            `${w.name} 3. REALISED RETURN  entry +${ENTRY_OFF / BPS}s  hold +${hold / BPS}s  `
+            + `sell window +${win / BPS}s`, `
+            with r as (
+              select l.pool_id, l.n_sells,
+                     e.p_in is null as no_entry,
+                     /* NEVER ENTERED IS ZERO, NOT -100%: no position was taken, so no
+                      * money was lost. This is the only zero the corrected method keeps,
+                      * and it matches the published "no-fill = 0" denominator. */
+                     case when e.p_in is null then 0.0
+                          when x.p_out is not null then (x.p_out / e.p_in - 1)::double precision
+                          else -1.0 end as ret,
+                     (x.x_off - ${exitOff}) as delay_blocks
+                from lau l
+                left join ent e on e.pool_id = l.pool_id
+                left join ex  x on x.pool_id = l.pool_id)
+            select
+              count(*)::int                                                     as rule_launches,
+              count(*) filter (where no_entry)::int                             as never_filled_scored_0,
+              count(*) filter (where not no_entry and ret = -1.0)::int          as SCORED_MINUS_100,
+              count(*) filter (where not no_entry and ret = -1.0 and n_sells = 0)::int
+                                                                                as of_which_NEVER_SELLABLE,
+              count(*) filter (where not no_entry and ret = -1.0 and n_sells > 0)::int
+                                                                                as of_which_POOL_DIED,
+              count(*) filter (where ret > -1.0 and not no_entry)::int          as actually_exited,
+              round(percentile_cont(0.25) within group (order by ret)::numeric,5)::text as p25,
+              round(percentile_cont(0.50) within group (order by ret)::numeric,5)::text as MEDIAN,
+              round(percentile_cont(0.75) within group (order by ret)::numeric,5)::text as p75,
+              round(100.0*count(*) filter (where ret > 0)/nullif(count(*),0),2)::text   as PCT_POSITIVE,
+              round(percentile_cont(0.50) within group (order by ret)
+                    filter (where ret > -1.0 and not no_entry)::numeric,5)::text as median_GIVEN_AN_EXIT,
+              -- HOW LONG PAST OUR OWN HORIZON THE SELL WE USED ACTUALLY PRINTED
+              round(percentile_cont(0.50) within group (order by delay_blocks)::numeric/${BPS},1)::text
+                                                                                as exit_delay_MEDIAN_s,
+              round(percentile_cont(0.90) within group (order by delay_blocks)::numeric/${BPS},1)::text
+                                                                                as exit_delay_p90_s
+            from r`);
+        }
       }
     }
 
