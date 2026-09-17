@@ -207,14 +207,28 @@ async function main(): Promise<void> {
     await app.pool.end(); process.exit(0);
   }
 
-  /* ---- 3. THE BROADCAST, WHICH CANNOT HAPPEN IN THIS BUILD --------------- */
+  /* ---- 3. THE BROADCAST ------------------------------------------------- */
   /*
-   * `createBroadcaster` refuses outside live mode and refuses in live mode with no key.
-   * Both refusals are exercised by `live-gate-drill`; this is the real call site and it
-   * reaches the same function.
+   * THE SIGNER GETS THE BROADCAST-CAPABLE TRANSPORT, AND THIS LINE WAS WRONG ON THE
+   * FIRST REAL ATTEMPT.
+   *
+   * It read `createBroadcaster(mode, rpc)` — handing the signer a `ReadOnlyRpc` — while a
+   * `BroadcastRpc` was built beside it and thrown away with `void sender`. So the first
+   * real transaction was refused by the deny-list with *"eth_sendRawTransaction is refused
+   * by ReadOnlyRpc BY NAME"*, having signed nothing and spent no gas.
+   *
+   * **THE LAYERED DEFENCE WORKED AND THE TELL WAS AN UNUSED VARIABLE IN A MONEY PATH.**
+   * `void sender` is exactly the shape that should never appear next to a broadcast, and
+   * it is gone: the broadcast transport is constructed FIRST and is the one the signer
+   * receives, so there is no second transport to pick the wrong one from.
+   *
+   * Note that `signer-check` gives `createBroadcaster` a `ReadOnlyRpc` DELIBERATELY, so
+   * that the signer it builds cannot send. The same line is a feature there and was a
+   * defect here, which is why the transport is now chosen explicitly at each call site
+   * rather than being whatever variable was in scope.
    */
-  const bcast = await createBroadcaster(mode, rpc);
   const sender = new BroadcastRpc(inner, mode);
+  const bcast = await createBroadcaster(mode, sender);
   const sent: string[] = [];
 
   /*
@@ -258,12 +272,13 @@ async function main(): Promise<void> {
     }
   };
 
-  if (step1Needed === 'SEND') await send('STEP 1 token -> Permit2', buildTokenApprove(token, amount));
+  if (step1Needed === 'SEND') {
+    await send('STEP 1 token -> Permit2', buildTokenApprove(token, amount));
+  }
   if (step2Needed === 'SEND') {
     await send('STEP 2 Permit2 -> router',
       buildPermit2Approve(token, amount, now + 3600));
   }
-  void sender;
 
   /* ---- 4. VERIFY BY RE-READING THE CHAIN --------------------------------- */
   /*
