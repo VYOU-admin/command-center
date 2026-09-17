@@ -100,8 +100,46 @@ export const RAILS = {
   MAX_DEPLOYED_USD: 100,
   /** ~8% of the 485/day available in the SELLOFF window. A bounded first exposure. */
   MAX_TRADES_PER_DAY: 40,
-  /** 15% of the $100 capital. Halts for the day. */
-  MAX_DAILY_LOSS_USD: 15,
+  /**
+   * **RAISED FROM $15 TO $50 ON 2026-09-17, OPERATOR-APPROVED, ON A MEASUREMENT THAT DID
+   * NOT EXIST WHEN $15 WAS CHOSEN.** Halts for the day; it does not skip.
+   *
+   * $15 was "15% of the $100 capital" — an arithmetic relationship to another rail,
+   * chosen before the strategy's loss distribution had ever been observed. It is 1.5
+   * positions at `MAX_POSITION_USD`, so **two total losses breach it**, and
+   * `exit-simulate` then measured the total-loss rate at 13.3%-29.0% by window.
+   *
+   * `daily-loss-derive` bootstrapped 20,000 trading days of `MAX_TRADES_PER_DAY` draws
+   * from the 1,046 measured round trips and asked what fraction of days each candidate
+   * would halt. **The rail was firing on a third of ordinary days:**
+   *
+   *     threshold    POOLED     SELLOFF (worst window)
+   *        $15        33.3%          45.5%
+   *        $25        19.0%          30.1%
+   *        $40         7.7%          15.5%
+   *      **$50**     **4.0%**      **9.9%**
+   *        $75         0.7%           2.7%
+   *
+   * **THE DATA OFFERS NO NATURAL BREAK** — the curve is smooth from 33% to 0.1% — so
+   * this is an operator preference informed by the rate rather than a value the
+   * distribution identifies, exactly as `watchlist.top_percent` is in ROBINHOOD.md. What
+   * the measurement DOES settle is that $15 was wrong: a rail that stops a positive-
+   * expectation mode on one day in three is not protecting against a bad day, it is
+   * mistaking an ordinary one for a bad day.
+   *
+   * **EVERY FIGURE ABOVE IS A FLOOR.** The bootstrap draws trades independently, and real
+   * launches correlate — one launchpad shipping a bad template produces a run of losses
+   * more readily than independence implies. So the true halt rate at any threshold is at
+   * least the one shown.
+   *
+   * **AND `MAX_DEPLOYED_USD` SHADOWS IT WHENEVER POSITIONS ARE OPEN.** `deployed` is open
+   * basis plus the day's realised losses, admitted while `deployed + MAX_POSITION_USD <=
+   * MAX_DEPLOYED_USD`, so with concurrency full ($50 open) only **$40** of losses is
+   * admitted before the cap blocks — below this rail. The cap was NOT raised with this:
+   * the operator approved a larger daily loss, not a larger total exposure, and $100
+   * remains the outer bound on both.
+   */
+  MAX_DAILY_LOSS_USD: 50,
   /** A broken calldata shape shows up as reverts and must stop at once. */
   MAX_CONSECUTIVE_REVERTS: 3,
 } as const;

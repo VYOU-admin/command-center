@@ -98,7 +98,7 @@ async function main(): Promise<void> {
     /*
      * EVERY CASE HERE HOLDS 4 POSITIONS, ONE BELOW MAX_CONCURRENT, SO THE CAP IS THE
      * ONLY RAIL THAT CAN FIRE. The cap cannot bind on the live path — MAX_CONCURRENT 5
-     * x $10 plus a $15 daily loss caps deployed at $65 against a $100 cap — so the only
+     * x $10 plus a $50 daily loss caps deployed at $100 against a $100 cap — so the only
      * way to exercise it is to construct a state the other rails would never produce.
      * A drill that could only reach $65 would report PASS on a rail it never reached.
      *
@@ -125,7 +125,10 @@ async function main(): Promise<void> {
      * RAIL CANNOT BE WHAT FIRES. Without this term the cap is a concurrency limit in
      * dollars: a bot that loses $10 and reopens has the same open basis and less money.
      */
-    const loss = RAILS.MAX_DAILY_LOSS_USD - 4;           /* $11 — under the $15 rail */
+    /* Derived from the rail, never typed, so raising it cannot silently make this case
+     * breach BOTH rails at once and pass its expectation while proving nothing about
+     * which one fired. At $50 this is $46. */
+    const loss = RAILS.MAX_DAILY_LOSS_USD - 4;
     await seed(c, 4, 'holding', null, 'fa', (room - loss) / 4);
     await seed(c, 1, 'closed', -loss, 'fb');
     await run(`MAX_DEPLOYED_USD: $${room - loss} open + $${loss} of realised losses `
