@@ -69,7 +69,8 @@
     "exit-broadcast-drill": "node dist/cli/exit-broadcast-drill.js",
     "purge-orphan-attempts": "node dist/cli/purge-orphan-attempts.js",
     "receipt-timing": "node dist/cli/receipt-timing.js",
-    "signer-check": "node dist/cli/signer-check.js"
+    "signer-check": "node dist/cli/signer-check.js",
+    "resolve-unsellable": "node dist/cli/resolve-unsellable.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
