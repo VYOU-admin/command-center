@@ -173,7 +173,7 @@ async function main(): Promise<void> {
       amountIn: 10n ** 18n, firstSwapBlock: 1, sellFrom: OURS,
     };
     const ctxBase = {
-      client: c, wait: async (): Promise<void> => {},
+      client: c, chain: CHAIN, wait: async (): Promise<void> => {},
       pollWait: async (): Promise<void> => {},
       receiptTimeoutMs: 0,
     };

@@ -325,7 +325,7 @@ async function main(): Promise<void> {
         try {
           const outcome = await executeExit(
             {
-              rpc, client: c, broadcaster,
+              rpc, client: c, chain: CHAIN, broadcaster,
               /*
                * `forceOptimism` is a dry-run test control and `executeExit` REFUSES it
                * alongside a broadcaster, so it is passed as 1 on a live path rather than

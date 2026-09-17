@@ -66,7 +66,8 @@
     "check-live-gate": "node scripts/check-live-gate.mjs",
     "live-gate-drill": "node dist/cli/live-gate-drill.js",
     "approve-setup": "node dist/cli/approve-setup.js",
-    "exit-broadcast-drill": "node dist/cli/exit-broadcast-drill.js"
+    "exit-broadcast-drill": "node dist/cli/exit-broadcast-drill.js",
+    "purge-orphan-attempts": "node dist/cli/purge-orphan-attempts.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

@@ -108,6 +108,22 @@ export interface ExitExecContext {
   rpc: ExitRpc;
   client: PoolClient;
   /**
+   * THE CHAIN THE ATTEMPT ROWS BELONG TO. REQUIRED, and it used to be the literal
+   * `'robinhood'` inside the insert.
+   *
+   * **THAT HARDCODING LET A DRILL WRITE INTO LIVE DATA**, and `exit-broadcast-drill`
+   * caught it on its first run: the drill ran on `chain='drill'`, deleted
+   * `chain='drill'` afterwards, and left THREE orphan rows under `chain='robinhood'`
+   * carrying trade ids that do not exist there. `bot_exit_attempts` is what the ladder's
+   * own effectiveness is measured from — run 4's rung table was read out of it — so
+   * false rows there corrupt a future derivation rather than merely sitting around.
+   *
+   * It is REQUIRED rather than defaulted, because a default is what made this possible:
+   * every caller already knows its chain, and one that does not should not be writing
+   * attempt rows.
+   */
+  chain: string;
+  /**
    * TEST CONTROL, DRY RUN ONLY. Multiplies the re-quote so the first rungs are
    * guaranteed to miss and the ladder must climb. Defaults to 1 (no effect). It exists
    * because a retry path nobody has exercised is not a retry path, and waiting for a
@@ -367,13 +383,13 @@ export async function executeExit(
       await ctx.client.query(
         `insert into bot_exit_attempts
            (chain, trade_id, attempt, bound_bps, expected_out, min_out, ok, detail, sell_from)
-         values ('robinhood', $1, $2, $3, $4, $5, $6, $7, $8)
+         values ($9, $1, $2, $3, $4, $5, $6, $7, $8)
          on conflict (chain, trade_id, attempt) do update
            set bound_bps = excluded.bound_bps, expected_out = excluded.expected_out,
                min_out = excluded.min_out, ok = excluded.ok, detail = excluded.detail,
                sell_from = excluded.sell_from, recorded_at = now()`,
         [pos.tradeId, a.attempt, a.boundBps, a.expectedOut, a.amountOutMinimum,
-          a.ok, a.detail, pos.sellFrom]);
+          a.ok, a.detail, pos.sellFrom, ctx.chain]);
     },
 
     ...(ctx.wait ? { wait: ctx.wait } : {}),

@@ -178,7 +178,7 @@ export async function clearNeedsExit(
     let outcome;
     try {
       outcome = await executeExit(
-        { rpc, client: c, ...ctx },
+        { rpc, client: c, chain, ...ctx },
         {
           tradeId: r.id, poolId: r.pool_id, token: r.token, counter: r.counter,
           fee: r.fee, tickSpacing: r.tick_spacing, hooks: r.hooks,
