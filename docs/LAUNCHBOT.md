@@ -1846,6 +1846,51 @@ VERIFIED ON A FRESH CONNECTION: simulated 0, rows in this mode 0, rows_not_store
 **Zero qualified in a minute is the rule being selective, not a fault** — run 4 qualified
 32 of 443 candidates over 95 minutes, and nine candidates is well inside the gap.
 
+### THE SEVEN STRANDED ROWS ARE MIGRATED — 2026-09-16
+
+`npm run migrate-stuck-status -- --commit`. The seven `exit_exhausted` rows now carry
+`needs_exit`, the status `clearNeedsExit` actually reads, so the positions the exit ladder
+could not sell are for the first time visible to the routine written to find them.
+
+**THE DRY RUN PREDICTED THE BOOT OUTCOME, NOT JUST THE ROW COUNT, AND THAT IS THE POINT OF
+IT.** "Seven rows updated" is not the consequence anybody cares about: a `needs_exit` row
+is acted on at the next boot of its mode, before arming, and a row that cannot be exited
+calls `halt()` — **which is keyed on CHAIN, so it would stop every mode on `robinhood`,
+not just the one that failed.** These are precisely the rows whose ladder has already
+exhausted once, so that was not a remote possibility and was worth reading the chain for.
+The holder balance is read from the chain because that is what `clearNeedsExit` will read;
+predicting from the row would be predicting our own record rather than its adjudicator.
+
+```
+rows                          7, all in mode dry-run-r5, $70 of cost basis
+  will resolve without an exit   6   holder balance 0 -> closed_unfilled at boot
+  will climb the ladder          1   trade 137, holder still holds 8.9e23 raw
+  will halt immediately          0   every row carries an exit_sim_from
+182 CU = $0.00008 to establish it
+```
+
+**SIX OF SEVEN HOLDERS HAVE SINCE SOLD, and that is why the migration is cheap rather
+than dangerous.** The exit was always simulated from a BORROWED holder — the pool's first
+swap sender — and most of them have moved on, so the chain will resolve those six as gone
+rather than attempting anything. Only trade 137's holder still holds.
+
+**The counts, stated before the write and reconciled after it on a fresh connection:**
+
+| | before | expected | after, fresh connection |
+|---|---|---|---|
+| `exit_exhausted` | 7 | **0** | **0** |
+| `needs_exit` | **0** — reported, not omitted | 7 | **7** |
+| `bot_trades` total | 107 | 107 unchanged | **107** |
+| `bot_control` (the kill switch) | — | untouched | **RETURNED NO ROWS** |
+
+The update is scoped to `status` alone, **checks `rowCount` against the dry-run count and
+rolls back on any mismatch** rather than adjusting the figure to fit, and an independent
+process confirmed afterwards that all seven carry `needs_exit`, all seven carry a holder
+address, and none carries `exit_exhausted`.
+
+**THE DOCUMENT IS NOW TRUE WHERE IT WAS NOT.** Section 6 above asserted these rows "are
+now `needs_exit`" on the strength of a code change; they were not, until this ran.
+
 ### THE HARD CAPITAL CAP, AND IT IS EXERCISED — 2026-09-16
 
 `MAX_DEPLOYED_USD = 100`. The specification, the quantity it bounds and the reasoning are
@@ -2052,14 +2097,15 @@ category C.
   +450 s is exactly 0.00000 in every window and both halves. Unresolved.
 - **The stored `hooks` values are one byte short** on rows written before that decoder
   was fixed. Deterministic, so grouping is unaffected.
-- **SEVEN `exit_exhausted` ROWS ARE STRANDED IN A STATUS NOTHING SWEEPS.** They carry
-  $70 of cost basis between them. `NON_TERMINAL` does not contain the status, so boot
-  reconciliation never examines them, and `clearNeedsExit` looks only for `needs_exit`.
-  The fix of 2026-09-16 changed the code and never migrated the rows, and this document
-  said otherwise until the store was read. **They now count toward `MAX_DEPLOYED_USD`**
-  via the `HELD` set, which is the exposure half; **nothing yet tries to exit them**,
-  which is the other half, and migrating them to `needs_exit` would make the next boot
-  attempt exactly that. It is a write to live state and is left to the operator.
+- ~~Seven `exit_exhausted` rows are stranded in a status nothing sweeps~~ — **MIGRATED
+  2026-09-16**, `exit_exhausted` 7 -> 0 and `needs_exit` 0 -> 7, all in mode
+  `dry-run-r5`. What remains is not a defect but a consequence: **the next boot of
+  `dry-run-r5` will act on them before arming**, and on the measured holder balances six
+  resolve to `closed_unfilled` without an exit while one climbs the ladder. **If that one
+  exhausts it calls `halt()`, which is keyed on CHAIN and stops every mode on
+  `robinhood`.** That is rule 4 working rather than a fault, and clearing the halt is a
+  deliberate operator action with counts reconciled, exactly as the boot-fixture halt was
+  cleared earlier the same day.
 - **`MAX_CONCURRENT` COUNTS A NARROWER SET THAN THE CAPITAL CAP DOES.** Concurrency uses
   `NON_TERMINAL`; the cap uses `HELD`, which also contains `needs_exit` and
   `exit_exhausted`. So five stuck positions plus five open ones is ten positions against
