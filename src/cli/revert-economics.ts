@@ -159,10 +159,43 @@ function shortfallRatio(l: Launch, bps: number): number {
   return Number(bound) / Number(l.actualOut);
 }
 
-/** Return contributed to the objective: refused trades contribute exactly zero. */
-function contribution(l: Launch, bps: number, h: number): number {
+/**
+ * Return contributed to the objective.
+ *
+ * A REFUSED trade contributes exactly zero: we did not trade, so there is no gain and
+ * no loss. That is not a convention, it is what happens.
+ *
+ * A TAKEN trade with NO EXIT is the one that needs a decision, and `noExitPenalty` is
+ * it. The stated convention across both documents is ZERO, and zero is wrong in a
+ * specific direction: a position nothing will buy is not a flat trade, it is a position
+ * whose money is gone. Scoring it zero makes taking a trade look free, and since the
+ * trades a wider bound admits are disproportionately the ones with no exit, the
+ * convention systematically argues for widening.
+ *
+ * Both are therefore reported side by side and neither is presented as the answer.
+ * -1 is the honest worst case: the tokens are unsellable and the position is a total
+ * loss. The truth is between them and closer to -1 than to 0.
+ */
+/**
+ * The return of a launch at a horizon, with no-exit mapped to the chosen penalty.
+ *
+ * A MISSING key is not a no-exit. Null means "looked, found no trade"; undefined means
+ * the horizon was never evaluated, which is a defect and must not become a plausible
+ * zero — the standing rule on this project.
+ */
+function retAt(l: Launch, h: number, noExitPenalty: number): number {
+  const r = l.ret[h];
+  if (r === undefined) {
+    throw new Error(`launch ${l.key} has no computed return at +${h}s — the horizon was `
+      + 'never evaluated, which is not the same as having no exit');
+  }
+  return r === null ? noExitPenalty : r;
+}
+
+/** What a launch contributes to the objective under bound `bps`. Refused = exactly 0. */
+function contribution(l: Launch, bps: number, h: number, noExitPenalty: number): number {
   if (!acceptedAt(l, bps)) return 0;
-  return l.ret[h] ?? 0;
+  return retAt(l, h, noExitPenalty);
 }
 
 function describe(xs: number[], exitsFound: number, n: number): Record<string, unknown> {
@@ -499,10 +532,11 @@ async function phaseHistorical(c: PoolClient, half: Half): Promise<Launch[]> {
 
 /* --------------------------------------------------------------- the report */
 
-function reportSplit(title: string, ls: Launch[], bps: number, h: number): void {
+function reportSplit(title: string, ls: Launch[], bps: number, h: number,
+  noExitPenalty = 0): void {
   const acc = ls.filter((l) => acceptedAt(l, bps));
   const ref = ls.filter((l) => !acceptedAt(l, bps));
-  const vals = (xs: Launch[]): number[] => xs.map((l) => l.ret[h] ?? 0);
+  const vals = (xs: Launch[]): number[] => xs.map((l) => retAt(l, h, noExitPenalty));
   const exits = (xs: Launch[]): number => xs.filter((l) => l.ret[h] !== null).length;
   log.info(title, {
     bound_bps: bps, horizon_s: h,
@@ -527,7 +561,7 @@ function reportBands(ls: Launch[], bps: number, h: number): void {
   const rows: Record<string, unknown> = {};
   for (const [name, pred] of bands) {
     const b = ref.filter((l) => pred(shortfallRatio(l, bps)));
-    rows[name] = describe(b.map((l) => l.ret[h] ?? 0),
+    rows[name] = describe(b.map((l) => retAt(l, h, 0)),
       b.filter((l) => l.ret[h] !== null).length, b.length);
   }
   log.info('REFUSED TRADES BANDED BY HOW FAR THEY MISSED', {
@@ -536,25 +570,36 @@ function reportBands(ls: Launch[], bps: number, h: number): void {
   });
 }
 
-function deriveBound(ls: Launch[], h: number): Record<string, unknown> {
+function deriveBound(ls: Launch[], h: number, noExitPenalty: number): Record<string, unknown> {
   const rows = SWEEP_BOUNDS.map((b) => {
     const taken = ls.filter((l) => acceptedAt(l, b));
-    const contribs = ls.map((l) => contribution(l, b, h));
+    const contribs = ls.map((l) => contribution(l, b, h, noExitPenalty));
     return {
       bps: b,
       median_all: med(contribs) ?? 0,
       taken: taken.length,
       revert_pct: ls.length === 0 ? 0 : (ls.length - taken.length) / ls.length * 100,
-      median_taken: med(taken.map((l) => l.ret[h] ?? 0)),
+      median_taken: med(taken.map((l) => retAt(l, h, noExitPenalty))),
     };
   });
   let best = rows[0]!;
   for (const r of rows) if (r.median_all > best.median_all) best = r;
   const cur = rows.find((r) => r.bps === SLIPPAGE_BPS)!;
+  /*
+   * THE PLATEAU IS REPORTED, NOT JUST ITS LEFT EDGE. Where the objective is flat over a
+   * wide range the argmax is an artefact of which end the loop happened to reach first,
+   * and reporting a single "best" would present a tie as a finding.
+   */
+  const plateau = rows.filter((r) => Math.abs(r.median_all - best.median_all) < 1e-9);
   return {
-    objective: 'median return over EVERY qualifying launch, refused scoring zero, '
-      + 'no-exit scoring zero',
+    objective: `median return over EVERY qualifying launch; refused scores zero; `
+      + `a TAKEN trade with no exit scores ${noExitPenalty}`,
+    no_exit_penalty: noExitPenalty,
     horizon_s: h,
+    plateau_bps: plateau.length > 1
+      ? `${plateau[0]!.bps}..${plateau[plateau.length - 1]!.bps} all equal — the objective `
+        + 'CANNOT distinguish inside this range'
+      : 'none — the maximum is a single point',
     current: { bps: cur.bps, median_all: r5(cur.median_all),
       revert_pct: Number(cur.revert_pct.toFixed(1)), taken: cur.taken },
     best: { bps: best.bps, median_all: r5(best.median_all),
@@ -633,8 +678,8 @@ async function main(): Promise<void> {
         const acc = bot.filter((l) => acceptedAt(l, SLIPPAGE_BPS));
         const ref = bot.filter((l) => !acceptedAt(l, SLIPPAGE_BPS));
         log.info(`horizon +${h}s`, {
-          accepted_median: r5(med(acc.map((l) => l.ret[h] ?? 0))),
-          refused_median: r5(med(ref.map((l) => l.ret[h] ?? 0))),
+          accepted_median: r5(med(acc.map((l) => retAt(l, h, 0)))),
+          refused_median: r5(med(ref.map((l) => retAt(l, h, 0)))),
           accepted_exit_pct: Number(((acc.filter((l) => l.ret[h] !== null).length
             / Math.max(1, acc.length)) * 100).toFixed(1)),
           refused_exit_pct: Number(((ref.filter((l) => l.ret[h] !== null).length
@@ -645,8 +690,13 @@ async function main(): Promise<void> {
       log.info('=== QUESTION 3: BANDED BY SHORTFALL ===', {});
       reportBands(bot, SLIPPAGE_BPS, CONFIGURED_H);
 
-      log.info('=== QUESTION 4: THE DERIVED BOUND, GROUND TRUTH ===',
-        deriveBound(bot, CONFIGURED_H));
+      log.info('=== QUESTION 4: THE DERIVED BOUND, GROUND TRUTH, no-exit = 0 ===',
+        deriveBound(bot, CONFIGURED_H, 0));
+      log.info('=== QUESTION 4b: THE SAME DERIVATION, no-exit = -1 (a total loss) ===',
+        deriveBound(bot, CONFIGURED_H, -1));
+      log.info('REFUSED vs ACCEPTED UNDER THE -1 CONVENTION', {});
+      reportSplit('AT THE CONFIGURED HORIZON, no-exit = -1', bot, SLIPPAGE_BPS,
+        CONFIGURED_H, -1);
 
       /* QUESTION 5: the drift, per run. */
       const byMode = new Map<string, Launch[]>();
@@ -721,13 +771,16 @@ async function main(): Promise<void> {
         const ls = hist.filter((l) => l.label === label);
         if (ls.length === 0) { log.warn(`${label}: RETURNED NO ROWS`, {}); continue; }
         for (const b of NAMED_BOUNDS) reportSplit(`${label} @ ${b}bps`, ls, b, CONFIGURED_H);
-        log.info(`${label}: THE DERIVED BOUND`, deriveBound(ls, CONFIGURED_H));
+        log.info(`${label}: THE DERIVED BOUND, no-exit = 0`, deriveBound(ls, CONFIGURED_H, 0));
+        log.info(`${label}: THE DERIVED BOUND, no-exit = -1`, deriveBound(ls, CONFIGURED_H, -1));
       }
       log.info('POOLED, ALL FOUR WINDOWS — and 94.5% of it is the corpus anomaly',
-        deriveBound(hist, CONFIGURED_H));
+        deriveBound(hist, CONFIGURED_H, 0));
       const recent = hist.filter((l) => l.label !== 'HOLDOUT-ERA');
-      log.info('THE THREE POST-CORPUS WINDOWS, WHICH ARE THE EXPECTATION',
-        deriveBound(recent, CONFIGURED_H));
+      log.info('THE THREE POST-CORPUS WINDOWS, no-exit = 0',
+        deriveBound(recent, CONFIGURED_H, 0));
+      log.info('THE THREE POST-CORPUS WINDOWS, no-exit = -1',
+        deriveBound(recent, CONFIGURED_H, -1));
       for (const b of NAMED_BOUNDS) reportSplit(`POST-CORPUS @ ${b}bps`, recent, b, CONFIGURED_H);
       reportBands(recent, SLIPPAGE_BPS, CONFIGURED_H);
     }
