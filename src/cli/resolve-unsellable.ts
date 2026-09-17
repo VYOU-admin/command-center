@@ -260,9 +260,20 @@ async function resolveOne(
     return;
   }
 
+  /*
+   * A POSITION THAT CANNOT BE SOLD IS A TOTAL LOSS, AND THE RAIL HAS TO BE ABLE TO SEE
+   * IT. `net_pnl_usd` was NULL on every row ever written, so `MAX_DAILY_LOSS_USD` read
+   * exactly $0 no matter what happened — four live total losses had already been
+   * resolved against a rail that could never fire. That is the convention
+   * `realised-backtest` established from the other direction: **an unsellable position
+   * is -100%, not 0%.** A row whose buy never landed keeps NULL, because nothing was
+   * spent on it.
+   */
   const upd = await c.query(
     `update bot_trades
         set status = 'closed_unsellable',
+            net_pnl_usd = case when entry_tx is not null
+                               then -position_usd else net_pnl_usd end,
             note = coalesce(note || ' | ', '')
                    || 'resolve-unsellable: ' || $5 || ' ('
                    || $3 || '); ' || $4,
@@ -369,6 +380,49 @@ async function resolveSimulated(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const commit = args.includes('--commit');
+
+  /*
+   * `--backfill-pnl` — GIVE THE DAILY-LOSS RAIL SOMETHING TO READ.
+   *
+   * Every `closed_unsellable` row written before 2026-09-17 carries a NULL
+   * `net_pnl_usd`, so `MAX_DAILY_LOSS_USD` summed to $0 over four real total losses.
+   * Scoped to LIVE rows that are `closed_unsellable` AND carry an `entry_tx`: a buy that
+   * landed and a position that cannot be sold is a total loss of its cost basis. A row
+   * with no `entry_tx` never bought anything and is left NULL rather than invented.
+   */
+  if (args.includes('--backfill-pnl')) {
+    const app2 = await bootstrap();
+    const c2 = await app2.pool.connect();
+    try {
+      const dry = await c2.query(`select id::text, position_usd, entry_tx is not null e
+         from bot_trades where chain=$1 and mode='live'
+          and status='closed_unsellable' and net_pnl_usd is null`, [CHAIN]);
+      log.info('THE COUNTS THIS WRITE MUST PRODUCE', {
+        rows_to_update: dry.rows.filter((r) => r.e).length,
+        rows_left_null_no_entry_tx: dry.rows.filter((r) => !r.e).length,
+        total_loss_to_record:
+          dry.rows.filter((r) => r.e).reduce((a, r) => a + Number(r.position_usd), 0),
+        rows: dry.rows.map((r) => `${r.id}: ${r.e ? `-$${r.position_usd}` : 'NULL (no buy)'}`),
+      });
+      if (!commit) { log.info('DRY RUN — NOTHING WRITTEN', {}); return; }
+      const u = await c2.query(`update bot_trades set net_pnl_usd = -position_usd,
+           updated_at = now()
+         where chain=$1 and mode='live' and status='closed_unsellable'
+           and net_pnl_usd is null and entry_tx is not null`, [CHAIN]);
+      const expected = dry.rows.filter((r) => r.e).length;
+      if ((u.rowCount ?? 0) !== expected) {
+        throw new Error(`the update touched ${u.rowCount} rows where ${expected} were `
+          + 'expected; refusing rather than adjusting the figure to fit');
+      }
+      const back = await c2.query(`select coalesce(sum(net_pnl_usd),0) s
+         from bot_trades where chain=$1 and mode='live'`, [CHAIN]);
+      log.info('VERIFIED ON A FRESH READ', {
+        rows_updated: u.rowCount, live_realised_pnl_now: back.rows[0]?.s,
+      });
+    } finally { c2.release(); await app2.pool.end(); }
+    return;
+  }
+
   const ti = args.indexOf('--trade');
   if (ti < 0) {
     throw new Error('pass --trade <id>. To change the kill switch use halt-control, which '
