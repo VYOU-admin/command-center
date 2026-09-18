@@ -176,7 +176,48 @@ async function main(): Promise<void> {
       pre_entry_senders_median: median(bq.map((b) => Number(b.pre_buyers))),
     });
 
-    /* ---- THE PAID PASS ---------------------------------------------------- */
+    /*
+     * ---- THE PAID PASS ----------------------------------------------------
+     *
+     * **EVERY ROW IS COMMITTED AS IT IS MEASURED, AND THAT IS NOT A STYLE CHOICE.**
+     * The first attempt at this run wrote its output to a file on the container and got
+     * to 800 of 969 pools before a deploy replaced the container. The log vanished and
+     * ~416,000 compute units of already-purchased RPC work had to be bought again.
+     *
+     * ROBINHOOD.md: *"only what is already in Postgres survives, which is why every
+     * step writes progressively rather than accumulating and flushing at the end."*
+     * So each pool's verdict lands in `bot_filter_measure` before the next is probed,
+     * and a re-run skips what is already there — an interrupted job becomes a cheap
+     * resume instead of a total loss.
+     */
+    await c.query(`create table if not exists bot_filter_measure (
+      chain        text    not null,
+      size_usd     numeric not null,
+      window_name  text    not null,
+      pool_id      text    not null,
+      token        text    not null,
+      launchpad    text,
+      liq_at_entry numeric,
+      sell_executes boolean,
+      sell_reason  text,
+      eth_in       numeric not null,
+      eth_out      numeric,
+      launch_buyers    integer,
+      pre_entry_buyers integer,
+      measured_at  timestamptz not null default now(),
+      primary key (chain, size_usd, pool_id)
+    )`);
+
+    const already = new Set((await c.query<{ pool_id: string }>(
+      `select pool_id from bot_filter_measure
+        where chain = $1 and size_usd = $2::numeric`, [CHAIN, sizeArg])).rows
+      .map((r) => r.pool_id));
+    log.info('RESUME', {
+      already_measured: already.size,
+      still_to_measure: bought.filter((r) => !already.has(r.pool_id)).length,
+      note: 'a re-run pays only for what is missing',
+    });
+
     interface Scored {
       window: string; pool: string; token: string; launchpad: string | null;
       liqAtEntry: bigint | null; sellExecutes: boolean | null; sellReason: string;
@@ -186,6 +227,7 @@ async function main(): Promise<void> {
     const scored: Scored[] = [];
     let done = 0;
     for (const r of bought) {
+      if (already.has(r.pool_id)) continue;
       const tokenIsC0 = r.token === r.currency0;
       const pool = {
         currency0: r.currency0!, currency1: r.currency1!,
@@ -226,6 +268,17 @@ async function main(): Promise<void> {
         : executes === false ? -1 : Number.NaN;
 
       const bb = bundle.get(r.pool_id);
+      /* COMMITTED BEFORE THE NEXT POOL IS PROBED. */
+      await c.query(
+        `insert into bot_filter_measure (chain, size_usd, window_name, pool_id, token,
+            liq_at_entry, sell_executes, sell_reason, eth_in, eth_out,
+            launch_buyers, pre_entry_buyers)
+         values ($1,$2::numeric,$3,$4,$5,$6::numeric,$7,$8,$9::numeric,$10::numeric,$11,$12)
+         on conflict (chain, size_usd, pool_id) do nothing`,
+        [CHAIN, sizeArg, r.window_name, r.pool_id, r.token,
+          liq === null ? null : liq.toString(), executes, reason.slice(0, 200),
+          ethIn.toString(), ethOut === null ? null : ethOut.toString(),
+          bb?.launchBuyers ?? null, bb?.preEntryBuyers ?? null]);
       scored.push({
         window: r.window_name, pool: r.pool_id, token: r.token,
         launchpad: null, liqAtEntry: liq, sellExecutes: executes, sellReason: reason,
@@ -235,6 +288,41 @@ async function main(): Promise<void> {
       done += 1;
       if (done % 100 === 0) log.info('progress', { done, of: bought.length });
     }
+
+    /*
+     * ---- THE REPORT READS THE TABLE, NOT THE LOOP'S OWN ARRAY -------------
+     * So a resumed run reports on the WHOLE population rather than only the pools this
+     * invocation happened to measure. A partial report that looks complete is the
+     * failure shape this project keeps hitting.
+     */
+    scored.length = 0;
+    const stored = (await c.query<{
+      window_name: string; pool_id: string; token: string; liq_at_entry: string | null;
+      sell_executes: boolean | null; sell_reason: string; eth_in: string;
+      eth_out: string | null; launch_buyers: number | null; pre_entry_buyers: number | null;
+    }>(
+      `select window_name, pool_id, token, liq_at_entry::text, sell_executes,
+              sell_reason, eth_in::text, eth_out::text, launch_buyers, pre_entry_buyers
+         from bot_filter_measure where chain = $1 and size_usd = $2::numeric`,
+      [CHAIN, sizeArg])).rows;
+    for (const s2 of stored) {
+      const ethIn = BigInt(s2.eth_in);
+      const ethOut = s2.eth_out === null ? null : BigInt(s2.eth_out);
+      scored.push({
+        window: s2.window_name, pool: s2.pool_id, token: s2.token, launchpad: null,
+        liqAtEntry: s2.liq_at_entry === null ? null : BigInt(s2.liq_at_entry),
+        sellExecutes: s2.sell_executes, sellReason: s2.sell_reason,
+        ethIn, ethOut,
+        ret: s2.sell_executes === true && ethOut !== null
+          ? Number(ethOut - ethIn) / Number(ethIn)
+          : s2.sell_executes === false ? -1 : Number.NaN,
+        launchBuyers: s2.launch_buyers, preEntryBuyers: s2.pre_entry_buyers,
+      });
+    }
+    log.info('REPORTING OVER THE WHOLE STORED POPULATION', {
+      rows_in_bot_filter_measure: scored.length,
+      measured_by_THIS_invocation: done,
+    });
 
     /* ---- THE LAUNCHPAD, one transaction read per distinct creating tx ----- */
     const txs = [...new Set(bought.map((r) => r.tx_hash).filter((x): x is string => x !== null))];
