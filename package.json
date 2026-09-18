@@ -54,6 +54,7 @@
     "launch-rate": "npm run build && node dist/cli/launch-rate.js",
     "filter-measure": "npm run build && node dist/cli/filter-measure.js",
     "observation-window": "npm run build && node dist/cli/observation-window.js",
+    "filter-join": "npm run build && node dist/cli/filter-join.js",
     "decay-trajectory": "npm run build && node dist/cli/decay-trajectory.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
