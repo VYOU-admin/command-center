@@ -127,11 +127,27 @@ export function createWebServer(opts: WebServerOptions): Server {
       }
       try {
         if (action === 'stop') {
+          /*
+           * **AN EXISTING HALT'S REASON IS NOT OVERWRITTEN.** Pressing STOP on a chain
+           * that is already halted is the normal thing to do -- the operator cannot see
+           * the row, the state may have changed since the page loaded, and the safe
+           * reflex is to press it again. If that replaced the reason, the second press
+           * would destroy the diagnosis: the halt currently in place on `robinhood`
+           * reads "8 live positions, all pools paying actual=0, wallet down to $7.7",
+           * which is the whole account of why trading stopped, and a generic "STOPPED BY
+           * THE OPERATOR" would erase it.
+           *
+           * The FIRST reason is the cause. A repeat press is not new information, so it
+           * only reasserts `halted` and bumps `updated_at`.
+           */
           await pool.query(
             `insert into bot_control (chain, mode, halted, reason)
              values ($1, '*', true, $2)
              on conflict (chain, mode) do update
-               set halted = true, reason = $2, updated_at = now()`,
+               set halted = true,
+                   reason = case when bot_control.halted then bot_control.reason
+                                 else $2 end,
+                   updated_at = now()`,
             [chain, 'STOPPED BY THE OPERATOR from /trades']);
         } else {
           /*
