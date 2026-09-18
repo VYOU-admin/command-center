@@ -103,6 +103,22 @@ async function main(): Promise<void> {
   if (!owner) throw new Error('BOT_WALLET_ADDRESS must be set: the sell is OURS');
   const sizeArg = process.argv.includes('--size')
     ? process.argv[process.argv.indexOf('--size') + 1] : '10';
+  /*
+   * WHERE THE SELL IS SIMULATED, AND THE TWO ANSWER DIFFERENT QUESTIONS.
+   *
+   *   --at entry  the sell at the ENTRY block: could we have round-tripped instantly?
+   *               This is the cost of the fee and nothing else, and it is the question
+   *               "is there an edge at T0".
+   *   --at exit   the sell at `exit_block`, 900 blocks (90 s) later: **THE STRATEGY'S
+   *               ACTUAL RETURN.** Every claimed edge came from the hold, and the hold
+   *               is where the live run's positions died. This is the number the brief
+   *               is asking for.
+   */
+  const atPoint = process.argv.includes('--at')
+    ? String(process.argv[process.argv.indexOf('--at') + 1]) : 'entry';
+  if (atPoint !== 'entry' && atPoint !== 'exit') {
+    throw new Error("--at must be 'entry' or 'exit'");
+  }
 
   const app = await bootstrap();
   const c = await app.pool.connect();
@@ -135,6 +151,9 @@ async function main(): Promise<void> {
 
     log.info('BEFORE THE FIRST PAID CALL — THE WORK SET', {
       size_usd: sizeArg,
+      sell_simulated_at: atPoint === 'exit'
+        ? 'THE EXIT BLOCK (entry + 900 blocks = 90 s) — the strategy\'s actual return'
+        : 'THE ENTRY BLOCK — the instantaneous round trip',
       corpus_rows_at_this_size: rows.length,
       rows_with_a_v4_pool_init_ROW: withKey.length,
       rows_WITHOUT_one_EXCLUDED: rows.length - withKey.length,
@@ -193,6 +212,7 @@ async function main(): Promise<void> {
     await c.query(`create table if not exists bot_filter_measure (
       chain        text    not null,
       size_usd     numeric not null,
+      at_point     text    not null default 'entry',
       window_name  text    not null,
       pool_id      text    not null,
       token        text    not null,
@@ -205,12 +225,27 @@ async function main(): Promise<void> {
       launch_buyers    integer,
       pre_entry_buyers integer,
       measured_at  timestamptz not null default now(),
-      primary key (chain, size_usd, pool_id)
+      primary key (chain, size_usd, at_point, pool_id)
     )`);
+    /* The table predates --at, so the column and the key are migrated rather than
+     * assumed. A 'create table if not exists' is a NO-OP on an existing table --
+     * ROBINHOOD.md section 7, rule one. */
+    await c.query(`alter table bot_filter_measure
+                     add column if not exists at_point text not null default 'entry'`);
+    await c.query(`do $$ begin
+      if exists (select 1 from pg_constraint
+                  where conname = 'bot_filter_measure_pkey' and array_length(conkey,1) = 3)
+      then
+        alter table bot_filter_measure drop constraint bot_filter_measure_pkey;
+        alter table bot_filter_measure
+          add primary key (chain, size_usd, at_point, pool_id);
+      end if;
+    end $$;`);
 
     const already = new Set((await c.query<{ pool_id: string }>(
       `select pool_id from bot_filter_measure
-        where chain = $1 and size_usd = $2::numeric`, [CHAIN, sizeArg])).rows
+        where chain = $1 and size_usd = $2::numeric and at_point = $3`,
+      [CHAIN, sizeArg, atPoint])).rows
       .map((r) => r.pool_id));
     log.info('RESUME', {
       already_measured: already.size,
@@ -243,7 +278,11 @@ async function main(): Promise<void> {
       }
 
       const entryHex = `0x${BigInt(r.entry_block).toString(16)}`;
+      /* Liquidity is ALWAYS read at entry — it is a pre-buy gate, and reading it at
+       * the exit would answer a question nobody can act on. */
       const liq = await readPoolLiquidity(rpc, r.pool_id, entryHex);
+      const sellHex = atPoint === 'exit'
+        ? `0x${BigInt(r.exit_block).toString(16)}` : entryHex;
 
       let executes: boolean | null = null;
       let reason = 'not run';
@@ -251,7 +290,7 @@ async function main(): Promise<void> {
       try {
         const sim = await simulateSellAt(rpc, {
           pool, token: r.token, owner, amount: BigInt(r.tokens_out!),
-          zeroForOneBuy: !tokenIsC0, block: entryHex,
+          zeroForOneBuy: !tokenIsC0, block: sellHex,
         });
         executes = sim.executes; reason = sim.executeReason; ethOut = sim.ethOut;
       } catch (e) { reason = `probe failed: ${(e as Error).message.slice(0, 90)}`; }
@@ -270,15 +309,15 @@ async function main(): Promise<void> {
       const bb = bundle.get(r.pool_id);
       /* COMMITTED BEFORE THE NEXT POOL IS PROBED. */
       await c.query(
-        `insert into bot_filter_measure (chain, size_usd, window_name, pool_id, token,
-            liq_at_entry, sell_executes, sell_reason, eth_in, eth_out,
+        `insert into bot_filter_measure (chain, size_usd, at_point, window_name,
+            pool_id, token, liq_at_entry, sell_executes, sell_reason, eth_in, eth_out,
             launch_buyers, pre_entry_buyers)
-         values ($1,$2::numeric,$3,$4,$5,$6::numeric,$7,$8,$9::numeric,$10::numeric,$11,$12)
-         on conflict (chain, size_usd, pool_id) do nothing`,
+         values ($1,$2::numeric,$13,$3,$4,$5,$6::numeric,$7,$8,$9::numeric,$10::numeric,$11,$12)
+         on conflict (chain, size_usd, at_point, pool_id) do nothing`,
         [CHAIN, sizeArg, r.window_name, r.pool_id, r.token,
           liq === null ? null : liq.toString(), executes, reason.slice(0, 200),
           ethIn.toString(), ethOut === null ? null : ethOut.toString(),
-          bb?.launchBuyers ?? null, bb?.preEntryBuyers ?? null]);
+          bb?.launchBuyers ?? null, bb?.preEntryBuyers ?? null, atPoint]);
       scored.push({
         window: r.window_name, pool: r.pool_id, token: r.token,
         launchpad: null, liqAtEntry: liq, sellExecutes: executes, sellReason: reason,
@@ -303,8 +342,9 @@ async function main(): Promise<void> {
     }>(
       `select window_name, pool_id, token, liq_at_entry::text, sell_executes,
               sell_reason, eth_in::text, eth_out::text, launch_buyers, pre_entry_buyers
-         from bot_filter_measure where chain = $1 and size_usd = $2::numeric`,
-      [CHAIN, sizeArg])).rows;
+         from bot_filter_measure
+        where chain = $1 and size_usd = $2::numeric and at_point = $3`,
+      [CHAIN, sizeArg, atPoint])).rows;
     for (const s2 of stored) {
       const ethIn = BigInt(s2.eth_in);
       const ethOut = s2.eth_out === null ? null : BigInt(s2.eth_out);
@@ -359,6 +399,7 @@ async function main(): Promise<void> {
 
     log.info('3C  THE WHOLE CORPUS, SELL RE-MEASURED WITH A REACHABLE BOUND', {
       size_usd: sizeArg,
+      sell_simulated_at: atPoint,
       scored: scored.length,
       probe_unreadable_EXCLUDED: unprobed,
       ...report('all', usable),
