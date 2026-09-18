@@ -47,8 +47,8 @@ import { minOut, positionWei, qualifies } from '../bot/rule.js';
 import { quote } from '../bot/quote.js';
 import type { PoolTick } from '../bot/quote.js';
 import { BOT_SCHEMA, halt, isHalted } from '../bot/state.js';
-import { checkRails, deployedCapIsTerminal, deployedUsd, loserDeadlineFires,
-  priceStopFires, runCapReached } from '../bot/rails.js';
+import { checkRails, decideExitTrigger, deployedCapIsTerminal, deployedUsd,
+  runCapReached, triggerBlocksTemplate } from '../bot/rails.js';
 import { poolIdOf, readPoolLiquidity } from '../bot/pool-state.js';
 import { id } from 'ethers';
 import { quoteRate, swapAmounts, tokenPrice } from '../bot/price.js';
@@ -521,18 +521,22 @@ async function main(): Promise<void> {
          * A tick where none of the four fires LEAVES THE POSITION ALONE, which is the
          * behaviour the old `exit_due_block <= head` filter had for every tick but one.
          */
-        let trigger: string | null = null;
-        let triggerDetail = '';
+        /*
+         * THE POLL, THEN THE DECISION. The decision itself is
+         * `rails.decideExitTrigger`, which is where the ORDERING lives -- and the
+         * ordering is the load-bearing part: a sellability failure must beat the
+         * horizon, or a position that died inside its 90-second hold is recorded as an
+         * ordinary planned exit and its template is never blocked. That is how five of
+         * the six `Fly` buys happened. It is a pure function so `rail-drill` can trip
+         * every ordering case; inline here it was unreachable by any drill.
+         */
         const entryBlk = d.entry_block === null ? null : Number(d.entry_block);
         const dueBlk = d.exit_due_block === null ? null : Number(d.exit_due_block);
+        let sellable: boolean | null = null;
+        let markWei: bigint | null = null;
+        let sellDetail = 'poll not run';
 
         if (RAILS.SELLABILITY_STOP) {
-          /*
-           * THE POLL. A REACHABLE bound, for the reason in section 6A.3: a bound of
-           * 2^127 short-circuits inside the swap action before `SETTLE_ALL` pulls the
-           * token, so it reports a healthy price on a token that refuses transfers. The
-           * whole point of this poll is the part the unreachable bound never reached.
-           */
           /*
            * THE POOL KEY IS RECONSTRUCTED WITH THE EXIT PATH'S OWN ORDERING RULE and
            * then CHECKED AGAINST THE STORED POOL ID. `exit-exec.ts` uses
@@ -540,11 +544,13 @@ async function main(): Promise<void> {
            * would mean the poll measured a different swap from the one the exit sends.
            *
            * **AND A WRONG KEY FAILS IN THE DANGEROUS DIRECTION.** It addresses a pool
-           * that does not exist, the call reverts, and this poll reads that revert as
+           * that does not exist, the call reverts, and the poll reads that revert as
            * "the token refuses to transfer" -- a honeypot verdict indistinguishable from
            * a real one, which would sell every position instantly and blocklist every
            * template. So the derived id is compared with `pool_id` from the `Initialize`
-           * log, and a mismatch VOIDS THE POLL rather than being reported as a finding.
+           * log and a mismatch VOIDS THE POLL rather than being reported as a finding.
+           *
+           * The ordering rule is CONFIRMED on 130 records by `npm run poolid-check`.
            */
           const tokenIsCurrency0 = d.token.toLowerCase() < d.counter.toLowerCase();
           const probePool = {
@@ -559,51 +565,39 @@ async function main(): Promise<void> {
               note: 'the sellability poll is VOID for this row; a revert here would be '
                 + 'the wrong pool, not a honeypot',
             });
+            sellDetail = 'VOID: pool key does not reproduce the stored pool id';
           } else {
-          stats.sellPolls += 1;
-          const probe = await simulateSellAt(rpc, {
-            pool: probePool,
-            token: d.token, owner: seller, amount: sellAmt,
-            zeroForOneBuy: !tokenIsCurrency0,
-            block: `0x${head.toString(16)}`,
-          });
-          if (probe.executes === false) {
-            stats.sellPollFailed += 1; stats.sellStopFired += 1;
-            trigger = 'sellability_stop';
-            triggerDetail = probe.executeReason;
-          } else if (probe.executes === true) {
-            stats.sellPollStillOk += 1;
+            stats.sellPolls += 1;
             /*
-             * THE PRICE STOP, EVALUATED ONLY WHERE THERE IS A PRICE TO EVALUATE. It is
-             * measured against `position_wei` -- what we actually paid -- and not against
-             * the quote, because a quote is what we expected.
+             * A REACHABLE BOUND, for the reason in section 6A.3: a bound of 2^127
+             * short-circuits inside the swap action before `SETTLE_ALL` pulls the token,
+             * so it reports a healthy price on a token that refuses transfers. The whole
+             * point of this poll is the part the unreachable bound never reached.
              */
-            const paid = d.position_wei === null ? 0n : BigInt(d.position_wei);
-            const ps = priceStopFires(paid, probe.ethOut);
-            if (ps.fires) {
-              stats.priceStopFired += 1;
-              trigger = 'price_stop';
-              triggerDetail = `mark ${String(ps.declineBps)} bps below fill, `
-                + `limit ${RAILS.STOP_LOSS_BPS}`;
-            }
-          }
-          /* `probe.executes === null` is UNKNOWN and triggers nothing: an unreadable
-           * probe is not evidence the position is fine and not evidence it is dead. */
+            const probe = await simulateSellAt(rpc, {
+              pool: probePool,
+              token: d.token, owner: seller, amount: sellAmt,
+              zeroForOneBuy: !tokenIsCurrency0,
+              block: `0x${head.toString(16)}`,
+            });
+            sellable = probe.executes;
+            markWei = probe.ethOut;
+            sellDetail = probe.executeReason;
+            if (sellable === false) stats.sellPollFailed += 1;
+            else if (sellable === true) stats.sellPollStillOk += 1;
           }
         }
 
-        if (trigger === null && dueBlk !== null && dueBlk <= head) {
-          trigger = 'horizon';
-          triggerDetail = `exit_due_block ${dueBlk} <= head ${head}`;
-        }
-
-        const ld = loserDeadlineFires(entryBlk, head);
-        if (trigger === null && ld.fires) {
-          stats.loserDeadlineFired += 1;
-          trigger = 'loser_deadline';
-          triggerDetail = `${String(ld.blocksHeld)} blocks since entry, `
-            + `limit ${RAILS.LOSER_DEADLINE_BLOCKS}`;
-        }
+        const decision = decideExitTrigger({
+          sellable, paidWei: d.position_wei === null ? 0n : BigInt(d.position_wei),
+          markWei, entryBlock: entryBlk, dueBlock: dueBlk, head,
+        });
+        const trigger = decision.trigger;
+        const triggerDetail = trigger === 'sellability_stop'
+          ? `${decision.detail}: ${sellDetail}` : decision.detail;
+        if (trigger === 'sellability_stop') stats.sellStopFired += 1;
+        if (trigger === 'price_stop') stats.priceStopFired += 1;
+        if (trigger === 'loser_deadline') stats.loserDeadlineFired += 1;
 
         if (trigger === null) continue;   /* nothing calls it this tick */
 
@@ -620,7 +614,7 @@ async function main(): Promise<void> {
          * the same template can arrive inside that window. That is exactly what happened
          * live: five of the six `Fly` buys landed while the first was still unresolved.
          */
-        if (trigger !== 'horizon') {
+        if (triggerBlocksTemplate(trigger)) {
           const tk = templatesSeen.get(d.pool_id);
           if (tk !== undefined && !blockedTemplates.has(tk)) {
             blockedTemplates.add(tk);

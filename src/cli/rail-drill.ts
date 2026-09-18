@@ -23,8 +23,9 @@ import { bootstrap } from '../bootstrap.js';
 import { errorFields, log } from '../logger.js';
 import { ALL_MODES, BOT_SCHEMA, halt } from '../bot/state.js';
 import { RAILS } from '../bot/config.js';
-import { checkRails, deployedCapIsTerminal, deployedUsd, loserDeadlineFires,
-  priceStopFires, runCapReached } from '../bot/rails.js';
+import { checkRails, decideExitTrigger, deployedCapIsTerminal, deployedUsd,
+  loserDeadlineFires, priceStopFires, runCapReached,
+  triggerBlocksTemplate } from '../bot/rails.js';
 import type { RailState } from '../bot/rails.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -65,7 +66,14 @@ async function main(): Promise<void> {
   const commit = process.argv.includes('--commit');
   const app = await bootstrap();
   const c = await app.pool.connect();
-  const results: Array<Case & { got: string; blocked: string[]; pass: boolean }> = [];
+  /*
+   * `expect` is a free-form string rather than 'ALLOW' | 'BLOCK' because the ORDERING
+   * cases have more than two outcomes -- which of four triggers fired, and whether it
+   * blocks the template. Squeezing those into a two-valued verdict would throw away the
+   * part being tested.
+   */
+  const results: Array<Omit<Case, 'expect'>
+    & { expect: string; got: string; blocked: string[]; pass: boolean }> = [];
   try {
     await c.query(BOT_SCHEMA);
     const pre = await c.query<{ n: string }>(
@@ -437,6 +445,97 @@ async function main(): Promise<void> {
       got: loserDeadlineFires(null, 9_999_999).fires, expect: false,
       detail: 'entry_block=null',
     });
+
+    /* --- THE TRIGGER ORDERING, WHICH IS THE LOAD-BEARING PART -------------- */
+    /*
+     * These are not threshold tests. They are ORDERING tests, and the ordering is what
+     * decides whether a template gets blocked -- which is the mechanism that would have
+     * stopped five of the six `Fly` buys.
+     *
+     * The case to read first is `sellable=false` WITH the horizon also reached. If
+     * `horizon` won there, a position that died inside its 90-second hold would be
+     * recorded as an ordinary planned exit, `triggerBlocksTemplate` would return false,
+     * and the bot would buy the same actor's next launch. That is exactly what happened
+     * live, and it is why the ordering is asserted rather than assumed.
+     */
+    const PAID = 1_000_000_000_000_000n;
+    const H = 1_000_000;
+    const orderCases: Array<{
+      name: string; args: Parameters<typeof decideExitTrigger>[0];
+      expect: string | null; blocksTemplate: boolean | null;
+    }> = [
+      { name: 'UNSELLABLE and the horizon ALSO reached -> sellability_stop must WIN, or '
+          + 'a position that died in the hold is filed as a planned exit and its '
+          + 'TEMPLATE IS NEVER BLOCKED (this is the Fly mechanism)',
+        args: { sellable: false, paidWei: PAID, markWei: null,
+          entryBlock: H - 900, dueBlock: H - 1, head: H },
+        expect: 'sellability_stop', blocksTemplate: true },
+      { name: 'UNSELLABLE and a price decline ALSO past the stop -> sellability_stop '
+          + 'wins; a position that cannot be sold has no meaningful mark',
+        args: { sellable: false, paidWei: PAID, markWei: PAID / 10n,
+          entryBlock: H - 10, dueBlock: null, head: H },
+        expect: 'sellability_stop', blocksTemplate: true },
+      { name: 'UNSELLABLE and the loser deadline ALSO passed -> sellability_stop wins',
+        args: { sellable: false, paidWei: PAID, markWei: null,
+          entryBlock: H - 5000, dueBlock: null, head: H },
+        expect: 'sellability_stop', blocksTemplate: true },
+      { name: 'sellable, price past the stop, horizon ALSO reached -> price_stop wins '
+          + '(an adverse move is not an ordinary close)',
+        args: { sellable: true, paidWei: PAID, markWei: PAID / 10n,
+          entryBlock: H - 900, dueBlock: H - 1, head: H },
+        expect: 'price_stop', blocksTemplate: true },
+      { name: 'sellable, price fine, horizon reached AND the deadline passed -> horizon '
+          + 'wins, and it must NOT block the template (a planned exit says nothing '
+          + 'about the actor)',
+        args: { sellable: true, paidWei: PAID, markWei: PAID,
+          entryBlock: H - 5000, dueBlock: H - 1, head: H },
+        expect: 'horizon', blocksTemplate: false },
+      { name: 'sellable, price fine, horizon NOT reached, deadline passed -> loser_deadline',
+        args: { sellable: true, paidWei: PAID, markWei: PAID,
+          entryBlock: H - 1200, dueBlock: H + 100, head: H },
+        expect: 'loser_deadline', blocksTemplate: true },
+      { name: 'sellable, price fine, nothing due -> NOTHING fires and the position is '
+          + 'LEFT ALONE',
+        args: { sellable: true, paidWei: PAID, markWei: PAID,
+          entryBlock: H - 10, dueBlock: H + 800, head: H },
+        expect: null, blocksTemplate: null },
+      { name: 'THE POLL COULD NOT BE READ (sellable=null) and nothing else is due -> '
+          + 'NOTHING fires; unknown is neither "fine" nor "dead"',
+        args: { sellable: null, paidWei: PAID, markWei: null,
+          entryBlock: H - 10, dueBlock: H + 800, head: H },
+        expect: null, blocksTemplate: null },
+      { name: 'THE POLL COULD NOT BE READ but the horizon IS reached -> horizon still '
+          + 'fires; an unreadable poll must not strand a position past its exit',
+        args: { sellable: null, paidWei: PAID, markWei: null,
+          entryBlock: H - 900, dueBlock: H - 1, head: H },
+        expect: 'horizon', blocksTemplate: false },
+      { name: 'THE POLL COULD NOT BE READ and the mark looks catastrophic -> the price '
+          + 'stop must NOT fire on an unverified mark',
+        args: { sellable: null, paidWei: PAID, markWei: 1n,
+          entryBlock: H - 10, dueBlock: H + 800, head: H },
+        expect: null, blocksTemplate: null },
+    ];
+    for (const t of orderCases) {
+      const got = decideExitTrigger(t.args);
+      const orderOk = got.trigger === t.expect;
+      const blockOk = t.blocksTemplate === null
+        ? got.trigger === null
+        : got.trigger !== null && triggerBlocksTemplate(got.trigger) === t.blocksTemplate;
+      results.push({
+        name: `ORDERING: ${t.name}`,
+        expect: `${t.expect ?? 'nothing'}${t.blocksTemplate === null ? ''
+          : t.blocksTemplate ? ' +block' : ' +no-block'}`,
+        got: `${got.trigger ?? 'nothing'}${got.trigger === null ? ''
+          : triggerBlocksTemplate(got.trigger) ? ' +block' : ' +no-block'}`,
+        blocked: [got.detail],
+        pass: orderOk && blockOk,
+      });
+      log.info(`RAIL CASE: ORDERING: ${t.name}`, {
+        expected: t.expect, got: got.trigger, detail: got.detail,
+        blocks_template: got.trigger === null ? null : triggerBlocksTemplate(got.trigger),
+        expected_blocks_template: t.blocksTemplate,
+      });
+    }
 
     for (const t of pureCases) {
       results.push({

@@ -291,3 +291,68 @@ export function loserDeadlineFires(
   const blocksHeld = head - entryBlock;
   return { fires: blocksHeld >= RAILS.LOSER_DEADLINE_BLOCKS, blocksHeld };
 }
+
+/**
+ * WHICH OF THE FOUR TRIGGERS CALLS A POSITION, AND IN WHAT ORDER.
+ *
+ * Extracted from `launchbot.ts` for the same reason as the predicates above: the
+ * ORDERING is the part that matters and it was unreachable by any drill while it lived
+ * inline in a 1,300-line loop. Ordering is not cosmetic here --
+ *
+ *   - `sellability_stop` must beat `horizon`, or a position that has become unsellable
+ *     inside its 90-second hold is recorded as an ordinary planned exit and **its
+ *     template is never blocked**, which is how five of the six `Fly` buys happened.
+ *   - `sellability_stop` must beat `price_stop`, because a position that cannot be sold
+ *     at all has no meaningful mark and reporting a price decline for it would attribute
+ *     the loss to the wrong cause.
+ *   - `horizon` must beat `loser_deadline`, because a position reaching its planned exit
+ *     is a normal close and must not be recorded as a loser or blocklist its template.
+ *
+ * `sellable` is the poll's three-state answer and the third state is load-bearing:
+ * `null` means the probe could not be read, and it must trigger NOTHING. An unreadable
+ * probe is not evidence a position is fine and not evidence it is dead, and a default
+ * either way is the error-path-emits-a-plausible-value shape that has already cost this
+ * project a full investigation.
+ */
+export type ExitTrigger = 'sellability_stop' | 'price_stop' | 'horizon' | 'loser_deadline';
+
+export function decideExitTrigger(args: {
+  sellable: boolean | null;
+  paidWei: bigint;
+  markWei: bigint | null;
+  entryBlock: number | null;
+  dueBlock: number | null;
+  head: number;
+}): { trigger: ExitTrigger | null; detail: string } {
+  if (args.sellable === false) {
+    return { trigger: 'sellability_stop', detail: 'our own sell no longer executes' };
+  }
+  if (args.sellable === true) {
+    const ps = priceStopFires(args.paidWei, args.markWei);
+    if (ps.fires) {
+      return { trigger: 'price_stop',
+        detail: `mark ${String(ps.declineBps)} bps below fill, limit ${RAILS.STOP_LOSS_BPS}` };
+    }
+  }
+  if (args.dueBlock !== null && args.dueBlock <= args.head) {
+    return { trigger: 'horizon',
+      detail: `exit_due_block ${args.dueBlock} <= head ${args.head}` };
+  }
+  const ld = loserDeadlineFires(args.entryBlock, args.head);
+  if (ld.fires) {
+    return { trigger: 'loser_deadline',
+      detail: `${String(ld.blocksHeld)} blocks since entry, limit ${RAILS.LOSER_DEADLINE_BLOCKS}` };
+  }
+  return { trigger: null, detail: 'nothing calls it this tick' };
+}
+
+/**
+ * DOES THIS TRIGGER BLOCK THE TEMPLATE FOR THE REST OF THE RUN?
+ *
+ * Everything except a clean `horizon` exit. A position that reached its planned exit is
+ * an ordinary close and says nothing about the actor who deployed it; the other three
+ * each say the template produced something we could not get out of.
+ */
+export function triggerBlocksTemplate(trigger: ExitTrigger): boolean {
+  return trigger !== 'horizon';
+}
