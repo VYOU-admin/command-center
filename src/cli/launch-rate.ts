@@ -138,8 +138,24 @@ async function main(): Promise<void> {
       last_10_days: rows.slice(-10).map((r) => `${r.d} all=${r.all_pools} priced=${r.priced}`),
     });
 
-    /* ---- 3. IS THE LIVE LAUNCHPAD STILL LAUNCHING? ------------------------ */
-    const pad = await sweepCount(rpc, LIVE_LAUNCHPAD, 0, head);
+    /*
+     * ---- 3. IS THE LIVE LAUNCHPAD STILL LAUNCHING? ------------------------
+     *
+     * **BOUNDED TO A RECENT WINDOW ON PURPOSE.** The first version of this swept the
+     * launchpad from block 0, and that is a genuinely different job: it is a BUSY
+     * contract, so every request hits the result cap, the span floors at 5,000 blocks,
+     * and covering 66 million blocks becomes ~13,000 requests. It was still crawling
+     * when the session timed out.
+     *
+     * The question does not need it. "Is this launchpad alive and at what rate" is
+     * answered by a recent window; "when did it start" is not decision-relevant and the
+     * NOXA survey already shows what a DEAD launchpad looks like. So this reads the
+     * last `WINDOW_BLOCKS` and says so, rather than quoting a lifetime figure it did
+     * not measure.
+     */
+    const WINDOW_BLOCKS = 900_000;   /* ~25 hours at the measured 10 blocks/s */
+    const padFrom = Math.max(0, head - WINDOW_BLOCKS);
+    const pad = await sweepCount(rpc, LIVE_LAUNCHPAD, padFrom, head);
     const padDays = [...pad.days.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1);
     const padCounts = padDays.map((d) => d[1]).sort((a, b) => a - b);
 
@@ -148,11 +164,13 @@ async function main(): Promise<void> {
       note: '61 of our 130 bot_trades rows carry this as the Initialize target; '
         + 'ROBINHOOD.md section 8 already identified it as this chain\'s dominant '
         + 'launchpad. It is NOT the NOXA factory the brief named.',
-      logs_total: pad.logs,
-      first_log_block: pad.first ?? 'NONE',
+      WINDOW_MEASURED: `${padFrom} .. ${head} (${WINDOW_BLOCKS} blocks, ~25 h)`,
+      caveat: 'a RECENT WINDOW, not the launchpad\'s lifetime — see the comment',
+      logs_in_window: pad.logs,
+      first_log_block_in_window: pad.first ?? 'NONE — zero logs in 25 hours',
       last_log_block: pad.last ?? 'NONE',
       blocks_since_its_last_log: pad.last === null ? 'n/a' : head - pad.last,
-      active_days: padDays.length,
+      active_days_in_window: padDays.length,
       logs_per_day_median: padCounts.length === 0 ? null
         : padCounts[Math.floor(padCounts.length / 2)],
       last_5_days: padDays.slice(-5).map((d) => `${d[0]} ${String(d[1])}`),
