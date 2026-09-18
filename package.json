@@ -51,6 +51,7 @@
     "post-mortem": "npm run build && node dist/cli/post-mortem.js",
     "poolid-check": "npm run build && node dist/cli/poolid-check.js",
     "launchpad-survey": "npm run build && node dist/cli/launchpad-survey.js",
+    "launch-rate": "npm run build && node dist/cli/launch-rate.js",
     "decay-trajectory": "npm run build && node dist/cli/decay-trajectory.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
