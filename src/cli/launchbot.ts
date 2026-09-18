@@ -39,7 +39,7 @@ import {
   RECEIPT_TIMEOUT_MS, ROUND_TRIP_GAS_USD, SLIPPAGE_BPS,
 } from '../bot/config.js';
 import { buildSwap } from '../bot/calldata.js';
-import { checkSellable } from '../bot/sellability.js';
+import { checkSellable, simulateSellAt } from '../bot/sellability.js';
 import { ensureSellReadiness, plannedSends } from '../bot/approvals.js';
 import { readTokenBalance } from '../bot/allowance.js';
 import { awaitReceipt } from '../bot/receipt.js';
@@ -47,7 +47,9 @@ import { minOut, positionWei, qualifies } from '../bot/rule.js';
 import { quote } from '../bot/quote.js';
 import type { PoolTick } from '../bot/quote.js';
 import { BOT_SCHEMA, halt, isHalted } from '../bot/state.js';
-import { checkRails, deployedCapIsTerminal, deployedUsd } from '../bot/rails.js';
+import { checkRails, deployedCapIsTerminal, deployedUsd, loserDeadlineFires,
+  priceStopFires, runCapReached } from '../bot/rails.js';
+import { poolIdOf, readPoolLiquidity } from '../bot/pool-state.js';
 import { id } from 'ethers';
 import { quoteRate, swapAmounts, tokenPrice } from '../bot/price.js';
 import { BroadcastRpc, ReadOnlyRpc } from '../bot/rpc.js';
@@ -308,7 +310,50 @@ async function main(): Promise<void> {
     approvalsGranted: 0, approvalsSkipped: 0,
     /* The DRY-RUN plan: reached and built, or not buildable and why. */
     approvalPlanBuilt: 0, approvalPlanFailed: 0, approvalPlanSkipped: 0,
+    /* PART 2 RAILS AND STOPS -- every one counted so a zero is visible. */
+    tradesThisRun: 0, blockedByRunCap: 0, blockedByTemplate: 0,
+    sellStopFired: 0, priceStopFired: 0, loserDeadlineFired: 0,
+    sellPolls: 0, sellPollStillOk: 0, sellPollFailed: 0,
   };
+
+  /*
+   * ===================================================================
+   * THE PER-RUN TRADE CAP -- 2A, AND IT IS COUNTED HERE ON PURPOSE
+   * ===================================================================
+   *
+   * `RAILS.MAX_TRADES_PER_RUN` is enforced by this in-process counter rather than by a
+   * query in `checkRails`, and that is the entire reason it exists as a separate rail.
+   * The live run's cost was not an absent limit -- MAX_DEPLOYED_USD, MAX_CONCURRENT and
+   * MAX_DAILY_LOSS_USD were all set. It was that a single status defect
+   * (`closed_unsimulatable`) made every position invisible to the queries all three read
+   * from, so all three reported a clean slate while $120 went out. **A counter in the
+   * process cannot be routed around by a wrong status.** It is a deliberate second kind
+   * of limit, not a duplicate of the first.
+   *
+   * It counts BROADCASTS, not fills: a buy that reverts still spent gas and still
+   * consumed an attempt.
+   */
+  const templatesSeen = new Map<string, string>();
+  const blockedTemplates = new Set<string>();
+
+  /*
+   * ===================================================================
+   * THE TEMPLATE BLOCKLIST -- 2D's "stop opening positions on similar candidates"
+   * ===================================================================
+   *
+   * MEASURED on the twelve live positions: six carried the symbol `Fly`, five shared an
+   * IDENTICAL T0 sell price, and seven shared an IDENTICAL pool liquidity value. They
+   * were one actor deploying one template repeatedly, and five of the six `Fly` buys
+   * were made AFTER the first one had already failed to sell. Nothing in the bot
+   * connected them.
+   *
+   * A template is keyed on two facts readable BEFORE the buy -- the token symbol and the
+   * pool's liquidity at the first swap. When any position on a template fails, every
+   * later candidate matching it is skipped for the rest of the run. The key is
+   * deliberately coarse: a false skip costs one $1 trade, a false pass cost $10.
+   */
+  const templateKey = (symbol: string | null, liquidity: string | null): string =>
+    `${(symbol ?? '?').toLowerCase()}|${liquidity ?? '?'}`;
   const exitFails: string[] = [];
   const refusals: string[] = [];
   const reverts: string[] = [];
@@ -341,16 +386,32 @@ async function main(): Promise<void> {
         id: string; pool_id: string; token: string; counter: string; fee: number;
         tick_spacing: number; hooks: string; first_swap_block: string;
         exit_sim_from: string | null; quoted_out: string | null;
+        entry_block: string | null; exit_due_block: string | null;
+        position_wei: string | null;
       }>(
+        /*
+         * ===============================================================
+         * EVERY OPEN POSITION, EVERY TICK -- NOT ONLY THE ONES PAST THE HORIZON
+         * ===============================================================
+         *
+         * This query used to carry `and exit_due_block <= $3`, so a position was looked
+         * at exactly once: 90 seconds after the buy, and never before. **MEASURED: 11 of
+         * the 12 live positions were already unsellable within 20 SECONDS.** By the time
+         * this loop looked at them the outcome had been settled for over a minute and
+         * the only thing left to do was record it.
+         *
+         * The filter now selects every `holding` row and the decision about whether to
+         * exit is made below, per row, per tick. The horizon is one of four triggers
+         * rather than the only one.
+         */
         `select id::text, pool_id, token, counter, fee, tick_spacing, hooks,
-                first_swap_block::text, exit_sim_from, quoted_out::text
+                first_swap_block::text, exit_sim_from, quoted_out::text,
+                entry_block::text, exit_due_block::text, position_wei::text
            from bot_trades
           where chain = $1 and mode = $2 and status = 'holding'
-            and exit_due_block is not null and exit_due_block <= $3
-          order by exit_due_block limit 5`, [CHAIN, MODE, head]);
+          order by exit_due_block nulls first limit 8`, [CHAIN, MODE]);
 
       for (const d of due.rows) {
-        stats.exitsDue += 1;
         /*
          * WHO SELLS, AND THEREFORE WHOSE BALANCE IS READ. **THIS IS COMPUTED FIRST, AND
          * THAT ORDERING IS THE WHOLE FIX.**
@@ -433,6 +494,140 @@ async function main(): Promise<void> {
                     exit_sim_status='holder_zero_balance', updated_at=now() where id=$1`,
             [d.id]);
           continue;
+        }
+
+        /*
+         * =====================================================================
+         * WHY WE ARE EXITING, OR WHETHER WE ARE -- 2B AND 2D, THE FOUR TRIGGERS
+         * =====================================================================
+         *
+         * Four things can call a position, checked in the order of how fast the
+         * measurement says they matter:
+         *
+         *   1. SELLABILITY STOP -- our own sell no longer executes. **This is the only
+         *      one the measurement supports as the primary instrument.** 11 of 12 live
+         *      positions died this way, as a step change from "sells fine" to "reverts",
+         *      with no price decline in between.
+         *   2. PRICE STOP -- the mark is `STOP_LOSS_BPS` below the fill. **MEASURED: it
+         *      would have fired on 0 of 12**, because the worst decline seen while a
+         *      position was still sellable was -2.0%, which IS the LP fee. It is a
+         *      backstop against a shape nobody has observed, not a mechanism against the
+         *      one that was.
+         *   3. HORIZON -- `exit_due_block`, the ordinary planned exit.
+         *   4. LOSER DEADLINE -- `LOSER_DEADLINE_BLOCKS` past the entry with the position
+         *      still open. The operator's 2-minute value, kept as a backstop; 11 of 12
+         *      were already dead six to twenty-four times sooner.
+         *
+         * A tick where none of the four fires LEAVES THE POSITION ALONE, which is the
+         * behaviour the old `exit_due_block <= head` filter had for every tick but one.
+         */
+        let trigger: string | null = null;
+        let triggerDetail = '';
+        const entryBlk = d.entry_block === null ? null : Number(d.entry_block);
+        const dueBlk = d.exit_due_block === null ? null : Number(d.exit_due_block);
+
+        if (RAILS.SELLABILITY_STOP) {
+          /*
+           * THE POLL. A REACHABLE bound, for the reason in section 6A.3: a bound of
+           * 2^127 short-circuits inside the swap action before `SETTLE_ALL` pulls the
+           * token, so it reports a healthy price on a token that refuses transfers. The
+           * whole point of this poll is the part the unreachable bound never reached.
+           */
+          /*
+           * THE POOL KEY IS RECONSTRUCTED WITH THE EXIT PATH'S OWN ORDERING RULE and
+           * then CHECKED AGAINST THE STORED POOL ID. `exit-exec.ts` uses
+           * `token.toLowerCase() < counter.toLowerCase()`; using anything else here
+           * would mean the poll measured a different swap from the one the exit sends.
+           *
+           * **AND A WRONG KEY FAILS IN THE DANGEROUS DIRECTION.** It addresses a pool
+           * that does not exist, the call reverts, and this poll reads that revert as
+           * "the token refuses to transfer" -- a honeypot verdict indistinguishable from
+           * a real one, which would sell every position instantly and blocklist every
+           * template. So the derived id is compared with `pool_id` from the `Initialize`
+           * log, and a mismatch VOIDS THE POLL rather than being reported as a finding.
+           */
+          const tokenIsCurrency0 = d.token.toLowerCase() < d.counter.toLowerCase();
+          const probePool = {
+            currency0: tokenIsCurrency0 ? d.token : d.counter,
+            currency1: tokenIsCurrency0 ? d.counter : d.token,
+            fee: d.fee, tickSpacing: d.tick_spacing, hooks: d.hooks,
+          };
+          const derivedPid = poolIdOf(probePool).toLowerCase();
+          if (derivedPid !== d.pool_id.toLowerCase()) {
+            log.error('POOL KEY RECONSTRUCTION DISAGREES WITH THE Initialize LOG', {
+              trade: d.id, stored: d.pool_id, derived: derivedPid,
+              note: 'the sellability poll is VOID for this row; a revert here would be '
+                + 'the wrong pool, not a honeypot',
+            });
+          } else {
+          stats.sellPolls += 1;
+          const probe = await simulateSellAt(rpc, {
+            pool: probePool,
+            token: d.token, owner: seller, amount: sellAmt,
+            zeroForOneBuy: !tokenIsCurrency0,
+            block: `0x${head.toString(16)}`,
+          });
+          if (probe.executes === false) {
+            stats.sellPollFailed += 1; stats.sellStopFired += 1;
+            trigger = 'sellability_stop';
+            triggerDetail = probe.executeReason;
+          } else if (probe.executes === true) {
+            stats.sellPollStillOk += 1;
+            /*
+             * THE PRICE STOP, EVALUATED ONLY WHERE THERE IS A PRICE TO EVALUATE. It is
+             * measured against `position_wei` -- what we actually paid -- and not against
+             * the quote, because a quote is what we expected.
+             */
+            const paid = d.position_wei === null ? 0n : BigInt(d.position_wei);
+            const ps = priceStopFires(paid, probe.ethOut);
+            if (ps.fires) {
+              stats.priceStopFired += 1;
+              trigger = 'price_stop';
+              triggerDetail = `mark ${String(ps.declineBps)} bps below fill, `
+                + `limit ${RAILS.STOP_LOSS_BPS}`;
+            }
+          }
+          /* `probe.executes === null` is UNKNOWN and triggers nothing: an unreadable
+           * probe is not evidence the position is fine and not evidence it is dead. */
+          }
+        }
+
+        if (trigger === null && dueBlk !== null && dueBlk <= head) {
+          trigger = 'horizon';
+          triggerDetail = `exit_due_block ${dueBlk} <= head ${head}`;
+        }
+
+        const ld = loserDeadlineFires(entryBlk, head);
+        if (trigger === null && ld.fires) {
+          stats.loserDeadlineFired += 1;
+          trigger = 'loser_deadline';
+          triggerDetail = `${String(ld.blocksHeld)} blocks since entry, `
+            + `limit ${RAILS.LOSER_DEADLINE_BLOCKS}`;
+        }
+
+        if (trigger === null) continue;   /* nothing calls it this tick */
+
+        stats.exitsDue += 1;
+        log.info('POSITION CALLED', {
+          trade: d.id, trigger, detail: triggerDetail.slice(0, 160),
+          blocks_held: entryBlk === null ? null : head - entryBlk,
+        });
+
+        /*
+         * A CALLED POSITION BLOCKS ITS TEMPLATE FOR THE REST OF THE RUN -- 2D's "stop
+         * opening positions on similar candidates". Registered BEFORE the exit is
+         * attempted, because the exit can take several ticks and the next candidate on
+         * the same template can arrive inside that window. That is exactly what happened
+         * live: five of the six `Fly` buys landed while the first was still unresolved.
+         */
+        if (trigger !== 'horizon') {
+          const tk = templatesSeen.get(d.pool_id);
+          if (tk !== undefined && !blockedTemplates.has(tk)) {
+            blockedTemplates.add(tk);
+            log.warn('TEMPLATE BLOCKED FOR THE REST OF THE RUN', {
+              template: tk, because: `trade ${d.id} ${trigger}`,
+            });
+          }
         }
 
         try {
@@ -553,6 +748,77 @@ async function main(): Promise<void> {
             continue;
           }
           stats.qualified += 1;
+
+          /*
+           * =============================================================
+           * THE PER-RUN TRADE CAP -- 2A
+           * =============================================================
+           * Checked before anything is spent, and it STOPS THE RUN rather than skipping
+           * the launch. Ten attempts is the whole budget for the run; having used it,
+           * there is nothing left to do but shut down cleanly with the positions still
+           * open so the exit path can work them.
+           */
+          if (runCapReached(stats.tradesThisRun)) {
+            stats.blockedByRunCap += 1;
+            log.warn('PER-RUN TRADE CAP REACHED -- ENDING THE RUN', {
+              trades_this_run: stats.tradesThisRun,
+              max_trades_per_run: RAILS.MAX_TRADES_PER_RUN,
+              note: 'counted in-process; a wrong status cannot route around it',
+            });
+            break;
+          }
+
+          /*
+           * =============================================================
+           * THE ZERO-LIQUIDITY GATE -- 1B's "Fly had zero liquidity, that is readable"
+           * =============================================================
+           *
+           * `readPoolLiquidity` is `extsload(keccak256(poolId ‖ 6) + 3)` on the
+           * PoolManager: one `eth_call`, 26 CU, readable at any block including the one
+           * before the buy. Three `Fly` buys went into pools whose liquidity was
+           * literally `0` at the moment of purchase. **This is the exact call and the
+           * exact threshold: liquidity must be STRICTLY GREATER THAN ZERO.**
+           *
+           * The threshold is zero and not a floor because the operator's instruction was
+           * explicit -- do not disqualify launches that are merely thin -- and because
+           * any non-zero floor would be a number I cannot derive from twelve positions.
+           * Zero is the only value the measurement supports.
+           *
+           * **`null` IS NOT ZERO AND IS ALSO A REFUSAL.** An unreadable pool is one we
+           * know nothing about; declining costs one $1 trade and proceeding cost $120.
+           */
+          const liq = await readPoolLiquidity(rpc, pid, `0x${head.toString(16)}`);
+          if (liq === null || liq === 0n) {
+            stats.blockedByTemplate += 1;
+            log.warn('PRE-BUY LIQUIDITY GATE REFUSED THE POOL', {
+              pool: pid, liquidity: liq === null ? 'UNREADABLE' : '0',
+              threshold: 'strictly greater than zero',
+              note: liq === null
+                ? 'unreadable is a refusal, not a zero'
+                : 'this is the Fly failure: three buys into an empty pool',
+            });
+            continue;
+          }
+
+          /*
+           * =============================================================
+           * THE TEMPLATE BLOCKLIST -- 2D
+           * =============================================================
+           * Keyed on the pool's liquidity, which is the fact that grouped 7 of the 12
+           * live positions into one actor's template. Once any position on a template
+           * has failed, no further candidate matching it is bought for the rest of the
+           * run.
+           */
+          const tkey = templateKey(null, String(liq));
+          if (blockedTemplates.has(tkey)) {
+            stats.blockedByTemplate += 1;
+            log.warn('TEMPLATE ALREADY FAILED THIS RUN -- SKIPPING', {
+              pool: pid, template: tkey,
+              note: 'five of the six Fly buys were made after the first had failed',
+            });
+            continue;
+          }
+          templatesSeen.set(pid, tkey);
 
           /*
            * EVERY RAIL, IN ONE PLACE, IMMEDIATELY BEFORE COMMITTING TO THE TRADE.
@@ -885,6 +1151,11 @@ async function main(): Promise<void> {
                 description: `BUY trade ${tradeId} ${p.token} minOut=${bound}`,
               });
               entryTx = hash; stats.buysBroadcast += 1;
+              /*
+               * THE PER-RUN CAP COUNTS BROADCASTS, NOT FILLS. A buy that reverts still
+               * spent gas and still used one of the ten attempts this run is allowed.
+               */
+              stats.tradesThisRun += 1;
               log.warn('BUY BROADCAST', { trade: tradeId, hash, pool: pid,
                 value_wei: buy.value.toString(), min_out: bound.toString() });
               await c.query(

@@ -47,12 +47,28 @@ export interface TradeTotals {
   mode: string; trades: number; wins: number; netPnl: number; gas: number;
 }
 
+/**
+ * THE BOT'S ON/OFF STATE, AS THE PAGE MUST SHOW IT.
+ *
+ * `rows` is EVERY `bot_control` row and not only the chain-wide sentinel, because the
+ * page has to be able to say "you pressed START and a mode-scoped halt is still
+ * stopping it". Showing the sentinel alone would let the control read RUNNING while the
+ * bot refuses to trade, and an operator who is told the wrong thing by a control is
+ * worse off than one with no control.
+ */
+export interface BotControl {
+  rows: { mode: string; halted: boolean; reason: string | null; updatedAt: string }[];
+  openPositions: number;
+}
+
 export function renderTradesPage(args: {
   rows: TradeRow[]; totals: TradeTotals[]; shown: number; total: number;
   modes: string[]; launchpads: { addr: string; n: number }[];
   filterMode: string | null; filterLaunchpad: string | null; cap: number;
+  control: BotControl;
 }): string {
-  const { rows, totals, shown, total, modes, launchpads, filterMode, filterLaunchpad, cap } = args;
+  const { rows, totals, shown, total, modes, launchpads, filterMode, filterLaunchpad, cap,
+    control } = args;
   const esc = (v: string): string => v
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
@@ -135,6 +151,65 @@ export function renderTradesPage(args: {
     `<option value="${esc(l.addr)}"${l.addr === filterLaunchpad ? ' selected' : ''}>`
     + `${esc(short(l.addr))} — ${l.n} trade${l.n === 1 ? '' : 's'}</option>`).join('');
 
+  /*
+   * =======================================================================
+   * THE ON/OFF CONTROL -- 2C
+   * =======================================================================
+   *
+   * Built for the situation it exists for: an operator on a phone, away from his
+   * laptop, who has just realised the bot is losing money. Every decision below follows
+   * from that one scenario.
+   *
+   *   - **STOP needs no confirmation.** One tap, and the server does not ask. A
+   *     mistaken stop costs a few missed launches; the alternative cost $120.
+   *   - **START needs one**, enforced on the server as well as in the browser, because
+   *     the endpoint is reachable directly and that is the point.
+   *   - **The state is stated in words, not implied by a colour.** `STOPPED` or
+   *     `RUNNING`, in text, because a red button can mean "it is stopped" or "press to
+   *     stop" and the operator does not have time to work out which.
+   *   - **Mode-scoped halts are listed even when the chain-wide row is clear**, with the
+   *     plain statement that the bot is still stopped. That is the case where a control
+   *     showing one row would lie.
+   *   - **The open-position count is shown next to STOP**, because stopping prevents new
+   *     buys and does NOT close what is already held -- five positions were left
+   *     stranded in the live run and the operator must not read STOP as "flat".
+   *
+   * No framework, no build step: a `fetch` in an inline handler, which is what the rest
+   * of this dashboard already does.
+   */
+  const wide = control.rows.find((r) => r.mode === '*');
+  const modeHalts = control.rows.filter((r) => r.mode !== '*' && r.halted);
+  const chainHalted = wide !== undefined && wide.halted;
+  /* STOPPED if ANY row halts it. `isHalted` checks chain-wide first, then the mode. */
+  const effectivelyStopped = chainHalted || modeHalts.length > 0;
+  const controlHtml = `<div class="ctl ${effectivelyStopped ? 'stopped' : 'running'}">
+  <div class="ctl-state">
+    <span class="ctl-word">${effectivelyStopped ? 'STOPPED' : 'RUNNING'}</span>
+    <span class="ctl-why">${chainHalted
+    ? `chain-wide halt set${wide?.updatedAt ? ` · ${esc(wide.updatedAt.slice(0, 19))}Z` : ''}`
+    : modeHalts.length > 0
+      ? `no chain-wide halt, but ${String(modeHalts.length)} mode halt(s) are stopping it`
+      : 'no halt is set — the bot will trade when a run is started'}</span>
+  </div>
+  ${chainHalted && wide?.reason
+    ? `<div class="ctl-reason">${esc(wide.reason.slice(0, 300))}</div>` : ''}
+  ${modeHalts.length > 0
+    ? `<div class="ctl-reason">${modeHalts.map((m) =>
+      `<div><b>mode ${esc(m.mode)}</b> — ${esc((m.reason ?? 'halted').slice(0, 220))}</div>`)
+      .join('')}<div class="ctl-note">These are NOT cleared by START. The bot raised them
+      about something specific; clear them deliberately through the CLI after reading
+      them.</div></div>` : ''}
+  <div class="ctl-buttons">
+    <button type="button" class="stop" onclick="botHalt('stop')">STOP THE BOT</button>
+    <button type="button" class="start" onclick="botHalt('start')">start</button>
+  </div>
+  <div class="ctl-note">STOP takes effect on the bot's next check and needs no
+    confirmation. It prevents NEW positions; it does not sell what is already held —
+    <b>${String(control.openPositions)} position(s) are open right now</b>. START asks
+    once.</div>
+  <div class="ctl-result" id="ctl-result"></div>
+</div>`;
+
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -189,10 +264,31 @@ export function renderTradesPage(args: {
  .mode.dry{background:#2a2410;color:var(--warn);border:1px solid var(--warn)}
  .mode.live{background:#2a1414;color:var(--bad);border:1px solid var(--bad)}
  a{color:var(--accent)}
+ /* THE CONTROL. Sized for a thumb: the stop button is the largest thing on the page. */
+ .ctl{border-radius:8px;padding:14px;margin-bottom:16px;border:2px solid}
+ .ctl.stopped{background:#10210f;border-color:var(--ok)}
+ .ctl.running{background:#2a1414;border-color:var(--bad)}
+ .ctl-state{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px}
+ .ctl-word{font-size:22px;font-weight:800;letter-spacing:.06em}
+ .ctl.stopped .ctl-word{color:var(--ok)} .ctl.running .ctl-word{color:var(--bad)}
+ .ctl-why{font-size:12px;color:var(--faint)}
+ .ctl-reason{margin-top:8px;font-size:12px;color:var(--warn);line-height:1.5;
+   word-break:break-word}
+ .ctl-note{margin-top:8px;font-size:11px;color:var(--faint);line-height:1.5}
+ .ctl-buttons{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+ .ctl-buttons button{font:inherit;font-weight:700;border-radius:8px;cursor:pointer;
+   border:1px solid transparent;-webkit-tap-highlight-color:transparent}
+ /* STOP IS DELIBERATELY THE BIG ONE. 56px of height is a thumb target on a phone. */
+ .ctl-buttons .stop{flex:1 1 220px;min-height:56px;font-size:17px;letter-spacing:.04em;
+   background:var(--bad);color:#fff}
+ .ctl-buttons .start{flex:0 0 auto;min-height:56px;padding:0 18px;font-size:13px;
+   background:transparent;color:var(--faint);border-color:#333}
+ .ctl-result{margin-top:10px;font-size:12px;line-height:1.5;word-break:break-word}
 </style></head><body><div class="wrap">
 <div class="nav"><a href="/">tokens</a><a href="/watchlist">watchlist</a><a class="on" href="/trades">trades</a></div>
 <h1>trades</h1>
 <p class="sub">Launch bot. Totals are per mode and are never summed across modes.</p>
+${controlHtml}
 ${banner}
 <div class="tots">${totalsHtml}</div>
 <form class="filters" method="get" action="/trades">
@@ -210,5 +306,42 @@ ${banner}
  <th>size</th><th>gross</th><th>gas</th><th>net pnl</th><th>fill</th>
  <th>exit sim</th><th>px +30s</th><th>px +300s</th>
 </tr></thead><tbody>${body}</tbody></table>
+<script>
+/*
+ * THE CONTROL'S ONE FUNCTION.
+ *
+ * confirm() runs on START ONLY, and the server checks the same thing again, so the
+ * confirmation is not something a browser could skip. STOP goes straight through: a
+ * dialog in front of the stop button would be a defect in the exact scenario it was
+ * built for.
+ *
+ * THE RESULT IS READ BACK FROM THE SERVER'S RE-QUERY AND PRINTED, including any
+ * mode-scoped halt still blocking a start. The button never claims an outcome it did
+ * not confirm.
+ */
+function botHalt(action) {
+  if (action === 'start' &&
+      !confirm('Start the bot? It will open real positions when a run is running.')) return;
+  var out = document.getElementById('ctl-result');
+  out.textContent = action === 'stop' ? 'stopping…' : 'starting…';
+  fetch('/api/bot-halt', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: action, chain: 'robinhood', confirm: action === 'start' }),
+  }).then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
+    .then(function (res) {
+      if (res.s !== 200) { out.textContent = 'FAILED (' + res.s + '): ' + (res.j.error || ''); return; }
+      var msg = res.j.halted ? 'STOPPED — chain-wide halt is set.' : 'chain-wide halt cleared.';
+      var blocking = res.j.mode_halts_still_blocking || [];
+      if (!res.j.halted && blocking.length > 0) {
+        msg += ' BUT THE BOT IS STILL STOPPED: ' + blocking.length +
+          ' mode halt(s) — ' + blocking.map(function (b) { return b.mode; }).join(', ') +
+          '. Clear those through the CLI after reading them.';
+      }
+      out.textContent = msg + ' Reloading…';
+      setTimeout(function () { location.reload(); }, 900);
+    })
+    .catch(function (e) { out.textContent = 'FAILED to reach the server: ' + e; });
+}
+</script>
 </div></body></html>`;
 }

@@ -23,7 +23,8 @@ import { bootstrap } from '../bootstrap.js';
 import { errorFields, log } from '../logger.js';
 import { ALL_MODES, BOT_SCHEMA, halt } from '../bot/state.js';
 import { RAILS } from '../bot/config.js';
-import { checkRails, deployedCapIsTerminal, deployedUsd } from '../bot/rails.js';
+import { checkRails, deployedCapIsTerminal, deployedUsd, loserDeadlineFires,
+  priceStopFires, runCapReached } from '../bot/rails.js';
 import type { RailState } from '../bot/rails.js';
 import type { PoolClient } from '../store/db.js';
 
@@ -323,6 +324,130 @@ async function main(): Promise<void> {
       log.info(`RAIL CASE: TERMINALITY: ${t.name}`, {
         halts: got, expected_halt: t.expect,
         deployed_usd: Number(deployedUsd(t.state).toFixed(2)),
+      });
+    }
+
+    /*
+     * =====================================================================
+     * THE IN-PROCESS RAILS AND THE STOPS -- PART 2, TRIPPED HERE
+     * =====================================================================
+     *
+     * `MAX_TRADES_PER_RUN`, the price stop and the loser deadline are not database
+     * rails and `checkRails` does not see them. They are exercised through the pure
+     * predicates in `bot/rails.ts` that `launchbot.ts` itself calls, so this drill trips
+     * THE SAME CODE the loop runs rather than a re-implementation of it.
+     *
+     * Each is tested at the threshold and one below. **A guard that fires in both cases
+     * is an outage, not a guard**, and the one-below case is the only thing that tells
+     * them apart -- four of the five original rails had never been tripped at all.
+     */
+    const pureCases: Array<{ name: string; got: boolean; expect: boolean; detail: string }> = [];
+
+    /* --- MAX_TRADES_PER_RUN ----------------------------------------------- */
+    const runCap = RAILS.MAX_TRADES_PER_RUN;
+    pureCases.push({
+      name: `MAX_TRADES_PER_RUN at ${runCap - 1} broadcasts (one below)`,
+      got: runCapReached(runCap - 1), expect: false,
+      detail: `cap=${runCap}`,
+    });
+    pureCases.push({
+      name: `MAX_TRADES_PER_RUN at ${runCap} broadcasts (at the rail)`,
+      got: runCapReached(runCap), expect: true,
+      detail: `cap=${runCap}`,
+    });
+    pureCases.push({
+      name: 'MAX_TRADES_PER_RUN at 0 broadcasts (a fresh run must be allowed to trade)',
+      got: runCapReached(0), expect: false,
+      detail: `cap=${runCap}`,
+    });
+
+    /* --- THE PRICE STOP --------------------------------------------------- */
+    /*
+     * Derived from the rail so raising it cannot silently make the "one below" case
+     * breach it. `paid` is a round 1e15 wei so the bps arithmetic is exact rather than
+     * landing a basis point either side of the threshold by rounding.
+     */
+    const paid = 1_000_000_000_000_000n;
+    const markAt = (bps: number): bigint => paid - (paid * BigInt(bps)) / 10000n;
+    const stopBps = RAILS.STOP_LOSS_BPS;
+    pureCases.push({
+      name: `price stop at a ${stopBps - 1} bps decline (one below the ${stopBps} bps limit)`,
+      got: priceStopFires(paid, markAt(stopBps - 1)).fires, expect: false,
+      detail: `decline=${String(priceStopFires(paid, markAt(stopBps - 1)).declineBps)} bps`,
+    });
+    pureCases.push({
+      name: `price stop at a ${stopBps} bps decline (at the limit)`,
+      got: priceStopFires(paid, markAt(stopBps)).fires, expect: true,
+      detail: `decline=${String(priceStopFires(paid, markAt(stopBps)).declineBps)} bps`,
+    });
+    /*
+     * THE MEASURED CASE, AND IT IS THE IMPORTANT ONE. -200 bps is the worst price any of
+     * the twelve live positions showed while still sellable, and it IS the LP fee. This
+     * case asserts the stop does NOT fire there, which is the same as asserting the
+     * measurement: **a price stop could not have saved any of the twelve.** If this
+     * case ever flips to BLOCK, `STOP_LOSS_BPS` has been tightened onto the fee and the
+     * bot will sell every position on entry.
+     */
+    pureCases.push({
+      name: 'price stop at -200 bps, the WORST decline seen while sellable (= the LP fee) '
+        + '-> must NOT fire; 0 of 12 live positions could have been saved by a price stop',
+      got: priceStopFires(paid, markAt(200)).fires, expect: false,
+      detail: `decline=${String(priceStopFires(paid, markAt(200)).declineBps)} bps, `
+        + `limit=${stopBps} bps`,
+    });
+    /* AN UNREADABLE MARK IS NOT A DECLINE. */
+    pureCases.push({
+      name: 'price stop with an UNREADABLE mark -> must NOT fire (unknown is not a loss)',
+      got: priceStopFires(paid, null).fires, expect: false,
+      detail: 'mark=null',
+    });
+    pureCases.push({
+      name: 'price stop with NO recorded cost basis -> must NOT fire (nothing to compare)',
+      got: priceStopFires(0n, markAt(9000)).fires, expect: false,
+      detail: 'paid=0',
+    });
+
+    /* --- THE LOSER DEADLINE ----------------------------------------------- */
+    const dl = RAILS.LOSER_DEADLINE_BLOCKS;
+    pureCases.push({
+      name: `loser deadline at ${dl - 1} blocks held (one below)`,
+      got: loserDeadlineFires(1_000_000, 1_000_000 + dl - 1).fires, expect: false,
+      detail: `limit=${dl} blocks`,
+    });
+    pureCases.push({
+      name: `loser deadline at ${dl} blocks held (at the deadline)`,
+      got: loserDeadlineFires(1_000_000, 1_000_000 + dl).fires, expect: true,
+      detail: `limit=${dl} blocks`,
+    });
+    /*
+     * THE MEASURED CASE. 11 of the 12 live positions were unsellable within 20 seconds
+     * = 200 blocks. This asserts the deadline does NOT fire there, which is the same as
+     * asserting that the deadline is six to twenty-four times slower than the window
+     * that decided every one of them, and that the sellability poll is what has to
+     * catch them.
+     */
+    pureCases.push({
+      name: 'loser deadline at 200 blocks (= 20 s, by which 11 of 12 live positions were '
+        + 'ALREADY DEAD) -> does NOT fire; the deadline is not what calls these losers',
+      got: loserDeadlineFires(1_000_000, 1_000_200).fires, expect: false,
+      detail: `limit=${dl} blocks = ${dl / 10} s`,
+    });
+    pureCases.push({
+      name: 'loser deadline with NO entry block -> must NOT fire (we do not know when it started)',
+      got: loserDeadlineFires(null, 9_999_999).fires, expect: false,
+      detail: 'entry_block=null',
+    });
+
+    for (const t of pureCases) {
+      results.push({
+        name: `IN-PROCESS: ${t.name}`,
+        expect: t.expect ? 'BLOCK' : 'ALLOW',
+        got: t.got ? 'BLOCK' : 'ALLOW',
+        blocked: [t.detail],
+        pass: t.got === t.expect,
+      });
+      log.info(`RAIL CASE: IN-PROCESS: ${t.name}`, {
+        fires: t.got, expected_to_fire: t.expect, detail: t.detail,
       });
     }
 

@@ -4905,6 +4905,222 @@ does not charge us for it. Read 706's T0 figure as optimistic by roughly that mu
 
 ---
 
+## 6B. RAILS, STOPS AND AN OFF SWITCH — 2026-09-17
+
+Part 2 of the post-mortem brief. **No live trading happened in this pass and the
+chain-wide halt stayed set throughout** — it is still set as this section is written,
+and every figure below comes either from the twelve real positions of section 6A or
+from a drill.
+
+**This section was written after the code, which is backwards and is the thing rule 2
+of this document exists to prevent.** It is recorded here rather than quietly fixed
+because the four rules at the top are not decoration.
+
+### 6B.1 The rail values, and where each number comes from
+
+| Rail | Was | Now | Where the number comes from |
+|---|---|---|---|
+| `MAX_POSITION_USD` | $10 | **$1** | The operator's instruction. The next live test exists to **observe selling** across many tokens at a size where being wrong costs nothing. At $1, the twelve losses of section 6A would have cost $12, not $120. |
+| `MAX_TRADES_PER_RUN` | *did not exist* | **10** | The operator's instruction. **Counted in the process, not queried** — see 6B.2. |
+| `MAX_DEPLOYED_USD` | $100 | **$15** | 10 × $1 plus headroom. Derived from the two rails above, never typed independently, so raising one cannot leave this one stale. |
+| `MAX_DAILY_LOSS_USD` | $50 | **$5** | MEASURED: 11 of 12 positions returned −100% and one returned −1.6%, so expected loss is ≈$0.92 per $1 trade. $5 is reached after five or six total losses — half the run's budget — which is the point at which continuing is a decision rather than an accident. |
+| `MAX_CONCURRENT` | 5 | 5 | Unchanged. |
+| `MAX_TRADES_PER_DAY` | 40 | 40 | Unchanged. |
+| `STOP_LOSS_BPS` | *did not exist* | **2000** | See 6B.3. **Deliberately inert on the measured population.** |
+| `LOSER_DEADLINE_BLOCKS` | *did not exist* | **1200 (120 s)** | The operator's value, kept as a backstop. See 6B.5 for why it is not the mechanism. |
+
+### 6B.2 Why `MAX_TRADES_PER_RUN` is counted in the process
+
+**The $120 was not lost because a limit was missing.** `MAX_CONCURRENT`,
+`MAX_DEPLOYED_USD` and `MAX_DAILY_LOSS_USD` were all set and all enforced. They failed
+together, for one reason: a single status defect — every live position written
+`closed_unsimulatable` — made those positions invisible to the queries all three rails
+read from. Three independent-looking rails shared one dependency and it broke.
+
+`MAX_TRADES_PER_RUN` is therefore held as an integer in the loop and incremented on
+every **broadcast** (not every fill — a reverted buy still spent gas and still used an
+attempt). **A counter in the process cannot be routed around by a wrong status.** It is
+a second *kind* of limit rather than a fourth instance of the first kind.
+
+Reaching it **ends the run** rather than skipping the launch. Ten attempts is the whole
+budget; having spent it there is nothing left to do but shut down with the positions
+still open so the exit path can work them.
+
+### 6B.3 The stop loss — and the measurement says a *price* stop is the wrong instrument
+
+There was no stop loss of any kind before today. This is the derivation, and it does not
+end where it was expected to.
+
+`decay-trajectory` walked all twelve live positions from their buy block out to +300 s,
+taking **two** measurements at each step — the price, and whether our own sell would
+actually execute (the distinction section 6A.3 exists for):
+
+```
+became unsellable within +5 s      7 of 12
+                  within +10 s     3 of 12
+                  within +20 s     2 of 12
+                  never             1 of 12   (798, flat at -1.6% out to +300 s)
+
+worst price observed WHILE STILL SELLABLE    median -2.0%,  min -2.0%,  n=12
+```
+
+**−2.0% is the LP fee.** [MEASURED] Every position went from a normal price to
+unsellable in a single step. There is no gradual decline anywhere in the population for
+a price stop to fire on.
+
+That leaves no honest way to derive a price-stop percentage:
+
+- Tighter than the fee → fires on every trade the instant it opens.
+- Looser than the fee → fires on none of the twelve.
+- **There is no value in between that the data supports**, and choosing one anyway
+  would be exactly the reasoning-forward-from-a-model this pass exists to stop.
+
+So `STOP_LOSS_BPS = 2000` is set **to be provably inert on the measured population** —
+ten times the widest observed non-fatal decline. **MEASURED: it would have fired on 0 of
+12.** It is a backstop against a decline shape nobody has yet observed, and it is
+labelled as one. `rail-drill` asserts it does *not* fire at −200 bps; if that case ever
+flips, the stop has been tightened onto the fee and the bot will sell everything on
+entry.
+
+**The instrument the measurement does support is a sellability poll.** Every open
+position is now probed every tick — *"would our own sell execute right now"*, with a
+**reachable** `amountOutMinimum`, because an unreachable one short-circuits inside the
+swap action before `SETTLE_ALL` and reports a healthy price on a token that refuses
+transfers (6A.3). The instant it stops executing, the position is called and sold.
+
+**AND ITS LIMIT IS MEASURED AND HAS TO BE STATED: 7 of 12 died within 5 seconds.** The
+loop ticks at roughly 5 s, so **even a perfect poll running every tick would have caught
+at most 5 of the 12.** The only thing that catches the other seven is not holding at
+all — an `EXIT_DELAY_BLOCKS` decision, not something a stop can fix. The poll is real
+and it is not a solution.
+
+### 6B.4 The zero-liquidity gate — the readable fact nobody read
+
+`Fly` was bought **three times into pools whose liquidity was literally `0`** at the
+moment of purchase. That number is one `eth_call`:
+
+```
+extsload(keccak256(poolId ‖ uint256(6)) + 3)  on the PoolManager   — 26 CU
+```
+
+It is readable at any block, including the block before the buy. Nothing read it,
+because the bot's only notion of a pool's health was the router's quote — and the
+router's quote against an unreachable bound never reaches the pool's ability to pay.
+
+**The exact call is above and the exact threshold is: liquidity strictly greater than
+zero.** The threshold is zero and not a floor because the operator's instruction was
+explicit — do not disqualify launches that are merely thin — and because no non-zero
+floor is derivable from twelve positions. **`null` is not zero and is also a refusal:**
+an unreadable pool is one we know nothing about, and declining costs $1 where proceeding
+cost $120.
+
+The reader is shared with `post-mortem.ts` rather than reimplemented, because two
+readers of the same fact are two chances to be wrong about it. The storage layout is
+**CONFIRMED, not inferred** — it agreed with the independent router oracle on all 12
+positions.
+
+### 6B.5 When a position is called a loser
+
+Four triggers, checked in order of how fast the measurement says they matter:
+
+1. **Sellability stop** — our sell no longer executes. *The primary instrument.* 11 of
+   12 died this way.
+2. **Price stop** — `STOP_LOSS_BPS` below the fill. **Fired on 0 of 12** (6B.3).
+3. **Horizon** — `exit_due_block`, the ordinary planned exit.
+4. **Loser deadline** — `LOSER_DEADLINE_BLOCKS` past entry, still open.
+
+**A correction to the brief, stated plainly: the decisive window is 5–20 seconds, not
+2–3 minutes.** [MEASURED, n=12] A 2-minute deadline is six to twenty-four times slower
+than the window that decided every one of the twelve, and **would have changed the
+outcome of none of them.** It is kept because it does address something real — a
+position that is neither sellable nor resolvable, which is how five rows were left
+stranded — but it is a backstop, and `rail-drill` asserts it does not fire at 200 blocks
+(20 s) to keep that fact visible in the drill output rather than only in this document.
+
+**The query that finds open positions changed too, and that mattered more than any
+threshold.** It used to carry `and exit_due_block <= head`, so a position was looked at
+**exactly once**, 90 seconds after the buy and never before. By then every outcome had
+been settled for over a minute. It now selects every `holding` row every tick and the
+decision is made per row.
+
+### 6B.6 "Stop opening positions on similar candidates"
+
+MEASURED on the twelve: **six carried the symbol `Fly`, five shared an identical T0 sell
+price, and seven shared an identical pool liquidity value.** One actor, one template,
+deployed repeatedly — and **five of the six `Fly` buys were made after the first had
+already failed to sell.** Nothing in the bot connected them.
+
+A template is now keyed on the pool's liquidity at first swap — the fact that grouped 7
+of the 12 — and registered per candidate before the buy. When any position on a template
+is called for any reason other than a clean horizon exit, **every later candidate
+matching it is skipped for the rest of the run.** It is registered *before* the exit is
+attempted, because an exit can take several ticks and the next candidate on the same
+template can arrive inside that window — which is precisely what happened.
+
+The key is deliberately coarse. A false skip costs one $1 trade; a false pass cost $10.
+
+### 6B.7 The off switch
+
+**The kill switch existed for the whole live run and the only way to write it was a CLI
+on a laptop the operator did not have.** A control that requires a laptop is not a
+control during the period it is needed.
+
+`/trades` now carries it, above everything else on the page:
+
+- **STOP takes one tap and asks nothing.** A dialog in front of the stop button is a
+  defect in the exact scenario the button was built for.
+- **START asks once, and the confirmation is enforced on the server** as well as in the
+  browser — the endpoint is reachable directly, and that is the point.
+- **The state is stated in words** — `STOPPED` or `RUNNING` — because a red button can
+  mean "it is stopped" or "press to stop" and the operator does not have time to work
+  out which.
+- **START clears the chain-wide row only.** A mode-scoped halt the bot raised for itself
+  is a statement that something specific is still wrong, and pressing START on a
+  dashboard is not a diagnosis of it. Those are listed on the page with the plain
+  statement that the bot is still stopped, and cleared deliberately through the CLI.
+- **The open-position count sits next to STOP**, because stopping prevents new buys and
+  does **not** close what is held. Five positions were stranded that way and STOP must
+  not read as "flat".
+
+### 6B.8 What is exercised, what is asserted, and what is neither
+
+| Item | Status |
+|---|---|
+| The eight rail values | **EXERCISED** — `rail-drill`, each at the threshold and one below |
+| `MAX_TRADES_PER_RUN` | **EXERCISED** — at 0, at 9, at 10, through the same predicate the loop calls |
+| The price stop | **EXERCISED** — including the −200 bps case that must *not* fire |
+| The loser deadline | **EXERCISED** — including the 200-block case that must *not* fire |
+| The pool-key reconstruction the poll depends on | **EXERCISED** — `poolid-check`, derived id vs the `Initialize` log |
+| The on/off control | **EXERCISED IN A DOM** — buttons clicked, `fetch` and `confirm` recorded |
+| The nonce fix | **EXERCISED ON REAL TRANSACTIONS** — nonces 138 → 139 → 140 |
+| The Permit2 deadlock fix | **EXERCISED AGAINST A SCRIPTED TRANSPORT ONLY** — see 6B.9 |
+| The sellability stop firing on a live position | **NOT EXERCISED.** It cannot be while the chain is halted. |
+
+### 6B.9 The two fixes from 2E, and one honest gap
+
+**The nonce defect is fixed and exercised on real transactions.** The signer tracks the
+nonce across a trade — chain-seeded, advanced on a confirmed send, invalidated on a
+throw, with invalidation happening *before* broadcast and the set happening *after* —
+and retries once on `nonce too low`. Proven on a real sequence: **138 → 139 → 140**,
+ordering held.
+
+**The Permit2 approval deadlock is fixed.** Step 1 now runs a simulate-grant-retry loop,
+and the retry decision is made on the **decoded revert payload** (`AllowanceExpired`,
+`InsufficientAllowance`, `Error(string)` containing `TRANSFER_FROM_FAILED` or
+`ALLOWANCE`) rather than on a substring of a message. `exit-broadcast-drill` passes 15/15
+with a discriminating control case.
+
+**And the gap, stated rather than buried: the deadlock fix was exercised against a
+scripted transport, not against real transactions.** Exercising it for real needs a
+position whose approval has actually expired or been partially spent, which needs a live
+buy — and the chain-wide halt is set, every pool from the live run pays `actual=0`, and
+the wallet holds $7.71. There is no way to construct that case right now. **This is a
+guard that passes a drill and has never fired in anger**, which is the same category the
+four original rails were in before they cost $120. It belongs on the list in section 7,
+not in a summary that reads as done.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the

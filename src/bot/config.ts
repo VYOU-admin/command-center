@@ -67,10 +67,27 @@ export const FEE_TIERS_OBSERVED = [500, 10000] as const;
 export const ALLOWED_FEES: readonly number[] = [100, 500, 10000];
 
 export const RAILS = {
-  /** Operator-approved 2026-09-16. */
-  MAX_POSITION_USD: 10,
-  /** $50 of $100 at risk, leaving headroom for a stuck exit. */
+  /**
+   * **$1, DOWN FROM $10, OPERATOR-INSTRUCTED 2026-09-17 AFTER THE LIVE RUN LOST $120.**
+   *
+   * The purpose of the next live test is to OBSERVE SELLING across many tokens at a
+   * size where being wrong costs nothing. It is instrumentation, not a profit attempt —
+   * and section 6A is explicit that no hold time on the measured population is positive,
+   * so a larger size would only buy a more expensive version of the same answer.
+   */
+  MAX_POSITION_USD: 1,
+  /** 5 x $1 = $5 of open basis, and the arming gate is that same $5. */
   MAX_CONCURRENT: 5,
+  /**
+   * **A PER-RUN CAP, WHICH IS NOT THE SAME RAIL AS THE PER-DAY ONE.**
+   * `MAX_TRADES_PER_DAY` bounds a day and survives a restart; this bounds ONE
+   * invocation, so a run that is going wrong stops at ten trades whatever the day's
+   * budget still allows. The live run made twelve buys in about fifteen minutes with
+   * every capital rail blinded — a per-run cap is the one bound that a status bug
+   * cannot route around, because it is counted in the process rather than read from a
+   * status.
+   */
+  MAX_TRADES_PER_RUN: 10,
   /**
    * THE HARD CAPITAL CAP. LAUNCHBOT.md section 4.
    *
@@ -97,7 +114,14 @@ export const RAILS = {
    * BACKSTOP against those being raised, not a constraint that fires today — which is
    * exactly why `rail-drill` trips it on purpose rather than waiting for it.
    */
-  MAX_DEPLOYED_USD: 100,
+  /**
+   * **$15, DOWN FROM $100, RE-DERIVED TO THE NEW SIZE 2026-09-17.**
+   *
+   * At $1 a position and ten trades a run the maximum basis a run can put out is $10,
+   * so a $100 cap could never bind and a rail that cannot bind is not a rail. $15 is
+   * that $10 plus headroom for the realised-loss term, which the cap also counts.
+   */
+  MAX_DEPLOYED_USD: 15,
   /** ~8% of the 485/day available in the SELLOFF window. A bounded first exposure. */
   MAX_TRADES_PER_DAY: 40,
   /**
@@ -139,8 +163,100 @@ export const RAILS = {
    * the operator approved a larger daily loss, not a larger total exposure, and $100
    * remains the outer bound on both.
    */
-  MAX_DAILY_LOSS_USD: 50,
+  /**
+   * **$5, DOWN FROM $50, DERIVED FROM THE MEASURED LOSS RATE 2026-09-17.**
+   *
+   * The $50 value was derived from `daily-loss-derive`'s bootstrap at a $10 position,
+   * and section 6A.2 failure 8 records that the bootstrap assumed independent draws
+   * while six of twelve live buys were one actor. It is superseded rather than rescaled.
+   *
+   * **THE MEASURED PER-TRADE OUTCOME ON THE LIVE POPULATION IS 11 OF 12 AT -100% AND 1
+   * AT -1.6%**, so the expected loss per $1 trade is about $0.92 and a run losing
+   * systematically reaches $5 after five or six trades — half the run's ten-trade
+   * budget. That is the derivation: **halt a run at the point where the measured
+   * failure rate says the remaining budget will also be lost.**
+   */
+  MAX_DAILY_LOSS_USD: 5,
   /** A broken calldata shape shows up as reverts and must stop at once. */
+  /**
+   * =====================================================================
+   * THE STOP LOSS — 2B, and the measurement says a PRICE stop is the wrong instrument
+   * =====================================================================
+   *
+   * There was no stop loss at all before 2026-09-17. This adds one, and the honest
+   * derivation is uncomfortable: **the measured population contains no gradual
+   * declines to derive a value from.**
+   *
+   * `decay-trajectory` walked every one of the twelve live positions from the buy block
+   * to +300 s, taking the price AND executability at each step. The result:
+   *
+   * ```
+   * became unsellable within +5 s      7 of 12
+   *                   within +10 s     3 of 12
+   *                   within +20 s     2 of 12
+   *                   never             1 of 12   (798, flat at -1.6% out to +300 s)
+   * worst price seen WHILE STILL SELLABLE   median -2.0%, min -2.0%
+   * ```
+   *
+   * **-2.0% IS THE LP FEE.** Every position went from a normal price to unsellable in
+   * one step, so the only decline a price stop could ever have fired on is the fee
+   * itself. A stop tighter than the fee fires on every trade instantly; a stop looser
+   * than it fires on none of the twelve. **There is no value in between that the data
+   * supports, and inventing one would be exactly the reasoning-from-a-model this pass
+   * exists to stop.**
+   *
+   * So the value below is chosen to be **PROVABLY INERT on the measured population** —
+   * 10x the widest observed non-fatal decline — so it can only fire on something the
+   * twelve never produced and cannot make the next run worse. **MEASURED: it would have
+   * fired on 0 of 12.** It is a backstop against a decline shape nobody has yet
+   * observed, not a mechanism against the one that was.
+   *
+   * **THE INSTRUMENT THE DATA DOES SUPPORT IS `SELLABILITY_STOP`, below.**
+   */
+  STOP_LOSS_BPS: 2000,
+
+  /**
+   * =====================================================================
+   * THE SELLABILITY STOP — what the measurement actually supports
+   * =====================================================================
+   *
+   * Poll whether our own sell would EXECUTE, every tick, and exit the instant it stops
+   * executing rather than waiting for the horizon. This is the only stop that addresses
+   * the measured failure, because the failure is a step change in executability and not
+   * a price move.
+   *
+   * **AND ITS LIMIT IS MEASURED AND MUST BE STATED: 7 OF 12 DIED WITHIN 5 SECONDS.**
+   * The loop ticks at roughly 5 s, so even a perfect poll running every tick would have
+   * caught at most 5 of the 12. **The only thing that catches the other 7 is not holding
+   * at all**, and that is an operator decision about `EXIT_DELAY_BLOCKS` rather than
+   * something a stop can fix. Recorded so the poll is not mistaken for a solution.
+   *
+   * It uses a REACHABLE bound, per section 6A.3: an unreachable one short-circuits
+   * before the settle and reports a healthy price on a token that refuses transfers.
+   */
+  SELLABILITY_STOP: true,
+
+  /**
+   * =====================================================================
+   * WHEN A POSITION IS CALLED A LOSER — 2D
+   * =====================================================================
+   *
+   * **1,200 blocks = 2 minutes, the operator's value, kept as a BACKSTOP rather than as
+   * the mechanism — and the measurement says why.** 11 of 12 positions were already
+   * unsellable within 20 seconds, so a 2-minute deadline would have changed the outcome
+   * of exactly none of them. It is six to twenty-four times slower than the decisive
+   * window.
+   *
+   * It is still worth having: it bounds the case where a position is neither sellable
+   * nor resolvable, which is how the live run left five rows stranded. What actually
+   * calls the losers on this population is `SELLABILITY_STOP` above.
+   *
+   * On expiry: stop trying, mark the position a loss, and **add its template to the
+   * run's blocklist** so the bot does not buy the same thing again — 6 of 12 live buys
+   * were one actor and five were bought AFTER the first had already failed.
+   */
+  LOSER_DEADLINE_BLOCKS: 1200,   /* 120 s at the measured 10 blocks/s */
+
   MAX_CONSECUTIVE_REVERTS: 3,
 } as const;
 

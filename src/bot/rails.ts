@@ -212,3 +212,82 @@ export async function checkRails(
   const blocked = evaluateRails(state);
   return { allowed: blocked.length === 0, blocked, state };
 }
+
+/*
+ * ======================================================================
+ * THE IN-PROCESS RAILS AND THE STOPS -- PURE PREDICATES, SO THE DRILL CAN TRIP THEM
+ * ======================================================================
+ *
+ * These are not database rails and they are deliberately not part of `checkRails`.
+ * They are here, as pure functions, for one reason: **a guard that cannot be trip[ped
+ * by the drill is a guard nobody has exercised.** The live run's cost was not an absent
+ * limit -- it was four limits that had never fired in anger. Written inline in
+ * `launchbot.ts` these would be untestable arithmetic inside a 1,300-line loop.
+ *
+ * `rail-drill` calls each one at the threshold and one below it. A guard that fires in
+ * both cases is an outage, not a guard, and the one-below case is what separates them.
+ */
+
+/**
+ * THE PER-RUN TRADE CAP -- 2A.
+ *
+ * Counted in the process rather than queried, because the $120 loss was caused by a
+ * status defect (`closed_unsimulatable`) that made every open position invisible to the
+ * queries `MAX_CONCURRENT`, `MAX_DEPLOYED_USD` and `MAX_DAILY_LOSS_USD` all read from.
+ * All three reported a clean slate simultaneously. **A counter held in the loop cannot
+ * be routed around by a wrong status**, which is what makes this a second KIND of limit
+ * rather than a duplicate of the first.
+ *
+ * It counts BROADCASTS, not fills: a buy that reverted still spent gas and still used
+ * one of the run's attempts.
+ */
+export function runCapReached(tradesThisRun: number): boolean {
+  return tradesThisRun >= RAILS.MAX_TRADES_PER_RUN;
+}
+
+/**
+ * THE PRICE STOP -- 2B.
+ *
+ * **MEASURED: THIS WOULD HAVE FIRED ON 0 OF THE 12 LIVE POSITIONS.** `decay-trajectory`
+ * walked each one from its buy block to +300 s: the worst price seen while a position
+ * was still sellable was -2.0%, which IS the LP fee. Every position went from a normal
+ * price to unsellable in a single step, with no decline in between for a price stop to
+ * catch. `STOP_LOSS_BPS` is therefore set to a value provably inert on that population
+ * -- it is a backstop against a decline shape nobody has observed, and the instrument
+ * the measurement supports is the sellability poll.
+ *
+ * Measured against what was PAID (`position_wei`) and never against the quote: a quote
+ * is what we expected and a fill is what happened.
+ *
+ * A mark that cannot be read returns `fires: false` with `declineBps: null` -- UNKNOWN
+ * is not a decline, and an error path that emitted a plausible number here would sell
+ * every position on a transport hiccup.
+ */
+export function priceStopFires(
+  paidWei: bigint, markWei: bigint | null,
+): { fires: boolean; declineBps: number | null } {
+  if (markWei === null || paidWei <= 0n) return { fires: false, declineBps: null };
+  const declineBps = Number(((paidWei - markWei) * 10000n) / paidWei);
+  return { fires: declineBps >= RAILS.STOP_LOSS_BPS, declineBps };
+}
+
+/**
+ * THE LOSER DEADLINE -- 2D.
+ *
+ * The operator's 2-minute value, and **MEASURED: it would have changed the outcome of
+ * none of the twelve.** 11 of 12 were already unsellable within 20 seconds, so a
+ * 1,200-block deadline is six to twenty-four times slower than the decisive window. It
+ * is kept as a backstop for the case it does address -- a position that is neither
+ * sellable nor resolvable, which is how five rows were left stranded -- and not as the
+ * mechanism that calls losers.
+ *
+ * A row with no `entry_block` returns false: we do not know when it started, and
+ * guessing would either abandon a fresh position or hold a dead one forever.
+ */
+export function loserDeadlineFires(
+  entryBlock: number | null, head: number,
+): { fires: boolean; blocksHeld: number | null } {
+  if (entryBlock === null) return { fires: false, blocksHeld: null };
+  const blocksHeld = head - entryBlock;
+  return { fires: blocksHeld >= RAILS.LOSER_DEADLINE_BLOCKS, blocksHeld };
+}

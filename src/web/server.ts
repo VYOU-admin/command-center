@@ -73,6 +73,111 @@ export function createWebServer(opts: WebServerOptions): Server {
      *
      * NOTHING HERE LOWERCASES AN ADDRESS. Solana mints and wallets are base58.
      */
+    /*
+     * =====================================================================
+     * THE STOP BUTTON -- 2C, AND IT EXISTS BECAUSE THE OPERATOR HAD NO WAY TO STOP IT
+     * =====================================================================
+     *
+     * The first live run lost $120 across fifteen minutes while the operator was away
+     * from his laptop. The kill switch existed the whole time -- a `bot_control` row --
+     * and the ONLY way to write it was a CLI on a machine he did not have. **A control
+     * that requires a laptop is not a control during the period it is needed.**
+     *
+     * So: two endpoints, no JavaScript framework, operable from a phone browser.
+     *
+     * **STOPPING TAKES NO CONFIRMATION AND STARTING TAKES ONE.** The asymmetry is
+     * deliberate and it is the whole design. A mistaken stop costs a few missed
+     * launches; a mistaken start costs the wallet. Anything that makes stopping slower
+     * -- a dialog, a typed phrase, a second tap -- is a defect in the exact scenario
+     * this was built for, which is an operator on a phone who has just realised
+     * something is wrong.
+     *
+     * The halt written here is CHAIN-WIDE (`mode = '*'`), which `isHalted` checks first
+     * and which `halt()` deliberately refuses to write, so an operator's stop can never
+     * be cleared or masked by the bot's own mode-scoped state.
+     */
+    if (req.method === 'POST' && path === '/api/bot-halt') {
+      let raw = '';
+      for await (const chunk of req) {
+        raw += chunk;
+        if (raw.length > 10_000) { sendJson(res, 413, { error: 'body too large' }); return; }
+      }
+      let body: { action?: unknown; confirm?: unknown; chain?: unknown };
+      try { body = JSON.parse(raw) as typeof body; }
+      catch { sendJson(res, 400, { error: 'invalid JSON' }); return; }
+      const chain = typeof body.chain === 'string' && body.chain.trim() !== ''
+        ? body.chain.trim() : 'robinhood';
+      const action = body.action === 'start' ? 'start' : body.action === 'stop' ? 'stop' : '';
+      if (action === '') {
+        sendJson(res, 400, { error: "action must be 'stop' or 'start'" });
+        return;
+      }
+      /*
+       * THE CONFIRMATION IS REQUIRED ON `start` ONLY, AND IS CHECKED ON THE SERVER.
+       * A confirmation enforced solely by a browser dialog is not a confirmation: the
+       * endpoint is reachable directly, and the whole reason it is reachable directly
+       * is so a phone can reach it.
+       */
+      if (action === 'start' && body.confirm !== true) {
+        sendJson(res, 400, {
+          error: 'starting the bot requires confirm: true. Stopping does not, and that '
+            + 'asymmetry is intentional.',
+        });
+        return;
+      }
+      try {
+        if (action === 'stop') {
+          await pool.query(
+            `insert into bot_control (chain, mode, halted, reason)
+             values ($1, '*', true, $2)
+             on conflict (chain, mode) do update
+               set halted = true, reason = $2, updated_at = now()`,
+            [chain, 'STOPPED BY THE OPERATOR from /trades']);
+        } else {
+          /*
+           * CLEARING THE CHAIN-WIDE ROW ONLY. A mode-scoped halt the bot raised for
+           * itself -- an unresolved position, a run of reverts -- is a statement that
+           * something specific is still wrong, and the operator pressing START on a
+           * dashboard is not a diagnosis of it. Those are cleared deliberately,
+           * through the CLI, by someone who has looked at the row.
+           */
+          await pool.query(
+            `update bot_control set halted = false,
+                    reason = 'STARTED BY THE OPERATOR from /trades', updated_at = now()
+              where chain = $1 and mode = '*'`, [chain]);
+        }
+        /* VERIFIED BY RE-READING, not by the update not throwing. */
+        const after = await pool.query<{ halted: boolean; reason: string | null }>(
+          `select halted, reason from bot_control where chain = $1 and mode = '*'`, [chain]);
+        const row = after.rows[0];
+        const modes = await pool.query<{ mode: string; halted: boolean; reason: string | null }>(
+          `select mode, halted, reason from bot_control
+            where chain = $1 and mode <> '*' and halted order by mode`, [chain]);
+        log.warn('BOT CONTROL CHANGED FROM THE DASHBOARD', {
+          chain, action,
+          chain_wide_halted: row === undefined ? 'NO ROW' : String(row.halted),
+          mode_halts_still_set: modes.rows.map((m) => m.mode),
+        });
+        sendJson(res, 200, {
+          ok: true, action, chain,
+          halted: row === undefined ? false : row.halted,
+          reason: row?.reason ?? null,
+          /*
+           * REPORTED EXPLICITLY, INCLUDING WHEN IT IS EMPTY. Pressing START while a
+           * mode-scoped halt is still set leaves the bot stopped, and an operator who
+           * is not told that will believe he started it.
+           */
+          mode_halts_still_blocking: modes.rows.map((m) => ({
+            mode: m.mode, reason: m.reason,
+          })),
+        });
+      } catch (err) {
+        log.error('bot-halt write failed', errorFields(err));
+        sendJson(res, 500, { error: 'bot-halt write failed' });
+      }
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/token-wallet-tag') {
       let raw = '';
       for await (const chunk of req) {
@@ -297,7 +402,7 @@ export function createWebServer(opts: WebServerOptions): Server {
         if (mode) { params.push(mode); where.push(`mode = $${params.length}`); }
         if (pad) { params.push(pad); where.push(`lower(launchpad) = $${params.length}`); }
         const clause = where.join(' and ');
-        const [rowsQ, totQ, cntQ, modeQ, padQ] = await Promise.all([
+        const [rowsQ, totQ, cntQ, modeQ, padQ, ctlQ, openQ] = await Promise.all([
           pool.query(
             'select id::text as id, mode, created_at, pool_id, token, launchpad, fee, '
             + 'position_usd::float8 as position_usd, entry_price::float8 as entry_price, '
@@ -317,6 +422,17 @@ export function createWebServer(opts: WebServerOptions): Server {
           pool.query('select lower(launchpad) as addr, count(*)::int as n from bot_trades '
             + "where chain = 'robinhood' and launchpad is not null "
             + 'group by 1 order by 2 desc limit 25'),
+          /*
+           * THE CONTROL'S STATE -- every `bot_control` row, not just the chain-wide one.
+           * The page must be able to say "you pressed START and a mode halt is still
+           * stopping it", which is unanswerable from the sentinel row alone.
+           */
+          pool.query("select mode, halted, reason, updated_at from bot_control "
+            + "where chain = 'robinhood' order by (mode = '*') desc, mode"),
+          /* OPEN POSITIONS: what pressing STOP will and will not resolve. */
+          pool.query("select count(*)::int as n from bot_trades where chain = 'robinhood' "
+            + "and status in ('intent','entry_sent','holding','exit_sent','needs_exit',"
+            + "'exit_exhausted')"),
         ]);
         const html = renderTradesPage({
           rows: rowsQ.rows.map((r: Record<string, unknown>) => ({
@@ -347,6 +463,15 @@ export function createWebServer(opts: WebServerOptions): Server {
           launchpads: padQ.rows.map((l: Record<string, unknown>) =>
             ({ addr: String(l['addr']), n: Number(l['n']) })),
           filterMode: mode, filterLaunchpad: pad, cap: CAP,
+          control: {
+            rows: ctlQ.rows.map((r: Record<string, unknown>) => ({
+              mode: String(r['mode']),
+              halted: Boolean(r['halted']),
+              reason: (r['reason'] as string | null) ?? null,
+              updatedAt: new Date(r['updated_at'] as string).toISOString(),
+            })),
+            openPositions: Number((openQ.rows[0] as Record<string, unknown>)['n']),
+          },
         });
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(html);

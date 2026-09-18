@@ -173,5 +173,110 @@ const wrongChips = all.liveChips.filter(dry);
 if (wrongChips.length === 0) ok('no dry-run row is chipped as live');
 else fail(`${wrongChips.length} dry-run rows are chipped as live: ${[...new Set(wrongChips)].join(', ')}`);
 
+/* ====================================================================== */
+/* THE ON/OFF CONTROL -- PRESSED, NOT INSPECTED                           */
+/* ====================================================================== */
+/*
+ * A button whose script parses is not a button that works. The failure this guards
+ * against is the operator tapping STOP on a phone, seeing no error, and believing the
+ * bot is stopped while it keeps trading -- which is strictly worse than having no
+ * button, because it converts "I cannot stop it" into "I already did".
+ *
+ * So the buttons are CLICKED in the DOM, with `fetch` and `confirm` replaced by
+ * recorders, and the assertions are about what the page would actually have sent.
+ */
+console.log('\nthe on/off control -- clicked in a DOM');
+
+const ctl = all.d.querySelector('.ctl');
+if (!ctl) {
+  fail('there is no on/off control on /trades at all');
+} else {
+  const word = all.d.querySelector('.ctl-word')?.textContent?.trim() ?? '';
+  if (word === 'STOPPED' || word === 'RUNNING') {
+    ok(`the control states its state in words: ${word}`);
+  } else {
+    fail(`the control does not state STOPPED or RUNNING in words (got "${word}"); a `
+      + 'colour alone is ambiguous about whether it reports or acts');
+  }
+
+  const stopBtn = all.d.querySelector('.ctl-buttons .stop');
+  const startBtn = all.d.querySelector('.ctl-buttons .start');
+  if (!stopBtn) fail('there is no STOP button');
+  if (!startBtn) fail('there is no start button');
+
+  if (stopBtn && startBtn) {
+    /* STOP MUST BE THE BIGGER TARGET. A phone tap is about 44px. */
+    const stopCss = stopBtn.getAttribute('class') ?? '';
+    ok(`stop button classes: ${stopCss}`);
+
+    const w = all.dom.window;
+    const sent = [];
+    /* A recorder, resolving the shape the real endpoint returns. */
+    w.fetch = (url, init) => {
+      sent.push({ url, init });
+      return Promise.resolve({
+        status: 200, ok: true,
+        json: () => Promise.resolve({
+          ok: true, halted: true, reason: 'stub', mode_halts_still_blocking: [],
+        }),
+      });
+    };
+    let confirmCalls = 0; let confirmAnswer = false;
+    w.confirm = () => { confirmCalls += 1; return confirmAnswer; };
+    /* location.reload is called on success; neutralise it so the DOM survives. */
+    try { w.location.reload = () => {}; } catch { /* jsdom may refuse; harmless */ }
+
+    /* ---- 1. STOP, WITH NO CONFIRMATION ------------------------------- */
+    sent.length = 0; confirmCalls = 0;
+    stopBtn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 30));
+    if (confirmCalls !== 0) {
+      fail(`STOP asked for confirmation (${confirmCalls} time(s)). It must not: a dialog `
+        + 'in front of the stop button is a defect in the scenario it exists for');
+    } else ok('STOP asked for NO confirmation');
+    if (sent.length !== 1) {
+      fail(`STOP sent ${sent.length} request(s), expected exactly 1`);
+    } else {
+      const { url, init } = sent[0];
+      const body = JSON.parse(init.body);
+      if (url !== '/api/bot-halt') fail(`STOP posted to ${url}, expected /api/bot-halt`);
+      else if (init.method !== 'POST') fail(`STOP used ${init.method}, expected POST`);
+      else if (body.action !== 'stop') fail(`STOP sent action=${body.action}`);
+      else ok(`STOP posted {action:"stop", chain:"${body.chain}"} to /api/bot-halt`);
+    }
+
+    /* ---- 2. START, CONFIRMATION DECLINED: NOTHING MAY BE SENT -------- */
+    sent.length = 0; confirmCalls = 0; confirmAnswer = false;
+    startBtn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 30));
+    if (confirmCalls !== 1) fail(`start asked for confirmation ${confirmCalls} times, expected 1`);
+    else if (sent.length !== 0) {
+      fail(`start sent ${sent.length} request(s) AFTER the confirmation was declined`);
+    } else ok('start asked once and sent NOTHING when the confirmation was declined');
+
+    /* ---- 3. START, CONFIRMED ----------------------------------------- */
+    sent.length = 0; confirmCalls = 0; confirmAnswer = true;
+    startBtn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 30));
+    if (sent.length !== 1) fail(`confirmed start sent ${sent.length} request(s), expected 1`);
+    else {
+      const body = JSON.parse(sent[0].init.body);
+      if (body.action !== 'start') fail(`confirmed start sent action=${body.action}`);
+      else if (body.confirm !== true) {
+        fail('confirmed start did not carry confirm:true, which the server requires');
+      } else ok('confirmed start posted {action:"start", confirm:true}');
+    }
+
+    /* ---- 4. THE OPEN-POSITION WARNING -------------------------------- */
+    const note = [...all.d.querySelectorAll('.ctl-note')].map((n) => n.textContent).join(' ');
+    if (/position\(s\) are open right now/.test(note)) {
+      ok('the control states how many positions are open, so STOP is not read as "flat"');
+    } else {
+      fail('the control does not say how many positions are open; STOP prevents new buys '
+        + 'and does not close held ones, and five positions were stranded that way');
+    }
+  }
+}
+
 console.log(failures === 0 ? '\nverify-trades-page: PASS' : `\nverify-trades-page: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
