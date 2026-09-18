@@ -70,7 +70,7 @@ const UNREACHABLE = 1n << 127n;
 const ENTRY_DELAY_BLOCKS = 150;   /* 15 s */
 const EXIT_DELAY_BLOCKS = 900;    /* 90 s */
 const BLOCKS_PER_SECOND = 10;
-const SAMPLE = 200;
+const SAMPLE = 700;
 
 const median = (xs: number[]): number | null => {
   if (xs.length === 0) return null;
@@ -259,6 +259,31 @@ async function main(): Promise<void> {
 
     const usable = out.filter((r) => r.ret !== null);
     const rets = usable.map((r) => r.ret!);
+
+    /*
+     * ---- ONE VOTE PER TOKEN, BECAUSE THE POOLS ARE NOT INDEPENDENT ---------
+     *
+     * The first run of this surfaced token `0x11b70d0243…` five times, in five
+     * different pools, each scoring −99.99%. **That is one actor's template counted
+     * five times**, and it is the same clustering the live run showed -- six of twelve
+     * positions carried the symbol `Fly`.
+     *
+     * A median over POOLS therefore weights a prolific deployer by however many pools
+     * it opened. The per-token median gives each distinct token one vote. **Both are
+     * reported**, because they answer different questions: the pool median is what a
+     * bot indiscriminately taking every candidate would experience, and the token
+     * median is whether the underlying launches are good. Neither is the "right" one
+     * and quoting only one would hide the clustering.
+     */
+    const byToken = new Map<string, number[]>();
+    for (const r of usable) {
+      const k = r.token;
+      if (!byToken.has(k)) byToken.set(k, []);
+      byToken.get(k)!.push(r.ret!);
+    }
+    const tokenMeds = [...byToken.values()]
+      .map((v) => median(v)!)
+      .filter((x) => x !== null);
     const dead = usable.filter((r) => r.ret === -1).length;
     const sellableAtEntry = out.filter((r) => r.sellableEntry === true).length;
     const gas = 0.0193;
@@ -272,8 +297,13 @@ async function main(): Promise<void> {
       sellable_at_ENTRY: `${sellableAtEntry} of ${out.length}`,
       COULD_NOT_BE_SOLD_AT_EXIT: `${dead} (${usable.length === 0 ? 'n/a' : pc(dead / usable.length)})`,
       p25: pc(q(rets, 0.25)),
-      MEDIAN_RETURN: pc(median(rets)),
+      MEDIAN_RETURN_per_POOL: pc(median(rets)),
       p75: pc(q(rets, 0.75)),
+      distinct_tokens: byToken.size,
+      pools_per_token_max: Math.max(...[...byToken.values()].map((v) => v.length)),
+      MEDIAN_RETURN_per_DISTINCT_TOKEN: pc(median(tokenMeds)),
+      token_p25: pc(q(tokenMeds, 0.25)),
+      token_p75: pc(q(tokenMeds, 0.75)),
       median_NET_OF_GAS: median(rets) === null ? 'n/a' : pc(median(rets)! - gas),
       share_beating_gas: usable.length === 0 ? 'n/a'
         : pc(usable.filter((r) => r.ret! > gas).length / usable.length),
