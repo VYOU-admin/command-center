@@ -5084,17 +5084,35 @@ control during the period it is needed.
 
 ### 6B.8 What is exercised, what is asserted, and what is neither
 
+`rail-drill`: **54 cases, 54 passed, 0 failed**, cleanup verified on a fresh connection
+at 0 rows in both `bot_trades` and `bot_control`. Run against deployed commit `4c7c304`.
+
 | Item | Status |
 |---|---|
-| The eight rail values | **EXERCISED** — `rail-drill`, each at the threshold and one below |
+| The eight rail values | **EXERCISED** — each at the threshold and one below |
 | `MAX_TRADES_PER_RUN` | **EXERCISED** — at 0, at 9, at 10, through the same predicate the loop calls |
 | The price stop | **EXERCISED** — including the −200 bps case that must *not* fire |
 | The loser deadline | **EXERCISED** — including the 200-block case that must *not* fire |
-| The pool-key reconstruction the poll depends on | **EXERCISED** — `poolid-check`, derived id vs the `Initialize` log |
-| The on/off control | **EXERCISED IN A DOM** — buttons clicked, `fetch` and `confirm` recorded |
+| **The trigger ordering** | **EXERCISED — 10 cases.** The important one: unsellable *with* the horizon also reached must resolve to `sellability_stop`, or the position is filed as a planned exit and **its template is never blocked** |
+| The three-state poll | **EXERCISED** — `null` triggers nothing on its own, does **not** stop the horizon firing, and does not let the price stop fire on an unverified mark |
+| The pool-key reconstruction the poll depends on | **EXERCISED — `poolid-check`: 130 of 130 records, 0 disagreements.** `token.toLowerCase() < counter.toLowerCase()` reproduces the logged pool id |
+| The on/off control, in the browser | **EXERCISED IN A DOM** — buttons clicked, `fetch` and `confirm` recorded, 130 rows rendered |
+| The on/off endpoint, for real | **EXERCISED** — start refused without `confirm`, stop accepted without one, and a start pressed while a mode halt stands reports it. That report was **confirmed accurate by calling `isHalted`**, which still returned halted for that mode |
 | The nonce fix | **EXERCISED ON REAL TRANSACTIONS** — nonces 138 → 139 → 140 |
 | The Permit2 deadlock fix | **EXERCISED AGAINST A SCRIPTED TRANSPORT ONLY** — see 6B.9 |
+| **The exit loop's own wiring** | **NOT EXERCISED.** The predicates and the ordering are; the loop that calls them is not. See below. |
 | The sellability stop firing on a live position | **NOT EXERCISED.** It cannot be while the chain is halted. |
+| The zero-liquidity gate refusing a real pool | **NOT EXERCISED** for the same reason. |
+
+**The last three lines are the honest limit of this pass and they are not a formality.**
+Every *decision* Part 2 added is now tripped by a drill, but the loop that reads a
+`holding` row, runs the poll, calls `decideExitTrigger` and registers the blocklist has
+not itself been run — **not even in dry run, because the chain-wide halt blocks every
+mode including `dry-run`, and clearing it was out of scope for this pass.** The
+extraction into pure predicates is what makes the *logic* testable; it does not test the
+wiring. The first dry run after the halt is lifted is where that gets exercised, and it
+should be treated as the real test of Part 2 rather than as a formality — this document
+already records two occasions where correct logic was reached by no caller.
 
 ### 6B.9 The two fixes from 2E, and one honest gap
 
