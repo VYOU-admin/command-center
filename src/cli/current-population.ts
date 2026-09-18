@@ -144,40 +144,54 @@ async function main(): Promise<void> {
       rejected_both_or_neither: inits.length - cand.length,
     });
 
-    /* ---- THE FIRST SWAP, which is what completes a candidate -------------- */
+    /*
+     * ---- THE FIRST SWAP, PER SAMPLED POOL, WITH A SPARSE FILTER ------------
+     *
+     * The first version swept EVERY v4 `Swap` across the whole 800,000-block window and
+     * hit the result cap immediately -- that filter returns every swap on the chain, and
+     * ROBINHOOD.md section 5 is explicit that span sizing belongs to the FILTER and not
+     * to the endpoint: *"a sparse filter returned 4,615 logs across 40,000,000 blocks in
+     * a single call; a dense filter is refused above 100,000."*
+     *
+     * We only need the first swap for the pools we are actually going to price. So the
+     * sample is taken FIRST and each pool's first swap is fetched with
+     * `topics = [Swap, poolId]` -- as sparse as a filter gets, one call per pool,
+     * bounded to the 2,000 blocks after its own initialization.
+     *
+     * **A POOL WITH NO SWAP IN THAT RANGE IS EXCLUDED, NOT TREATED AS ZERO.** It never
+     * traded, so it was never an opportunity we missed.
+     */
+    const ordered = [...cand].sort((a2, b2) => a2.block - b2.block);
+    const step0 = Math.max(1, Math.floor(ordered.length / SAMPLE));
+    const preSample = ordered.filter((_, i) => i % step0 === 0).slice(0, SAMPLE);
+
     const firstSwap = new Map<string, number>();
-    cur = from;
-    const ids = new Set(cand.map((x) => x.poolId));
-    while (cur <= to + EXIT_DELAY_BLOCKS + 2_000) {
-      const end = Math.min(cur + 20_000 - 1, to + EXIT_DELAY_BLOCKS + 2_000);
-      const logs = (await rpc.call('eth_getLogs', [{
-        address: POOL_MANAGER, topics: [SWAP],
-        fromBlock: `0x${cur.toString(16)}`, toBlock: `0x${end.toString(16)}`,
-      }])) as Array<{ topics: string[]; blockNumber: string }>;
-      for (const l of logs) {
-        const pid = (l.topics[1] ?? '').toLowerCase();
-        if (!ids.has(pid) || firstSwap.has(pid)) continue;
-        firstSwap.set(pid, Number(BigInt(l.blockNumber)));
-      }
-      cur = end + 1;
+    let noSwap = 0;
+    for (const p of preSample) {
+      try {
+        const logs = (await rpc.call('eth_getLogs', [{
+          address: POOL_MANAGER, topics: [SWAP, p.poolId],
+          fromBlock: `0x${p.block.toString(16)}`,
+          toBlock: `0x${(p.block + 2_000).toString(16)}`,
+        }])) as Array<{ blockNumber: string }>;
+        if (logs.length === 0) { noSwap += 1; continue; }
+        firstSwap.set(p.poolId, Math.min(...logs.map((l) => Number(BigInt(l.blockNumber)))));
+      } catch { noSwap += 1; }
     }
 
-    /* A launch with no swap never traded and is not a missed opportunity. */
-    const traded = cand.filter((x) => firstSwap.has(x.poolId))
-      .sort((a, b) => a.block - b.block);
+    const traded = preSample.filter((x) => firstSwap.has(x.poolId));
     log.info('QUALIFYING SET', {
-      candidates: cand.length,
-      with_a_first_swap: traded.length,
-      never_traded_EXCLUDED: cand.length - traded.length,
-      sample_taken: Math.min(SAMPLE, traded.length),
-      estimate_cu: Math.min(SAMPLE, traded.length) * 45 * 26,
+      candidates_in_window: cand.length,
+      sampled_before_the_swap_lookup: preSample.length,
+      with_a_first_swap_within_2000_blocks: traded.length,
+      never_traded_EXCLUDED: noSwap,
+      estimate_cu: traded.length * 45 * 26,
       ceiling_cu: CU_CEILING,
     });
 
-    /* A DETERMINISTIC, EVENLY SPREAD sample -- every nth, not the first n, so the
-     * sample is not all from one hour of the window. */
-    const step = Math.max(1, Math.floor(traded.length / SAMPLE));
-    const pick = traded.filter((_, i) => i % step === 0).slice(0, SAMPLE);
+    /* The sample was already taken, evenly spread by initialization block, BEFORE the
+     * swap lookup -- so it is not all drawn from one hour of the window. */
+    const pick = traded;
 
     interface R { pool: string; token: string; liq: bigint | null;
       sellableEntry: boolean | null; ret: number | null; reason: string }
