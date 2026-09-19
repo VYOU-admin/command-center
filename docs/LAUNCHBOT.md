@@ -5621,7 +5621,144 @@ here.
 
 ---
 
+## 6E. 4C — THE RETURN ON THE POOLS.TRADE POPULATION, AGAINST A CONTROL
+
+Same method as §6C's table: our own simulated buy, our own simulated sell with a
+**REACHABLE** bound, at **$1**, no-exit scored **−100%**, deduplicated by token, over
+7 days. **Groups defined entirely by creation-time facts — nothing here filters on an
+exit-time property**, because §6C already produced one circular table that way.
+
+### 6E.1 THE MEASUREMENT COULD NOT RUN AT FIRST, AND THE DEFECT WAS MINE
+
+**The first run returned ZERO scored rows for Pools.trade: all 250 tokens came back
+`slots_not_found`.** A filter matching nothing is a suspected defect, not a finding, and
+two separate defects were behind it.
+
+**1. The slot scan cannot see a namespaced layout.** `simulateSellAt` discovered the
+balance slot by scanning `keccak256(owner ‖ i)` for small integers `i`. That finds an
+ordinary Solidity mapping and finds **nothing** on a contract whose base slot is derived
+from a hash. `eth_createAccessList` reports exactly which slots a call touches, whatever
+the layout, and it is now asked first with the integer scan as fallback. Two constraints,
+both measured:
+
+- **It is not archival here** — a historical block returns `metadata is not found`. So
+  the slot is discovered at `latest`, which is sound because a storage **layout** is a
+  property of the code, not of a block.
+- **It can return several slots.** Each candidate is verified by overriding it and
+  reading the contract's own view back **at the target block**. A wrong slot cannot
+  survive that, and that read-back is what makes discovering at one block and using it
+  at another safe.
+
+**2. An allowance that is already infinite needs no slot — and that was the real
+blocker.** With the balance slot found, the allowance slot still failed. [MEASURED]
+`allowance(anyone, Permit2)` on a Pools.trade token returns `0xffff…ffff` and **the
+access list for that call is EMPTY** — the function short-circuits and reads no storage.
+**These tokens hard-code an infinite Permit2 allowance for every holder.** There was no
+slot because there was no *need* for one, and the code read the absence of a slot as an
+inability to measure.
+
+After the fix, the same token: `executes: true`, `ethOut` non-zero, **4 RPC calls instead
+of 25.** One real observation before spending on the population.
+
+**A consequence worth carrying: the Permit2 two-step approval deadlock of §6B.9 — the
+guard that has never fired in anger — does not apply to this population at all. There
+is nothing to approve.**
+
+### 6E.2 AND A GAS ERROR I MADE, CORRECTED
+
+I first wrote round-trip gas as **0.193%** of a $1 position, by dividing §6C's 1.93%-of-$10
+figure by ten. **Gas is a fixed number of wei and does not scale with position size.**
+The absolute cost is ~$0.193, so at $1 it is **19.3% of the position** — I divided where
+I should have multiplied, a factor of 100.
+
+**This is decision-relevant, not a rounding note: at $1, gas alone is 19.3%, and no
+strategy on this chain can be net-positive at that size.** It does not invalidate the $1
+test — §6B.1 says plainly that size is *instrumentation, not a profit attempt*. It does
+mean **the GROSS figures are the ones that say whether the strategy works**, and both
+sizes are now reported side by side.
+
+### 6E.3 THE RESULT
+
+Window `60,654,784..66,702,784` (7.0 days). 99,575 v4 initializations, 72,882 with
+exactly one pricing side, **2,503 canonical Pools.trade** and 70,379 control. Sampled
+260 per group, evenly spread by block.
+
+| | **POOLS.TRADE** | **CONTROL** |
+|---|---|---|
+| sampled → scored | 260 → **256 (98.5%)** | 260 → **106 (40.8%)** |
+| distinct tokens | 256 | 101 |
+| **UNSELLABLE at horizon** | **0 — 0.00%** | 12 — **11.32%** |
+| liquidity = 0 at horizon | **0 — 0.00%** | 11 — 10.38% |
+| p25 | **−11.07%** | **−99.91%** |
+| **median, gross** | **−0.54%** | −43.45% |
+| p75 | +13.50% | +43.56% |
+| median net @ $10 | **−2.47%** | −45.38% |
+| median net @ $1 | −19.84% | −62.75% |
+| per-token median | −0.54% | −28.19% |
+| share beating gas @ $1 | 17.19% | 34.91% |
+
+**FOUR THINGS THIS SAYS, IN ORDER OF IMPORTANCE.**
+
+**1. NOT ONE OF 256 POOLS.TRADE LAUNCHES WAS UNSELLABLE AT THE HORIZON.** Against
+11.32% of the control. §6D could only show that liquidity was not withdrawn; **this is
+the thing §6D explicitly could not establish — that the lock translates into being able
+to sell.** It does. 10 of our 12 live losses were liquidity pulled during the hold, and
+that failure mode did not occur once here.
+
+**2. THE CATASTROPHIC TAIL IS GONE.** p25 is **−11.07%** against **−99.91%**. On the
+control a quarter of launches lose essentially everything; on Pools.trade the 25th
+percentile loses eleven percent. **That is the single biggest difference between the two
+populations and it is what the lock buys.**
+
+**3. AND THERE IS STILL NO EDGE AT THE CURRENT EXIT RULE.** The median is **−0.54%
+gross**. Pools.trade charges **0.25% per leg = 0.50% round trip**, so **−0.54% is the
+fee and essentially nothing else.** This is the same shape §6A found at T0 on the old
+population: the 90-second hold adds nothing. Net of gas it is −2.47% at $10 and −19.84%
+at $1.
+
+**4. THE UPSIDE IS COMPRESSED TOO, WHICH IS THE HONEST COST OF THE SAFETY.** p75 is
+**+13.50%** against **+43.56%**. A permanently locked, autocompounding, single-sided
+position is a much tighter market in both directions. Anyone hoping the lock removes the
+downside while leaving the upside should read those two columns together.
+
+**ATTRITION IS PART OF THE RESULT AND IS REPORTED, NOT DROPPED.** 256 of 260 Pools.trade
+candidates were scoreable against 106 of 260 control. The control loses most of its
+sample to *never traded within 2,000 blocks* or *the buy could not execute*; **98.5% of
+Pools.trade launches are tradeable at our entry because the creator buys in the launch
+block**, which is 4E's subject.
+
+**ONE CAVEAT ON THE CONTROL, STATED PLAINLY.** Its median moved from −10.76% at n=55 to
+−43.45% at n=106 between two runs of the same code. **That is a noisy sample and its
+median should not be quoted to two decimals.** The Pools.trade figures are stable across
+runs at n=256. The comparison that survives the noise is the *shape* — 0% vs ~11%
+unsellable, −11% vs −100% at p25 — not the exact medians.
+
+### 6E.4 What this does and does not license
+
+- **It does support fishing here rather than where we were.** Zero unsellable, no
+  catastrophic tail, and the entry rule currently rejects the whole population (§6D.3).
+- **It does not support trading it at a 90-second horizon**, at any size. The median is
+  the fee.
+- **It says nothing about a different exit**, which is 4D's question and the obvious next
+  one: with a 0% unsellable rate and a +13.50% p75, whether anything captures that
+  upside is now a live question rather than a hopeless one.
+- **No live trading happened. The chain-wide halt stayed set throughout.**
+
+---
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-19, from Part 4C:**
+
+- **`checkSellable` HAS THE SAME TWO DEFECTS `simulateSellAt` JUST HAD, AND IT IS THE
+  LIVE PRE-BUY GATE.** §6E.1. It still discovers slots by integer scan only and still
+  treats a missing allowance slot as fatal. **So the live gate would mark every
+  Pools.trade launch unsellable and refuse to buy it** — the same population §6E.3
+  measures at 0% unsellable. This must be fixed before any run that is meant to trade
+  them.
+- **Gas is an absolute cost and the $1 size makes it 19.3% of the position.** §6E.2. No
+  configuration is net-positive at $1; the size is instrumentation and the document
+  should never quote a net-at-$1 figure as a strategy result.
 
 **ADDED 2026-09-19, from Part 4:**
 
