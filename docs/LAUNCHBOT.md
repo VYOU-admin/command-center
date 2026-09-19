@@ -6575,6 +6575,106 @@ count failing to reproduce there — which, at 21 comparisons, is what I expect.
 
 ---
 
+## 6M. 5C — ONE SIGNAL SURVIVES OUT OF TIME
+
+**Zero RPC.** Split at the median initialization block — train earlier, test later — with
+the split point derived from the data and printed before any delta was read.
+
+```
+1,016 pools   split at block 63,442,830
+early  508 pools, runner rate 34.1%
+late   508 pools, runner rate 50.2%
+```
+
+**AND IT IS A HARDER TEST THAN THE BRIEF INTENDED, WHICH WAS FLAGGED BEFORE RUNNING IT.**
+§6J puts the regime change at ~63,072,000, **inside the early half** — so the early half
+straddles two regimes and the late half sits entirely in the new one. A signal surviving
+that survived a regime change; one that fails might fail only because the halves are
+different markets. **So a second split, held entirely within the new regime, is reported
+beside it.**
+
+### 6M.1 THE RESULT
+
+| feature | δ(early) | δ(late) | verdict |
+|---|---|---|---|
+| **creator ETH into creation tx** | **+0.533** | **+0.285** | **REPRODUCES** |
+| *(collinear)* creator supply share | +0.533 | +0.285 | reproduces |
+| *(collinear)* largest buy by +15 s | +0.545 | +0.285 | reproduces |
+| *(collinear)* total ETH in by +15 s | +0.396 | +0.226 | reproduces |
+| has emoji | +0.104 | +0.238 | **never trained** — below the bar on the training half |
+| distinct buyers by +5 s | −0.279 | −0.038 | **DROPPED** |
+| *control:* distinct buyers by +10 s | −0.380 | −0.049 | DROPPED |
+| *control:* pool liquidity at init | +0.095 | +0.090 | not a signal |
+| *control:* token name length | −0.104 | −0.027 | not a signal |
+
+**Within the new regime only** (n=286 / 286, regime held constant):
+
+| feature | δ(A) | δ(B) | verdict |
+|---|---|---|---|
+| **creator ETH into creation tx** | **+0.305** | **+0.263** | **REPRODUCES** |
+| total ETH in by +15 s | +0.274 | +0.147 | DROPPED |
+| has emoji | +0.271 | +0.116 | DROPPED |
+| distinct buyers by +5 s | −0.076 | −0.019 | not a signal |
+
+**ONE SIGNAL SURVIVES BOTH TESTS: the size of the creator's own launch buy.**
+
+### 6M.2 WHAT THE CONTROLS SAY ABOUT THE ESTIMATOR
+
+Three features that **failed** 5B were carried through deliberately. **None of them
+"reproduced"** — `buyers by +10 s` trained at −0.380 and collapsed to −0.049, pool
+liquidity and name length stayed flat in both halves. **The estimator is not
+manufacturing structure**, which is what makes the one survivor worth believing.
+
+**And `buyers by +5 s` behaved exactly like the controls: −0.279 → −0.038.** It was one
+of 5B's two small signals; it is now dropped. §6L warned that at 21 comparisons a couple
+of |δ| ≈ 0.17 is what chance produces, and that is what this was.
+
+**`has emoji` never even trained.** Its pooled 5B value of +0.169 came apart into +0.104
+on the early half — below the bar — so there was nothing to hold out. **A pooled effect
+that does not survive being split was never a stable effect.**
+
+**21 quantities tested → 3 candidates → 1 survivor.** That is the honest count.
+
+### 6M.3 THE GAP IS VOLATILE BUT NOT DECAYING — CHECKED BECAUSE IT LOOKED LIKE IT WAS
+
+The within-regime test showed medians of **3.500 (runner) against 3.400 (non-runner)** —
+nearly touching, despite δ = +0.263. That looked like a closing gap, so it was measured
+per day rather than assumed:
+
+| day | n | runner% | med creator ETH, RUNNER | NON-RUNNER | gap |
+|---|---|---|---|---|---|
+| 70 | 150 | 27% | 0.132 | 0.050 | 0.082 |
+| 71 | 144 | 40% | 1.000 | 0.050 | 0.950 |
+| 72 | 150 | 31% | 1.000 | 0.140 | 0.860 |
+| 73 | 147 | 42% | 1.900 | 0.150 | 1.750 |
+| 74 | 143 | 65% | 3.500 | 1.500 | 2.000 |
+| **75** | 145 | 50% | 3.500 | **3.400** | **0.100** |
+| **76** | 137 | 41% | 3.500 | **0.300** | **3.200** |
+
+**Day 75 is a single anomalous day** on which non-runners also carried large creator
+buys. **Day 76 — the most recent measured — has the WIDEST gap of the seven (3.200
+ETH).** The signal is not decaying; the within-regime medians converged because day 75
+sits inside that window.
+
+**What this does mean: day-to-day variance is very large** (gap 0.08 to 3.20 ETH,
+runner rate 27–65%). Any rule built on this will have days where it separates nothing,
+and **a live test short enough to land inside one day 75 would read as a failure.**
+
+### 6M.4 Where this leaves 5D
+
+- **The signal is:** a large creator buy in the creation transaction, readable at block 0,
+  **before our entry at +15 s.** Median 3.5 ETH in runners against 0.05–1.5 ETH in
+  non-runners on most days.
+- **It reproduces out of time, across a regime change, and again within the regime.**
+- **It is the same variable §6I found** by splitting on returns rather than outcomes —
+  two independent methods, one answer.
+- **It is not yet a trade.** §6K.4 measured the realisable peak at ~82% of the mid-price
+  peak on n=41, and §6H.3 established the fall is a single transaction with no
+  intermediate price. **Whether an 8.2-minute peak can actually be exited is untested**,
+  and that — not the signal — is what 5D has to answer.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4G-1:**
