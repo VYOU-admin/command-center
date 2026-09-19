@@ -98,3 +98,64 @@ the 1016-launch creator-history table ends at block 66,439,983 and the holdout
 era begins at 66,530,927, so every holdout launch would read `prior=0`. Scoring
 it without a backfill would be a filter matching nothing. It is named here so
 that if it is ever tested, it is on record as having been specified first.
+
+---
+
+# P10-v2 — THE REFINEMENT, COMMITTED BEFORE FRESH DATA EXISTS
+
+Written 2026-09-19, after scoring P10-v1 out-of-time but **before collecting any
+launch after block 67,305,971**, which is where the entire existing sample ends.
+
+## What v1 showed, and why v2 differs
+
+P10-v1's ladder gained $+83.49 over flat on 260 out-of-time trades (permutation
+p = 0.0028, 9 of 10 folds positive). Decomposing that gain one lever at a time:
+
+```
+full ladder 5/10/15/20/25         $ +83.49
+ONLY top quintile up ($25)        $ +65.42
+ONLY bottom quintile down ($5)    $ -20.63     <- sizing the worst DOWN loses money
+```
+
+The relationship is not monotone. The bottom quintile's mean was +5.9%, better
+than q2 (-6.2%) and q3 (+2.0%). **The composite finds a good top. It does not
+find a bad bottom.** That is consistent with everything Part 9 established: the
+deep loser is not identifiable at entry. What is identifiable is a subset that
+is unusually clean — q5 had **0 deep losses in 39** against an 11.6% base rate
+(exact binomial p = 0.0082).
+
+## The v2 rule
+
+```
+SCORE   = - ( S_sell + S_size ) / 2                        unchanged from v1
+SIZES   quintile 1..4  ->  $15          (flat, unchanged)
+        quintile 5     ->  $25          (concentrate on the top only)
+```
+
+Quintile cutoffs are taken from the training window, never from the test rows.
+No other change. Every launch is still traded; nothing is filtered.
+
+## Predictions, written before the data exists
+
+- Out-of-fold Spearman(SCORE, return) on fresh launches: positive, **+0.10 to
+  +0.25**. Lower than 0.248 is expected and does not refute.
+- Top-quintile mean return exceeds the whole-sample mean.
+- Top-quintile deep-loss rate below the whole-sample rate, but **not zero** —
+  0 of 39 will not repeat, and a repeat would be evidence of a defect, not of
+  a stronger edge.
+- v2 dollar P&L exceeds flat on the fresh sample.
+
+## REFUTATION — any one kills it
+
+1. Spearman(SCORE, return) <= 0 on the fresh sample.
+2. v2 dollar P&L at or below flat on the fresh sample.
+3. Top-quintile mean return at or below the whole-sample mean.
+4. A permutation null on the fresh sample puts the observed delta inside its
+   own p90 band.
+
+## The test set
+
+Every gated launch with `init_block > 67,305,971` — strictly after the last
+launch in the existing 371. None of it has been looked at in any form. Roughly
+two days of chain history at the measured ~48 gated launches/day, so n ≈ 90-100
+with ~11 expected deep losers. Estimated cost ~41,000 CU ≈ $0.02.
