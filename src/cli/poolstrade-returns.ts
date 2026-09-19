@@ -73,8 +73,27 @@ const PER_GROUP = 260;
 
 /** $1, at the ETH/USD this chain's own market series measures (~$1,779). */
 const SIZE_WEI = 562_000_000_000_000n;
-/** MEASURED round-trip gas as a share of a $1 position. See 6C; scaled for size. */
-const GAS_PCT_AT_1USD = 0.193;
+/**
+ * ROUND-TRIP GAS AS A SHARE OF A $1 POSITION.
+ *
+ * **I FIRST WROTE 0.193 HERE AND THAT WAS WRONG BY A FACTOR OF 100.** §6C measured the
+ * ten-leg round trip at ~1.93% of a **$10** position, so the absolute cost is about
+ * **$0.193**. Gas does not scale with position size — it is a fixed number of wei — so
+ * at a $1 position the SAME absolute cost is **19.3% of the position**, not 0.193%. I
+ * divided where I should have multiplied.
+ *
+ * **THE CONSEQUENCE IS DECISION-RELEVANT AND NOT A ROUNDING NOTE: AT $1, GAS ALONE IS
+ * 19.3% AND NO STRATEGY ON THIS CHAIN CAN BE NET-POSITIVE AT THAT SIZE.** That does not
+ * invalidate the $1 test — §6B.1 states plainly that the $1 size is *instrumentation,
+ * not a profit attempt*, chosen so that being wrong costs nothing. It does mean the
+ * GROSS figures are the ones that say whether the strategy works, and the net-at-$1
+ * figures only confirm that the test itself will lose money, by design.
+ *
+ * Both are reported, and the gross/net gap is stated rather than folded away.
+ */
+const GAS_PCT_AT_1USD = 19.3;
+/** The same absolute gas against the $10 size §6C measured it at. */
+const GAS_PCT_AT_10USD = 1.93;
 
 interface Log { topics: string[]; data: string; blockNumber: string; transactionHash: string }
 
@@ -304,11 +323,18 @@ async function main(): Promise<void> {
         per_POOL_p25: pc(quant(rets, 0.25)),
         per_POOL_MEDIAN: pc(median(rets)),
         per_POOL_p75: pc(quant(rets, 0.75)),
-        per_POOL_median_NET: median(rets) === null ? 'n/a' : pc(median(rets)! - gas),
+        per_POOL_median_NET_at_1usd: median(rets) === null ? 'n/a' : pc(median(rets)! - gas),
+        per_POOL_median_NET_at_10usd: median(rets) === null ? 'n/a'
+          : pc(median(rets)! - GAS_PCT_AT_10USD / 100),
         per_TOKEN_p25: pc(quant(tokMeds, 0.25)),
         per_TOKEN_MEDIAN: pc(median(tokMeds)),
         per_TOKEN_p75: pc(quant(tokMeds, 0.75)),
-        per_TOKEN_median_NET: median(tokMeds) === null ? 'n/a' : pc(median(tokMeds)! - gas),
+        per_TOKEN_median_NET_at_1usd: median(tokMeds) === null ? 'n/a'
+          : pc(median(tokMeds)! - gas),
+        per_TOKEN_median_NET_at_10usd: median(tokMeds) === null ? 'n/a'
+          : pc(median(tokMeds)! - GAS_PCT_AT_10USD / 100),
+        GAS_NOTE: `gas is an ABSOLUTE ~$0.193 round trip, so it is ${GAS_PCT_AT_1USD}% `
+          + `of a $1 position and ${GAS_PCT_AT_10USD}% of a $10 one`,
         share_beating_gas: scored.length === 0 ? 'n/a'
           : pc(scored.filter((s) => s.ret > gas).length / scored.length),
         fee_tiers: Object.fromEntries([...g.reduce((m, r) =>
