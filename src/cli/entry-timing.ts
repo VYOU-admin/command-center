@@ -90,11 +90,26 @@ async function main(): Promise<void> {
      * That folds in block propagation, RPC latency and the poll interval, which is
      * exactly what the bot experiences. An estimate would fold in none of them.
      */
+    /*
+     * **THE FIRST VERSION OF THIS PROBE SAW ZERO EVENTS AND THAT WAS MY DEFECT, NOT A
+     * QUIET CHAIN.** 40 back-to-back polls span about four seconds; chain-wide
+     * `Initialize` arrives at roughly 10,600/day = 0.12/s, so the expected count was
+     * about 0.5. A filter matching nothing is a suspected defect, and the defect was
+     * the observation window, not the filter.
+     *
+     * It now polls for a duration sized from that measured rate: ~180 s should surface
+     * ~22 events. The sample size is reported so a thin one is visible rather than
+     * implied.
+     */
     const seen = new Set<string>();
     const lags: number[] = [];
-    const POLLS = 40;
+    const DETECT_SECONDS = Number(process.env['DETECT_SECONDS'] ?? '180');
+    const POLLS = 100_000;   /* bounded by the clock below, not by this */
+    const detectUntil = Date.now() + DETECT_SECONDS * 1000;
     let lastHead = Number(BigInt(String(await rpc.call('eth_blockNumber', []))));
-    for (let i = 0; i < POLLS; i += 1) {
+    let pollsDone = 0;
+    for (let i = 0; i < POLLS && Date.now() < detectUntil; i += 1) {
+      pollsDone = i + 1;
       const t0 = Date.now();
       const h = Number(BigInt(String(await rpc.call('eth_blockNumber', []))));
       const logs = (await rpc.call('eth_getLogs', [{
@@ -114,7 +129,8 @@ async function main(): Promise<void> {
       if (i === 0) log.info('detection probe: first poll round-trip', { rtt_ms: rtt });
     }
     log.info('4D-0.1  OUR REAL DETECTION LAG — MEASURED', {
-      polls: POLLS,
+      polled_for_seconds: DETECT_SECONDS,
+      polls: pollsDone,
       new_initializations_seen: lags.length,
       lag_blocks_min: lags.length === 0 ? 'NO LOGS SEEN' : Math.min(...lags),
       lag_blocks_median: median(lags),
