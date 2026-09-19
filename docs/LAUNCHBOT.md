@@ -6019,6 +6019,133 @@ than the p90 rises after five minutes — is the more likely outcome on this evi
 
 ---
 
+## 6H. 4D-2 AND 4D-3 — THERE IS NO STRATEGY HERE. THE ANSWER IS NO
+
+Twenty exit rules, walked over **200 canonical Pools.trade positions** entered at +1
+block, on the same pinned window as §6G. The path at each sample point is **our own
+simulated sell with a REACHABLE bound** — not the pool price, for the reason in 6H.1.
+The 0.50% round trip is inside every figure; gas is subtracted separately as the
+**absolute** $0.193 it is (§6E.2).
+
+### 6H.1 TWO METHOD DECISIONS THAT CHANGED THE ANSWER
+
+**The path is our proceeds, not the pool price.** For a Pools.trade pool `currency0` is
+native ETH and `currency1` the token, so v4's `price = token1/token0` is **tokens per
+ETH**, which moves *inversely* to a token position's value. §6F.4's price table is in
+that convention. A flat line is flat inverted, so §6F.4's conclusion survives — **but a
+TRIGGER does not.** Every take-profit built on that series would have fired on the wrong
+side. Simulating the sell costs five calls instead of one and removes the question.
+
+**MY FIRST GRID UNDER-TESTED THE STOPS, AND THE OUTPUT SAID SO.** `TP +50% SL -20%` and
+`TP +50% SL -30%` returned *identical* sums with a p25 of −82.4%. A −20% stop exiting at
+−82% has not been tested, it has been sampled too coarsely. The grid had a 150-second
+hole exactly where §6G shows the collapse. **Reporting that negative would have been
+reporting an artefact of my own sampling as a property of the market.** The grid was
+doubled in resolution from 20 s to 12 m and it moved real numbers — `TP +25%` went from
+a −1.9% median to **+25.9%**.
+
+### 6H.2 THE RESULT — ALL TWENTY RULES NEGATIVE
+
+| rule | p25 | median | p75 | p90 | mean | **SUM** | win% | SUM @$10 | SUM @$100 |
+|---|---|---|---|---|---|---|---|---|---|
+| **TP +200% cap 15m** | −82.5% | −58.6% | +68.1% | +203.3% | **−2.0%** | **−3.99** | 28% | −7.85 | **−4.38** |
+| TP +200% SL −30% | −82.4% | −48.9% | +54.2% | +203.2% | −3.2% | −6.49 | 27% | −10.35 | −6.88 |
+| TP +25% cap 15m | −60.9% | **+25.9%** | +35.2% | +44.7% | −4.3% | −8.66 | **55%** | −12.52 | −9.05 |
+| **BASELINE fixed 30 s** | −0.5% | +0.3% | +3.3% | +23.3% | −4.5% | −9.01 | 52% | −12.87 | −9.39 |
+| TRAIL 20% cap 5m | −80.0% | −8.8% | +32.3% | +111.7% | −6.1% | −12.12 | 42% | −15.98 | −12.50 |
+| TP +100% cap 15m | −82.5% | −49.0% | +102.4% | +123.2% | −7.2% | −14.44 | 31% | −18.30 | −14.83 |
+| TRAIL 30% cap 15m | −82.4% | −54.5% | −0.2% | +139.5% | −15.5% | −31.04 | 25% | −34.90 | −31.42 |
+| BASELINE fixed 15m | −82.5% | −60.9% | −4.1% | +157.1% | −13.4% | −26.80 | 23% | −30.66 | −27.19 |
+
+*(eight of twenty shown; all twenty are in the run output and all twenty are negative)*
+
+**PATH-DEPENDENT EXITS DO BEAT THE BEST FIXED HORIZON** — `TP +200%` at SUM −3.99
+against the 30-second baseline's −9.01 — **and not one of them reaches zero.**
+
+**THE STOPS DO NOT HELP AND SOMETIMES HURT.** `TP +50%` alone is −22.23; adding a −20%
+stop makes it **−25.40**. The stop exits positions that would have recovered, and it
+never catches the ones it was bought for. 6H.3 is why.
+
+### 6H.3 THE MECHANISM — THE LOSS IS NOT A PATH, IT IS AN EVENT
+
+**101 of 200 positions end below −70%. In 95 of those 101 the entire fall happens inside
+ONE sample interval.** [MEASURED] Six are gradual. The median final value of that group
+is **exactly −82.5%**, repeated across pools — the signature of one template, not of a
+market.
+
+**Decoded at block resolution on pool `0x03216ffe61e7…`, whose path reads
+`+40s = +2.3%`, `+60s = −82.0%`:**
+
+```
+blk +453   our position +2.3%
+blk +454   ONE TRANSACTION   ETH +3.5702 out   TOKEN -582,003,607 in
+           tx 0x4c26b5c48a41f8ba
+blk +455   our position -82.0%
+```
+
+**582,003,607 of 1,000,000,000 is 58.2% of the entire supply, sold in a single
+transaction — and 58.20% is EXACTLY the p75 creator share §6F.6 measured.** This is the
+creator selling the whole allocation they bought inside the creation transaction,
+roughly forty-five seconds after launch.
+
+**THAT IS WHY NO EXIT RULE CAN WORK.** The pool never prints a price between +2.3% and
+−82%. There is no −20% to stop out at, no −30%, no trailing level in between. Block 453
+is +2.3% and block 454 is −82%. **A perfect tick-by-tick bot with zero latency sees
+exactly the same two numbers we do.** Stop losses, trailing stops and take-profits are
+all instruments for trading a *path*; this is an *event*, and the only defence against
+an event is not being in the position when it happens.
+
+And §6F.3 already established the other half: **the creator's buy is inside the creation
+transaction, so we cannot be earlier than them, and §6F.4 measured no price move between
+their buy and their dump.** We are not early to a rally. **We are the exit liquidity.**
+
+### 6H.4 4D-3 — THE HONEST ANSWER
+
+**Is there ANY entry/exit pair whose net expectancy over the sample is positive?**
+
+**No.** Thirty fixed cells in §6G and twenty trigger rules here — **fifty rules, all
+negative, on 200 positions.** The best of all fifty is `TP +200% cap 15m` at **−2.0% per
+trade before gas**, −4.38 summed over 200 trades even at a $100 position size.
+
+**There is no strategy here, and I am not going to reach for a filter to rescue it.**
+
+**WHAT WOULD REFUTE THIS.** A rule whose SUM over these same 200 stored paths is
+positive after the 0.50% round trip and gas. The paths are in `bot_exit_path` and any
+new rule can be evaluated against them **for free** — no RPC, no new spend. That is the
+cheapest possible refutation and it is available to anyone who wants to try one.
+
+**ONE PRE-REGISTERED HYPOTHESIS REMAINS UNTESTED, AND IT IS NOT A RESCUE.** §6F.6 flagged
+the creator's supply share as bimodal — p25 2.52%, p75 58.20% — *before* any of this was
+measured, and 6H.3 shows the dump size matching that p75 exactly. Splitting the
+population on it is a legitimate next measurement rather than a fishing expedition.
+**But it is not an argument that a strategy exists**, for two reasons that should be
+stated plainly: it would at best identify a subset to avoid, leaving a smaller
+population whose own expectancy is unmeasured; and the half with small creator shares
+still has to clear a 0.50% fee and gas on a median that has never, across four passes
+and every population measured, come out above the fee.
+
+### 6H.5 4D-4 — SIZE, AND OUR OWN IMPACT
+
+**Size does not rescue it.** Gas is absolute: $0.193 a round trip, so 19.3% of a $1
+position, 1.93% at $10, 0.193% at $100. The best rule's SUM goes −7.85 at $10 to −4.38
+at $100 — **better, and still negative.** A rule losing 2.0% per trade before costs
+loses at every size. **$100 is also the whole wallet, which last read $7.71.**
+
+**OUR OWN IMPACT, BOUNDED AS §6A.4 REQUIRES.** Every sell here is simulated into a pool
+that does not contain our own buy. Against the 3.57 ETH of depth decoded in 6H.3:
+
+- at **$1** our buy is 0.000562 ETH = **0.016% of pool depth** — immaterial, and the
+  figures above stand as measured;
+- at **$10**, 0.16%;
+- at **$100**, 0.0562 ETH = **1.6%** of depth, which is material and would make the
+  $100 column **optimistic** — the one column where the number looks least bad.
+
+**Impact is worst at the earliest entry, which is exactly where §6F.5 showed the p75 is
+best.** That does not change the verdict, because the verdict is negative at every size
+and would only become more so.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4C:**
