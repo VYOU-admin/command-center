@@ -6354,6 +6354,121 @@ five buckets since the step are what exist.
 
 ---
 
+## 6K. 5A — THE RUNNERS EXIST, AND THERE ARE ~179 A DAY
+
+**Every exit rule this project has tested is discarded for this pass.** 5A labels the
+OUTCOME only: from a +15 s entry, what did the token's own pool do over the next fifteen
+minutes? No rule of ours is involved.
+
+**Window PINNED `60,480,000..66,528,000` — seven full days spanning the §6J regime
+change. n = 1,016 labelled launches.**
+
+### 6K.1 THE METHOD, AND ITS DIRECTION IS VALIDATED RATHER THAN REASONED
+
+The v4 `Swap` event carries **`sqrtPriceX96` as its third data word**, so one sparse
+`eth_getLogs` per pool yields the whole mid-price path for **60 CU** — against ~75 sell
+simulations at ~1,950 CU. **Thirty-two times cheaper**, and it is the token's own path
+as the brief specified. Total spend: **66,360 CU ≈ $0.03.**
+
+`currency0` is native ETH here, so v4's `price = token1/token0` is **tokens per ETH** and
+moves *inversely* to a position's value — the inversion §6H.1 records. **That was not
+trusted.** Every pool that also has a stored sell-proceeds path was cross-checked:
+
+```
+pools with both    41
+agree              39        95.1%   CONFIRMED
+```
+
+### 6K.2 THE RESULT
+
+Peak multiple over 15 minutes, from a +15 s entry: [MEASURED, n=1,016]
+
+```
+p50  +23.5%     p75  +125.3%     p90  +315.3%     p99  +1,381.6%     max  +19,417%
+```
+
+| tier | count | rate | **INFERRED per day** |
+|---|---|---|---|
+| **peak ≥ +50%** | 428 of 1,016 | **42.1%** | **~179** |
+| peak ≥ +100% | 304 | 29.9% | ~127 |
+| peak ≥ +200% | 168 | 16.5% | ~70 |
+
+*Per-day counts are 424 canonical launches/day (§6J, a full enumeration) × the SAMPLED
+runner rate — INFERRED, not a census.*
+
+**The operator set the kill line at ~5 runners a day. It is 179 at the +50% tier and 70
+at +200%. This is not supply-constrained by two orders of magnitude.**
+
+### 6K.3 THE FINDING THAT EXPLAINS EVERY PRIOR FAILURE: TIME-TO-PEAK
+
+**Time to peak, on the ≥+50% runners:** [MEASURED]
+
+```
+p25  246 s        median  490 s (8.2 min)        p75  768 s        p90  893 s
+```
+
+**The peak lands at a median of eight minutes, and every fixed exit this project has
+tested sat on the wrong side of it.** §6G's grid held at 15 s, 30 s, 90 s — all *before*
+the run — then jumped to 15 m, 30 m and beyond, *after* the collapse §6H.3 decoded. The
+one cell nearest the peak, 5 m, is the only one whose p90 looked interesting (+85.5%).
+
+**So "no strategy" in §6H was a true statement about the rules tested and a false
+impression about the market.** The runs were there the whole time; the clock was never
+pointed at them.
+
+### 6K.4 THE CAVEAT THAT MATTERS, AND IT IS SMALLER THAN EXPECTED
+
+**A mid-price peak is not a realisable return**, and §6A.3 is the record of confusing
+those. Measured directly on the 41 pools that have both:
+
+| | p25 | median | p75 | p90 |
+|---|---|---|---|---|
+| MID-PRICE peak | 0.0% | +41.6% | +140.2% | +318.1% |
+| **REALISABLE peak** | 0.0% | **+32.7%** | **+110.4%** | **+217.9%** |
+
+**The realisable gain retains a median 82% of the mid-price gain**, and the runner count
+barely moves: **19 of 41 by mid-price, 17 of 41 by realisable.** [MEASURED, n=41]
+
+So the labelling is a sound proxy — **but n=41 is thin, the p25 is 0.0% on both, and
+every figure in 6K.2 should be read as roughly a fifth optimistic.** 5D must price a
+real sell; nothing here is a return we could have banked.
+
+### 6K.5 ONE THING THE PER-DAY TABLE SHOWS THAT §6J DID NOT
+
+| bucket | n | median swaps in 15 min | ≥+50% |
+|---|---|---|---|
+| 70 | 150 | 12 | 27% |
+| 71 | 144 | 25 | 40% |
+| 72 | 150 | 9 | 31% |
+| 73 | 147 | 49 | 42% |
+| **74** | 143 | **464** | **65%** |
+| **75** | 145 | **502** | 50% |
+| 76 | 137 | 182 | 41% |
+
+**The runner RATE is broadly stable at 27–65% across the regime change** — runners are
+not a new phenomenon and did not arrive with it. **Trading ACTIVITY is not stable at
+all**: median swaps per launch in the first fifteen minutes went from 9–49 to 182–502.
+Whatever changed at bucket 73–74 changed how much gets traded, not how often something
+runs.
+
+### 6K.6 What 5A does and does not establish
+
+- **ESTABLISHED:** runners are numerous — ~179/day at +50%, ~70/day at +200%. Supply is
+  not the constraint.
+- **ESTABLISHED:** the peak lands at a median of 8.2 minutes, which is why every fixed
+  clock tested so far missed it.
+- **NOT ESTABLISHED, AND IT IS THE WHOLE REMAINING QUESTION:** whether a runner is
+  identifiable *before or at* our entry. 5A is an after-the-fact label and nothing more.
+- **NOT ESTABLISHED:** that the peak is capturable. §6H.3 showed the fall is a single
+  transaction, and a trailing stop on real proceeds lost badly in §6I.1. Exiting near an
+  8-minute peak is a different problem from the ones already tested, and it is untested.
+
+**WHAT WOULD REFUTE 6K.2:** a realisable-sell re-measurement on a larger sample showing
+the ≥+50% rate far below 42%. The 41-pool cross-check puts it at 17/41 = 41.5%, which is
+consistent — but that is 41 pools, not 1,016.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4G-1:**
