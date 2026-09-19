@@ -6878,6 +6878,132 @@ and resold, not a decoding error)*
 
 ---
 
+## 6P. PART 7 — LATE ENTRY, SHORT HOLD. THE FIRST RULE TO SURVIVE AN OUT-OF-SAMPLE TEST
+
+Open mandate. Total spend **~$0.02.**
+
+### 6P.1 THE TWO DEEP-LOSS FIGURES RECONCILED — THEY ARE ONE NUMBER AT TWO HORIZONS
+
+Both were quoted and both were right. The deep-loss rate is a **monotonic function of
+how long you hold**: [MEASURED, n=379 at every point]
+
+```
+ 15 s   0.0%      115 s  16.4%      215 s  25.9%   <- §6N's "~25%"
+365 s  40.9%      505 s  53.6%      783 s  68.3%
+908 s  73.6%     1215 s  80.5%                     <- §6O's "80.5%"
+```
+
+**Holding longer is strictly worse on this population, at every step.** Nobody should
+carry two numbers for this again.
+
+### 6P.2 THE DUMP HAPPENS ONCE
+
+[MEASURED, n=379] Large sells (≥20% of supply) per launch: **median 1, maximum 2, and
+158 of 379 have none at all.** **A second large sell after the biggest one occurs in 1
+of 379 launches — 0.3%.**
+
+**Once the dump is done it does not repeat.** That is the structural fact the lead
+rested on, and it holds.
+
+### 6P.3 BUT THE LEAD AS STATED IS BACKWARDS
+
+"Buy after the dump" predicts that launches where selling has already happened should do
+better. **They do worse.** [MEASURED]
+
+| split at | already sold ≥25% | already sold <25% |
+|---|---|---|
+| +90 s | deep 82.3%, median peak **+6.5%** | deep 80.1%, median peak **+96.2%** |
+| +180 s | deep 87.9%, peak +16.9% | deep 77.6%, peak +111.8% |
+| +300 s | deep **91.5%**, peak +26.7% | deep **72.1%**, peak **+128.9%** |
+
+**A dump that has already landed does not clear the way — it marks a token that is
+already dead.** The correct reading of the same data is the opposite of the lead:
+**buy what has NOT sold yet, and hold briefly.**
+
+### 6P.4 THE LEVER IS THE HOLD, NOT THE ENTRY
+
+Re-basing the stored paths to a later entry — free, no new RPC — showed the actual
+structure. From a +115 s entry:
+
+```
+exit  215 s   median  +8.3%   mean +2.4%   SUM  +7.46   win 69%
+exit  365 s   median +18.4%   mean +1.5%   SUM  +4.82   win 61%
+exit  505 s   median  -6.0%   mean -4.9%   SUM -15.64   win 45%
+exit 1215 s   median -83.5%   mean -46.6%  SUM -147.81  win 15%
+```
+
+**Short holds from a late entry are positive; long holds are catastrophic.** Every prior
+pass tested a late exit or an early entry, never a late entry with a short exit.
+
+### 6P.5 THE NAMED RULE, AND ITS OUT-OF-SAMPLE RESULT
+
+**That table was computed over the whole stored sample, so the stored sample could no
+longer serve as its holdout.** The rule was written into `docs/NAMED-RULE-P7.md` and
+**committed to git before a single fresh block was measured** (commit `dd30787`):
+
+```
+GATE 1   creator_share >= 40%                   (pre-registered §6I)
+GATE 2   cumulative supply sold by +90 s < 25%  (knowable live at +90 s)
+ENTRY    +115 s        EXIT  +215 s  (100-second hold, unconditional)
+```
+
+**Scored on blocks 66,528,000–67,332,287 — 0.93 days that did not exist when the rule
+was written:**
+
+| | |
+|---|---|
+| canonical launches | 190 |
+| **rule fired on** | **54 (28.4%)** |
+| entry could not execute | **0** |
+| **unsellable at exit** | **0** |
+| p10 / p25 | **−20.60%** / −1.81% |
+| median | **+6.20%** |
+| p75 / p90 | +23.90% / +37.02% |
+| **mean** | **+5.48%** |
+| **SUM** | **+2.96** |
+| win rate | **66.67%** |
+| max drawdown | 1.32 stake units |
+| net mean @$10 / @$100 | **+3.55%** / **+5.29%** |
+
+**THE −82% TAIL IS GONE.** p10 is −20.6%. In seven passes, every population measured has
+had a bottom decile at −82% to −84%; this one does not, and **0 of 54 were unsellable at
+the exit.** That is a structural change, and it is consistent with 6P.1 — a 100-second
+hold sits where the deep-loss rate is 25.9%, not 80.5%.
+
+### 6P.6 AND IT IS NOT ESTABLISHED. THREE REASONS, ALL MEASURED
+
+1. **t = 1.187.** The 95% interval runs about −3.6% to +14.5% and **includes zero.**
+2. **Three trades of 54 carry 79% of the sum.** SUM 2.96 → **0.62** with the best three
+   removed. Still positive, but thin.
+3. **It is not stable inside its own window.** Splitting the 0.93 days in half:
+   **first half mean +10.26% (SUM 2.77, win 78%), second half mean +0.71% (SUM 0.19,
+   win 56%).** Nine of fifteen hour-buckets are positive, and the first two carry 2.87
+   of the 2.96.
+
+**154 trades are needed for t = 2.** At 54 per 0.93 days that is **about 2.6 more days
+of accumulation**, and it costs almost nothing — the machinery is written, pinned and
+idempotent. **That is the cheapest decisive test this project has ever had in front of
+it**, against §6N's 168,395 trades.
+
+### 6P.7 WHAT I DID NOT TEST
+
+- **Any joint optimisation of entry × exit × filter.** The rule is three numbers chosen
+  from measured quantiles, not a search. A search would need its own holdout.
+- **Structural partitions other than the two gates** — fee tier (constant at 2500 on
+  this population), Instant vs Crowd, supply-distribution shape, token-contract
+  properties. §6L found no metadata feature separating runners, but that was for
+  *runners*, not for *this rule's losers*.
+- **Repeat creators as a cohort.** §6L's within-sample proxy was a lower bound and sat
+  exactly at the bar; it was never tested properly with full creator history.
+- **Whether the edge lives in one activity regime.** §6K.5 measured swaps per launch
+  moving 9 → 502; that was never crossed with this rule.
+- **Anything other than buy-then-sell on a new launch** — graduations, survivors,
+  arbitrage between the canonical pool and the secondary pools §6D.5 found.
+- **The mempool.** 6C of the previous brief was never reached: whether this chain
+  exposes pending transactions, and whether a sell is visible before inclusion.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4G-1:**
