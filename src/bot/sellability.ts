@@ -159,30 +159,48 @@ export async function simulateSellAt(
 
   /* Slot discovery AT THAT BLOCK, verified by reading the contract's own view back. */
   const balData = `0x70a08231${owner.slice(2).padStart(64, '0')}`;
-  let balSlot: number | null = null;
-  for (let i = 0; i < MAX_SLOT; i += 1) {
-    try {
-      const r = await call([{ to: token, data: balData }, args.block,
-        { [token]: { stateDiff: { [mapSlot(owner, i)]: h32(MAGIC) } } }]);
-      if (BigInt(r) === MAGIC) { balSlot = i; break; }
-    } catch { /* falls through to UNKNOWN */ }
-  }
   const alData = `0xdd62ed3e${owner.slice(2).padStart(64, '0')}`
     + PERMIT2.slice(2).padStart(64, '0');
+
+  /* THE NODE IS ASKED FIRST; the integer scan is the fallback. See slotByAccessList. */
+  const verifyBal = async (slot: string): Promise<boolean> => {
+    const r = await call([{ to: token, data: balData }, args.block,
+      { [token]: { stateDiff: { [slot]: h32(MAGIC) } } }]);
+    return BigInt(r) === MAGIC;
+  };
+  const verifyAllow = async (slot: string): Promise<boolean> => {
+    const r = await call([{ to: token, data: alData }, args.block,
+      { [token]: { stateDiff: { [slot]: h32(MAGIC) } } }]);
+    return BigInt(r) === MAGIC;
+  };
+
+  let balKey = await slotByAccessList(rpc, token, balData, args.block, verifyBal);
+  let allowKey = await slotByAccessList(rpc, token, alData, args.block, verifyAllow);
+
+  /* The integer scan still runs where the access list gave nothing, so an ordinary
+   * mapping is found exactly as before and nothing regresses. */
+  let balSlot: number | null = null;
+  if (balKey === null) {
+    for (let i = 0; i < MAX_SLOT; i += 1) {
+      try {
+        if (await verifyBal(mapSlot(owner, i))) {
+          balSlot = i; balKey = mapSlot(owner, i); break;
+        }
+      } catch { /* falls through to UNKNOWN */ }
+    }
+  }
   let allowSlot: number | null = null;
-  if (balSlot !== null) {
+  if (allowKey === null && balKey !== null) {
     for (let i = 0; i < MAX_SLOT; i += 1) {
       const slot = keccak256(concat([h32(PERMIT2), mapSlot(owner, i)]));
       try {
-        const r = await call([{ to: token, data: alData }, args.block,
-          { [token]: { stateDiff: { [slot]: h32(MAGIC) } } }]);
-        if (BigInt(r) === MAGIC) { allowSlot = i; break; }
+        if (await verifyAllow(slot)) { allowSlot = i; allowKey = slot; break; }
       } catch { /* same */ }
     }
   }
-  if (balSlot === null || allowSlot === null) {
+  if (balKey === null || allowKey === null) {
     return { ethOut: null, reason: 'slots_not_found',
-      detail: `bal=${String(balSlot)} allow=${String(allowSlot)}`,
+      detail: `bal=${balKey ?? 'none'} allow=${allowKey ?? 'none'}`,
       executes: null, executeReason: 'not_attempted',
       balSlot, allowSlot, calls };
   }
@@ -192,8 +210,11 @@ export async function simulateSellAt(
   const overrides = {
     ...ethBal,
     [token]: { stateDiff: {
-      [mapSlot(owner, balSlot)]: h32(args.amount),
-      [keccak256(concat([h32(PERMIT2), mapSlot(owner, allowSlot)]))]: h32((1n << 256n) - 1n),
+      /* THE VERIFIED KEYS, not a re-derivation from an integer. A namespaced layout
+       * has no integer slot to re-derive from, and re-deriving is the two-
+       * implementations-of-one-rule trap this project has recorded six times. */
+      [balKey]: h32(args.amount),
+      [allowKey]: h32((1n << 256n) - 1n),
     } },
     [PERMIT2]: { stateDiff: { [p2slot]: h32((PERMIT2_EXPIRY << 160n) | MAXU160) } },
   };
@@ -244,6 +265,55 @@ export async function simulateSellAt(
  *
  * The ONE implementation of the calldata is `buildSwap`; nothing here re-encodes a swap.
  */
+
+/**
+ * THE STORAGE SLOT, ASKED OF THE NODE RATHER THAN GUESSED.
+ * =======================================================================
+ *
+ * `MAX_SLOT` scans `keccak256(owner ‖ i)` for small integers `i`. That finds an
+ * ordinary Solidity mapping and **finds nothing at all on a contract using a
+ * namespaced layout** — ERC-7201 and friends derive their base slot from a hash, which
+ * no small-integer scan can reach.
+ *
+ * **MEASURED, and it is why this exists: all 250 Pools.trade tokens in the 4C sample
+ * returned `slots_not_found`, so every one scored `executes = null` and the group came
+ * back with ZERO scored rows.** A filter matching nothing is a suspected defect, and
+ * this was the defect.
+ *
+ * `eth_createAccessList` reports exactly which slots a call touches, whatever the
+ * layout. Two constraints, both handled:
+ *
+ * 1. **It is NOT archival on this endpoint** — a historical block returns
+ *    `metadata is not found`. So the slot is discovered at `latest`. That is sound
+ *    because a contract's storage LAYOUT is a property of its code, not of a block.
+ * 2. **It can return several slots**, and only one is the balance. So every candidate
+ *    is verified by overriding it and reading the contract's own view back
+ *    **AT THE TARGET BLOCK** — the same read-back the integer scan already used. A
+ *    wrong slot cannot survive that, which is what makes discovering at one block and
+ *    using it at another safe.
+ *
+ * Returns `null` when the method is unavailable or nothing verifies, and the caller
+ * falls back to the integer scan.
+ */
+async function slotByAccessList(
+  rpc: SellabilityRpc, token: string, calldata: string, block: string,
+  verify: (slot: string) => Promise<boolean>,
+): Promise<string | null> {
+  let keys: string[] = [];
+  try {
+    const r = (await rpc.call('eth_createAccessList', [
+      { to: token, data: calldata }, 'latest',
+    ])) as { accessList?: Array<{ address: string; storageKeys: string[] }> };
+    for (const e of r.accessList ?? []) {
+      if (e.address.toLowerCase() === token.toLowerCase()) keys = e.storageKeys;
+    }
+  } catch { return null; }
+  for (const k of keys) {
+    try { if (await verify(k)) return k; } catch { /* try the next candidate */ }
+  }
+  return null;
+}
+
 export async function checkSellable(
   rpc: SellabilityRpc,
   args: {
