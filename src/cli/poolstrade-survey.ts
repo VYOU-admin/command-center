@@ -242,24 +242,55 @@ async function main(): Promise<void> {
     const wTo = head - BLOCKS_PER_DAY;
     const wInits = await sweep(rpc, { address: POOL_MANAGER, topics: [TOPICS.initializeV4] },
       wFrom, wTo, 40_000);
-    const wPt = wInits.filter((l) =>
+    /*
+     * ===================================================================
+     * THE CANONICAL POOL, AND THE LOOSE MATCH WAS WRONG
+     * ===================================================================
+     *
+     * The first version of this matched "any pool whose token the Pools.trade factory
+     * created". That is too loose, and the fee tiers gave it away: of 601 such pools in
+     * one day only **300 carried fee 2500**, the rest sitting at 100, 800000, 808670
+     * and 991200. **Those are pools OTHER PEOPLE opened for a Pools.trade token**, and
+     * nothing about Pools.trade's lock applies to them.
+     *
+     * The canonical pool is the one created **in the same transaction as the
+     * `TokenCreated` event** — that is what "the launchpad mints the supply into a
+     * locked position" means, and it is exact rather than inferred from a fee tier.
+     *
+     * **BOTH POPULATIONS ARE REPORTED**, because they answer different questions: the
+     * canonical set is whether the lock works, and the loose set is what a bot filtering
+     * only on "this token came from Pools.trade" would actually buy. A bot using the
+     * loose rule gets the unlocked copies too.
+     */
+    const ptTxs = new Set(created.map((l) => l.transactionHash.toLowerCase()));
+    const wPtCanon = wInits.filter((l) => ptTxs.has(l.transactionHash.toLowerCase()));
+    const wPtLoose = wInits.filter((l) =>
       ptTokens.has(addrTopic(l.topics[2] ?? '')) || ptTokens.has(addrTopic(l.topics[3] ?? '')));
-    const wOther = wInits.filter((l) => !wPt.includes(l));
+    const canonSet = new Set(wPtCanon.map((l) => l.topics[1]));
+    const wPtSecondary = wPtLoose.filter((l) => !canonSet.has(l.topics[1]));
+    const looseSet = new Set(wPtLoose.map((l) => l.topics[1]));
+    const wOther = wInits.filter((l) => !looseSet.has(l.topics[1]));
+    const wPt = wPtCanon;
 
     const sampleOf = <T>(xs: T[], n: number): T[] => {
       const step = Math.max(1, Math.floor(xs.length / n));
       return xs.filter((_, i) => i % step === 0).slice(0, n);
     };
     const SAMPLE = 150;
-    const ptS = sampleOf(wPt, SAMPLE);
+    const ptS = sampleOf(wPtCanon, SAMPLE);
+    const secS = sampleOf(wPtSecondary, SAMPLE);
     const otS = sampleOf(wOther, SAMPLE);
 
     log.info('4B  BEFORE THE FIRST PAID CALL', {
       window: `${wFrom}..${wTo} (created 24-48 h ago)`,
-      pools_trade_in_window: wPt.length,
-      other_in_window: wOther.length,
-      sampled_each: `${ptS.length} / ${otS.length}`,
-      estimate_cu: (ptS.length + otS.length) * 26,
+      pools_trade_CANONICAL_same_tx_as_TokenCreated: wPtCanon.length,
+      pools_trade_token_but_SOMEONE_ELSES_POOL: wPtSecondary.length,
+      everything_else: wOther.length,
+      canonical_fee_tiers: Object.fromEntries(
+        [...wPtCanon.reduce((m, l) => m.set(feeOf(l), (m.get(feeOf(l)) ?? 0) + 1),
+          new Map<number, number>()).entries()].sort((a4, b4) => b4[1] - a4[1])),
+      sampled: `${ptS.length} canonical / ${secS.length} secondary / ${otS.length} other`,
+      estimate_cu: (ptS.length + secS.length + otS.length) * 26,
       ceiling_cu: CU_CEILING,
       REFUTATION_STATED_FIRST: 'any material share of Pools.trade pools reading '
         + 'liquidity = 0 now would disprove the lock. A locked position cannot go to zero.',
@@ -276,6 +307,7 @@ async function main(): Promise<void> {
       return { n: ls.length, zero, unread };
     };
     const ptR = await liqZero(ptS);
+    const secR = await liqZero(secS);
     const otR = await liqZero(otS);
     const share = (r: { n: number; zero: number; unread: number }): string => {
       const d = r.n - r.unread;
@@ -283,10 +315,15 @@ async function main(): Promise<void> {
     };
 
     log.info('*** 4B  THE HEADLINE — LIQUIDITY AT ZERO, 24-48 H AFTER CREATION ***', {
-      POOLS_TRADE: `${ptR.zero} of ${ptR.n - ptR.unread} readable at ZERO = ${share(ptR)}`
-        + ` (unreadable ${ptR.unread}, reported not dropped)`,
-      EVERYTHING_ELSE: `${otR.zero} of ${otR.n - otR.unread} readable at ZERO = ${share(otR)}`
-        + ` (unreadable ${otR.unread}, reported not dropped)`,
+      POOLS_TRADE_CANONICAL: `${ptR.zero} of ${ptR.n - ptR.unread} at ZERO = ${share(ptR)}`
+        + ` (unreadable ${ptR.unread})`,
+      POOLS_TRADE_TOKEN_SOMEONE_ELSES_POOL:
+        `${secR.zero} of ${secR.n - secR.unread} at ZERO = ${share(secR)}`
+        + ` (unreadable ${secR.unread})`,
+      EVERYTHING_ELSE: `${otR.zero} of ${otR.n - otR.unread} at ZERO = ${share(otR)}`
+        + ` (unreadable ${otR.unread})`,
+      why_three_groups: 'the middle group is the trap: a bot filtering on "this token '
+        + 'came from Pools.trade" buys unlocked copies of locked tokens',
       same_window_both: `${wFrom}..${wTo}`,
       verdict: ptR.n - ptR.unread === 0 ? 'NO POOLS.TRADE POOLS READABLE — proves nothing'
         : ptR.zero === 0 ? 'LOCK HOLDS on this sample: not one pool went to zero'
