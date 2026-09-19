@@ -5139,7 +5139,325 @@ not in a summary that reads as done.
 
 ---
 
+## 6C. EXTERNAL CLAIMS, CHECKED AGAINST THE CHAIN — 2026-09-18
+
+Part 3 of the post-mortem brief. Every claim below arrived as an **unverified
+third-party assertion** and is reported as HELD, FAILED, or UNTESTABLE against what the
+chain says. **No live trading happened; the chain-wide halt stayed set throughout.**
+
+The claims trace to a public project, `nirholas/hood-oracle`, plus NOXA's own
+documentation and `nirholas/robinhood-chain-alerts`. Sources are named in 6C.9.
+
+### 6C.1 The scoreboard
+
+| # | claim | verdict |
+|---|---|---|
+| 3A.i | bots watch a launchpad factory, not raw pool creation | **PARTLY HELD** — but the named factory is dead and we already watch the live one |
+| 3A.ii | NOXA locks the LP permanently | **HELD** — 40 of 40 sampled pools untouched |
+| 3A.ii | NOXA tokens deploy to vanity addresses ending 4663 | **FAILED** — 3 of 60,142 |
+| 3A.iii | SwapRouter02 / QuoterV2 / WETH addresses | **HELD** — all three confirmed, internally consistent |
+| 3A.iv | "a few dozen a week" | **FAILED** — ~10,600 v4 pool initializations a *day* |
+| 3A.v | bundlers buy across many wallets in the launch block | **FAILED as the typical case** — median 1 sender |
+| 3A.vi | a real buy-then-sell round trip before the buy | **HELD, and we lacked it** — built in Part 2 |
+| 3A.vi | refuse a quote with no price-impact figure | **HELD, and WE STILL VIOLATE IT** — see 6C.7 |
+| 3A.vii | wait up to 90 seconds observing | **FAILED** — 17.3% of launches die inside that window |
+| 3A.viii | price-independent outcome labels at 24 h | **HELD as sounder than ours was** |
+| 3A.ix | `maxCreatorLaunches` | **UNTESTABLE — and that is the finding** |
+| 3A.ix | sequencer feed gives 100–300 ms lead | **UNTESTED BY US** — documented, not verified |
+
+### 6C.2 3A.iv — the launch rate, and it had to be resolved first
+
+**The NOXA Launch Factory at `0xD9eC2db5f3D1b236843925949fe5bd8a3836FCcB` is real and
+it is dead.** [MEASURED]
+
+```
+factory code size                        22,811 bytes — it exists
+launch events, whole chain                   60,142
+first launch                          block  61,869
+LAST LAUNCH                           block 6,880,646  =  2026-07-11T10:44:33Z
+blocks since                             59,709,965    =  SIXTY-NINE DAYS
+active days                                      26    median 71 launches/day
+peak day                                     18,653    2026-07-10
+```
+
+**The first window I swept returned zero logs and that was not the answer.** 300,000
+blocks back from head found nothing; reading that as "a quiet launchpad" would have been
+the filter-matched-nothing failure this project keeps hitting. Widening to the whole
+chain hit the *response-size cap* instead — which proves the opposite, that the logs are
+numerous and old.
+
+**The live population, measured two ways because the first was coverage-limited:**
+
+```
+from v4_pool_init x block_times   median   987 pools/day   <- only 15.6% of rows are dated
+from v4_pool_init by BLOCK NUMBER median 10,600 pools/day  <- all 678,441 rows
+                                  median  9,522/day against a pricing asset
+```
+
+The second is the honest figure; the first is a floor produced by incomplete
+`block_times` coverage, and **reporting it alone would have understated the rate
+tenfold.**
+
+And the launchpad our own trades came from, `0x58daec3116aae6d93017baaea7749052e8a04fa7`,
+is **very much alive**: 90,106 logs in 25 hours, its most recent **7 blocks before the
+measurement**.
+
+**So "a few dozen a week" is wrong by roughly four orders of magnitude, and our own
+"200–480 qualifying a day" was conservative.** Fresh measurement over 22.2 hours: 9,615
+`Initialize` events, 7,749 with exactly one pricing side.
+
+### 6C.3 3A.i — we were already watching the right launchpad
+
+The brief's framing is that working bots watch a factory while we watch raw
+`Initialize`. The chain says something more specific:
+
+```
+our 130 bot_trades rows, by Initialize target
+  0x8366a39cc670…  69   the PoolManager itself — created directly, no launchpad
+  0x58daec3116aa…  61   THE LIVE LAUNCHPAD
+our rows whose token NOXA launched                    0 of 130   (0.00%)
+```
+
+**Zero.** Not because we were looking in the wrong place but because NOXA stopped
+launching two months before the bot ran. `ROBINHOOD.md` section 8 had already identified
+`0x58daec…` as this chain's dominant launchpad, and the vanity-4663 token `TWOCANDLES`
+traces back through exactly that address — so `0x58daec…` is where the current
+NOXA-style launches come from, and **the brief's address is a stale one.**
+
+The claim is still directionally right in one respect: we treat a launchpad launch and
+an arbitrary pool creation identically, and 6C.6 shows they perform very differently.
+
+### 6C.4 3A.ii — the LP lock HOLDS, the vanity claim FAILS
+
+**Locked: HELD.** [MEASURED] 40 NOXA pools sampled deterministically, `liquidity()` read
+now: **40 of 40 non-zero, and every one carries the identical value
+`36819258015569838458222`.** Identical liquidity across forty pools means **not one has
+been added to or withdrawn from** — which is what a locked, template-minted,
+single-sided position looks like. *Precisely stated: this proves no LP has been pulled,
+not that pulling is impossible.*
+
+**Vanity 4663: FAILED.** [MEASURED] 3 of 60,142 distinct NOXA tokens end `4663` —
+**0.005%**, against 0.92 expected by chance alone. NOXA's own documentation says *"every
+token deploys to a vanity address ending in 4663"*, and **the chain contradicts its
+publisher.** Confirmed on individual records, not just the aggregate: the last five NOXA
+launches are `cashcoin`, `HOODMAXXING`, `TURWIMA`, `DEBTCAT`, `doginhood` — `symbol()`
+resolved on every one, and not one address ends `4663`.
+
+Nor is it a live pattern elsewhere: **0 of 836 token sides** in 418 V3 pools created over
+25 hours end `4663`.
+
+### 6C.5 3A.iii — the V3 addresses hold, and V3 is the *safer* venue
+
+All three confirmed and mutually consistent: [MEASURED]
+
+```
+SwapRouter02  0xCaf681a6…5cb2   factory()=0x1f7d7550…2efa   WETH9()=0x0Bd7D308…AD73
+QuoterV2      0x33e885ed…a9e7   factory()=0x1f7d7550…2efa   WETH9()=0x0Bd7D308…AD73
+WETH          0x0Bd7D308…AD73   symbol()="WETH"
+```
+
+**And the honest cost answer is the opposite of what "a second execution path" suggests:
+the defects that cost $120 are largely V4-SPECIFIC.**
+
+| what hurt us on v4 | on v3 |
+|---|---|
+| no quoter — we used a revert payload as a price oracle, and §6A.3 is the result | **`QuoterV2` works.** MEASURED: `quoteExactInputSingle` returned `amountOut` 4.84e22 and `gasEstimate` 94,173 on a live pool, no revert |
+| `liquidity` needed `extsload` and an inferred storage layout | `liquidity()` is a public view on the pool contract |
+| Permit2's two-step approval, which deadlocked | a plain ERC-20 `approve` to the router |
+| the pool has no contract; the key must be reconstructed and verified | the pool **is** a contract |
+
+We already have V3 *decoding* from CHUMP and CASHCAT. What is missing is the calldata
+builder and the approval path — **and both are simpler than their v4 equivalents.**
+
+**One thing is NOT established and must not be assumed: whether `QuoterV2` detects a
+transfer-refusing token.** That needs the same paired single-variable test §6A.3 used,
+and we have no V3 honeypot to run it against. Until then, a V3 path gets the same
+reachable-bound round trip, not a quoter reading.
+
+### 6C.6 3C — every filter measured on our own data
+
+**The corpus's sell leg had to be re-measured before any of this meant anything.**
+`bot_exit_sim` priced its sells with the unreachable bound, so `sell_status='ok'` there
+means *the pool would have quoted a price*, not *we could have sold*. Re-simulated with
+a **reachable** bound at both ends, no-exit scored **−100%**, filters evaluated on
+pre-buy information only:
+
+```
+filter                                  n   dead  dead%   p25     median   net    >gas
+ALL — no filter                        965   196  20.3%  -23.6%  +27.46% +25.53%  69%
+A  liquidity > 0 at entry              965   196  20.3%  -23.6%  +27.46% +25.53%  69%
+B  sell EXECUTES at entry (firewall)   952   183  19.2%  -16.3%  +28.23% +26.30%  70%
+D  >= 2 distinct buyers before entry   150    58  38.7% -100.0%  +16.11% +14.18%  54%
+E  < 3 senders in the launch block     965   196  20.3%  -23.6%  +27.46% +25.53%  69%
+F  launchpad 0x58daec (the live one)   449    51  11.4%   +8.2%  +25.15% +23.22%  79%
+G  created direct on the PoolManager   471   134  28.5% -100.0%  +40.27% +38.34%  63%
+B + G                                  458   121  26.4% -100.0%  +43.97% +42.04%  65%
+```
+
+**A NEAR-MISS WORTH RECORDING: the first version of this table was circular.** Run with
+the sell simulated at the exit, "filter on `sell_executes`" filtered on *the outcome
+being measured* — it reported 769 survivors, **0.00% unsellable**, median +40.27%. That
+is survivorship wearing a filter's label, and it is the same defect that produced the
+original +15% headline. Two different filters returning an identical +40.27% is what gave
+it away. The filter is now taken from the entry point and the outcome from the exit, and
+the dead column is printed beside every row so it cannot recur.
+
+**What the filters actually buy:**
+
+- **The zero-liquidity gate disqualifies 0 of 965.** Every corpus pool had liquidity at
+  entry. It would not have saved a single one of these — it is there for `Fly`, which the
+  corpus does not contain.
+- **The firewall disqualifies 1.35% at entry and 19.2% of outcomes, and moves the median
+  by +0.77 points.** It is a tail-cutter, not an edge.
+- **`F`, the live launchpad, has the best RISK profile in the table** — dead rate 11.4%
+  against 20.3%, **the only p25 that is positive (+8.2%)**, and 79% beating gas. `G`,
+  direct creation, has the higher median (+40.27%) and a p25 of −100%.
+- **`D` (minimum unique buyers) makes things WORSE** — it cuts the population 84% and
+  *doubles* the dead rate to 38.7%. The filter that looked most sensible on paper is the
+  one the data rejects.
+
+### 6C.7 THE ANSWER, AND IT DEPENDS ENTIRELY ON WHICH POPULATION YOU ASK ABOUT
+
+The corpus says +27.46% median. **The live run was 0 for 12.** Both cannot describe the
+same launches — and the dates say they need not. The corpus's newest first swap is block
+**64,213,112**; the live run bought at **65,428,336–65,443,821**, entirely after it.
+
+So the identical measurement was run on launches from **the last 22.2 hours**:
+
+```
+candidates with one pricing side in the window        7,749
+sampled                                                 700
+  never traded at all                                   421   (60.1%)
+  had a first swap                                      279
+  buy could NOT execute                                 106
+  sell probe unreadable                                  25
+SCORED                                                  148 pools / 124 distinct tokens
+
+could not be sold at the exit          33   22.30%
+per-POOL      p25 -99.99%   MEDIAN -22.16%   p75 +36.43%   net -24.09%
+per-TOKEN     p25 -100.0%   MEDIAN +12.41%   p75 +44.08%   net +10.48%
+share beating gas                            45.27%
+```
+
+**THE CLUSTERING IS THE WHOLE STORY, AND IT IS THE SAME SHAPE AS THE LIVE RUN.** One
+token appeared in **16 separate pools**. A median over pools weights a prolific deployer
+by however many pools it opened, and those are the losers — which is exactly why six of
+the twelve live positions carried the symbol `Fly` and five were bought after the first
+had already failed. **Deduplicating by token flips the sign, from −22.16% to +12.41%.**
+
+That is direct evidence for the template blocklist built in 6B.6: it is the mechanism
+that moves the bot's experience from the per-pool number toward the per-token one.
+
+**PLAINLY, AS ASKED:**
+
+- **Is there an edge?** On distinct tokens, the median is **+12.41% gross, +10.48% net of
+  gas [MEASURED, n=124, last 22 hours]**. On pools taken indiscriminately there is not:
+  **−24.09% net.** The edge, if it exists, *is* the deduplication.
+- **How much decay?** The corpus said +27.46% on the same measurement. The current
+  population says +12.41% per token. **Roughly half, over about three weeks.**
+- **How many launches a week?** ~8,380 candidates a day with a pricing side, of which
+  ~40% ever trade, giving roughly **10,000 distinct tradeable tokens a week.** Not a few
+  dozen. At 10 trades per run the binding constraint is us, not supply.
+- **AND IT IS NOT ACTIONABLE YET.** A quarter of tokens are −100%. 22.3% cannot be sold
+  at the horizon. The only real-money test of any of this returned −100% on twelve of
+  twelve. Under the standing rule, **this measurement does not become a decision until
+  one real observation confirms it** — which is precisely what the $1 / 10-trade
+  configuration in 6B exists to buy.
+
+**WHAT WOULD PROVE THIS WRONG:** a $1 run over ~10 distinct tokens whose realised
+outcomes cluster near −100% rather than near the +12% median. That is a cheap test and it
+is the next thing to do.
+
+### 6C.8 One claim we hold and still violate
+
+3A.vi's second half: *"a quote that returns no price-impact figure is REFUSED, never
+assumed to be zero."*
+
+**`bot/quote.ts` returns `basis: 'fee-only'` when the pool has too few observations to
+compute depth, and `launchbot.ts` trades on it with `impactPct = 0`.** A failed tick
+*read* is correctly skipped; a successfully-read-but-insufficient tick set is not. **All
+three of the live run's qualified trades were `fee-only`** — 100% of the run traded on a
+quote with no impact figure, against a $10 position in pools whose liquidity we now know
+ranged down to 8.2e21.
+
+This is the standing rule that an error path must never emit a plausible default, in a
+place nobody had looked: a missing impact figure becoming `0%` is exactly such a default.
+It is on the list in section 7.
+
+### 6C.9 3B — my own research, and what contradicts the list
+
+Sources: [`nirholas/hood-oracle`](https://github.com/nirholas/hood-oracle),
+[`nirholas/robinhood-chain-alerts`](https://github.com/nirholas/robinhood-chain-alerts),
+[`nirholas/robinhood-chain-sdk`](https://github.com/nirholas/robinhood-chain-sdk),
+[NOXA's docs](https://fun.noxa.fi/docs),
+[TrustSwap's launchpad comparison](https://trustswap.com/robinhood/launchpad),
+[Gigabots, "Sniping Sucks"](https://medium.com/gigabots/sniping-sucks-4d4c99b45881).
+
+**Contradictions found, in order of how much they matter:**
+
+1. **"The Odyssey" is negligible, by the same author's own numbers.** `hood-alerts`'
+   verification run reports **NOXA 2,621 launches against Odyssey 4**, with 110 curve
+   trades and **1 graduation**. The brief presents them as a pair. They are not.
+2. **Odyssey is a bonding curve, so it has no pool at launch at all.** The SDK's own
+   example notes NOXA launches "appear instantly with a pool" while Odyssey launches
+   "start on a bonding curve" — meaning our `Initialize` watcher structurally *cannot*
+   see an Odyssey launch until it graduates. That is a real architectural gap, and it
+   applies to 4 launches.
+3. **`hood-oracle`'s model is bootstrapped from a different chain.** Its prior is fitted
+   on *"~296k pump.fun launches"* with "SOL buckets re-denominated to ETH at recorded
+   rates". A conviction score for Robinhood Chain launches whose prior comes from Solana
+   is exactly the shape of error this document exists to catch.
+4. **Its defaults contradict this chain's measured behaviour.** `stopLossPct` defaults to
+   30% — but §6B.3 measured the worst decline *while still sellable* at −2.0%, so a 30%
+   price stop fires on nothing here. `maxHoldSeconds` defaults to 1,800 s against a
+   measured decisive window of 5–20 s. `maxConcurrentPositions` defaults to 1, which is
+   stricter than our 5 and looks wiser given the clustering.
+5. **Nobody publishes a win rate.** `hood-oracle` states no P&L and defaults to simulate
+   mode. The one practitioner assessment I could find argues sniping is structurally
+   unprofitable — bribes to builders, gas in failed races, transfer taxes on quick
+   flips, and insiders dumping on snipers. **No source I found publishes a positive
+   realised return with a method attached.**
+6. **The launchpad landscape is much wider than two names** — Pons, Flap, hood.fun,
+   Bankr, Virtuals, Clanker, Openfair, RobinPad all appear in third-party coverage. Our
+   own data already shows 12 distinct `Initialize` targets across 969 corpus pools.
+
+**What corroborates the list:** the firewall round trip (we lacked it and now have it),
+the refusal to accept a missing impact figure (we still violate it), price-independent
+outcome labels (sounder than our original mark-to-market), and the bundler *mechanism*
+being real even though it is not the median case.
+
+**And 3A.ix's sequencer feed — 100–300 ms of lead over RPC — is documented by the SDK
+and UNVERIFIED BY US.** It is the one claim on the list with a plausible mechanism that
+we have not tested, and if it holds it is a latency advantage no filter can substitute
+for. Testing it needs a WebSocket subscription we have never opened.
+
+---
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-18, from Part 3:**
+
+- **A `fee-only` quote is traded on with `impactPct = 0`.** Section 6C.8. `bot/quote.ts`
+  returns `basis: 'fee-only'` when a pool has too few observations to compute depth, and
+  `launchbot.ts` proceeds with impact treated as zero. **All three of the live run's
+  qualified trades were `fee-only`.** The rule this breaks is the standing one that an
+  error path must never emit a plausible default. The fix is to refuse the trade, or to
+  size it down, rather than to assume zero impact.
+- **The exit loop's own wiring has never been executed.** Section 6B.8. Every decision
+  Part 2 added is tripped by `rail-drill`, but the loop that reads a `holding` row, runs
+  the sellability poll, calls `decideExitTrigger` and registers the blocklist has not run
+  even in dry run, because the chain-wide halt blocks every mode.
+- **The Permit2 deadlock fix has only ever been exercised against a scripted transport.**
+  Section 6B.9.
+- **Odyssey launches are structurally invisible to us.** Section 6C.9. They begin on a
+  bonding curve with no pool, so an `Initialize` watcher cannot see one until it
+  graduates. This is 4 launches by the only count available and is recorded for
+  completeness rather than as a priority.
+- **The sequencer feed's 100–300 ms lead is untested.** Section 6C.9. It is the only
+  claim on the external list with a plausible mechanism that we have not measured.
+- **`v4_pool_init` has block timestamps for only 15.6% of its rows**, which is why the
+  launch rate had to be computed from block numbers instead. Any future per-day figure
+  from that table via `block_times` will be a tenfold undercount.
 
 **CATEGORY A IS NOW CLOSED IN FULL, 2026-09-16.** Section 6 records each with the
 evidence. Closing it does not make the bot live: there is still no signing path, no
