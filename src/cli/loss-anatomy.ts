@@ -80,11 +80,12 @@ async function main(): Promise<void> {
 
     /* The signal-firing population with a stored outcome at the final grid point. */
     const pools = (await c.query<{ pool_id: string; init_block: string; creator: string | null;
-      outcome: string | null }>(
-      `select f.pool_id, f.init_block::text, f.creator,
+      token: string; outcome: string | null }>(
+      `select f.pool_id, f.init_block::text, f.creator, l.token,
               (case when t.sell_executes then (t.eth_out - t.eth_in)/t.eth_in
                     when t.sell_executes = false then -1 end)::text as outcome
          from bot_runner_features f
+         join bot_runner_label l on l.chain = f.chain and l.pool_id = f.pool_id
          join bot_trade_path t
            on t.chain = f.chain and t.pool_id = f.pool_id and t.grid_offset = 12000
         where f.chain = $1 and f.creator_share >= 0.40
@@ -131,19 +132,44 @@ async function main(): Promise<void> {
       }
       sells.sort((a, b) => b.share - a.share);
 
-      /* WHO sold, on the biggest few only — the sender topic is the router. */
-      const byTx = new Map<string, string>();
-      for (const s of sells.slice(0, MAX_TX_READS)) {
-        if (byTx.has(s.tx)) continue;
-        try {
-          const tx = (await rpc.call('eth_getTransactionByHash', [s.tx])) as
-            { from?: string } | null;
-          if (tx?.from) byTx.set(s.tx, tx.from.toLowerCase());
-        } catch { /* unknown stays unknown */ }
-      }
-
+      /*
+       * ===================================================================
+       * WHO SOLD: THE ERC-20 TRANSFER, NOT `tx.from` OF THE SWAP
+       * ===================================================================
+       *
+       * **THE FIRST VERSION OF THIS USED `tx.from` AND IT WAS WRONG.** These creators
+       * sell through a router, so `tx.from` is a relayer and not them. Measured
+       * consequence: 22 launches were flagged "creator never sold" with a median
+       * outcome of +138.8% and a 0% deep-loss rate — a spectacular finding that was an
+       * artefact. Checking the creator's token BALANCE at +20 min showed they held a
+       * median **0.3%** of what they bought, and the Transfer logs showed **18 of 22
+       * sent a median 58.0% of supply straight to the PoolManager.** They sold more
+       * than the group I had labelled as sellers.
+       *
+       * **The reliable signal is the ERC-20 `Transfer` from the creator to the
+       * PoolManager** — that IS the token leaving them into the pool, whoever submitted
+       * the transaction. One sparse `eth_getLogs` per pool, and no identity guessing.
+       */
       const creator = p.creator;
-      const creatorSells = sells.filter((s) => byTx.get(s.tx) === creator);
+      interface CSell { off: number; share: number }
+      const creatorSells: CSell[] = [];
+      if (creator !== null) {
+        try {
+          const xf = (await rpc.call('eth_getLogs', [{
+            address: p.token, topics: [TOPICS.transfer,
+              `0x${'0'.repeat(24)}${creator.slice(2)}`],
+            fromBlock: `0x${initBlock.toString(16)}`,
+            toBlock: `0x${(initBlock + WINDOW).toString(16)}`,
+          }])) as Log[];
+          for (const x of xf) {
+            const to = `0x${(x.topics[2] ?? '').slice(26)}`.toLowerCase();
+            if (to !== POOL_MANAGER) continue;
+            creatorSells.push({ off: Number(BigInt(x.blockNumber)) - initBlock,
+              share: Number(BigInt(x.data)) / SUPPLY });
+          }
+        } catch { /* absent, never defaulted */ }
+      }
+      const byTx = new Map<string, string>();
       const biggest = sells[0];
       await c.query(
         `insert into bot_loss_anatomy (chain, pool_id, init_block, outcome, creator,
@@ -161,8 +187,12 @@ async function main(): Promise<void> {
             : Math.round(Math.min(...creatorSells.map((s) => s.off)) / 10),
           biggest === undefined ? null : biggest.share.toString(),
           biggest === undefined ? null : Math.round(biggest.off / 10),
-          biggest === undefined ? null : (byTx.get(biggest.tx) ?? null),
-          biggest === undefined ? null : (byTx.get(biggest.tx) === creator),
+          null,
+          /* Does the creator's own largest pool-bound transfer match the pool's
+           * largest observed sell? Size comparison, not identity guessing. */
+          biggest === undefined || creatorSells.length === 0 ? null
+            : Math.abs(Math.max(...creatorSells.map((x) => x.share)) - biggest.share)
+              < biggest.share * 0.02,
           totalSold.toString(), sells.length]);
       n += 1;
       if (n % 40 === 0) log.info('progress', { pools: n, of: pools.length });
