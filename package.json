@@ -74,6 +74,8 @@
     "post-dump": "npm run build && node dist/cli/post-dump.js",
     "rule-p7": "npm run build && node dist/cli/rule-p7.js",
     "timing-sweep": "npm run build && node dist/cli/timing-sweep.js",
+    "loser-tag": "npm run build && node dist/cli/loser-tag.js",
+    "loser-separate": "npm run build && node dist/cli/loser-separate.js",
     "decay-trajectory": "npm run build && node dist/cli/decay-trajectory.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
