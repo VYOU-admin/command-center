@@ -7004,6 +7004,111 @@ it**, against §6N's 168,395 trades.
 
 ---
 
+## 6Q. PART 8 — THE §7 RESULT IS A SPIKE IN THE MEAN AND A PLATEAU IN THE MEDIAN
+
+Total spend **~$0.07.**
+
+### 6Q.1 8C — BLOCKED ON WALL-CLOCK TIME, NOT ON MONEY
+
+Re-running the committed rule extended the fresh window from 0.93 to **0.97 days** and
+added **zero** firing trades. **n stays 54, t stays 1.187, every figure unchanged.**
+
+My "~2.6 more days" in §6P.6 was wall-clock, and about **1.2 hours** have passed. The
+launches the decisive test needs **do not exist yet**. The machinery is written, pinned
+and idempotent — `npm run rule-p7` in ~2.5 days completes it at no marginal effort. **It
+is the one thing in this project that is blocked purely on waiting.**
+
+### 6Q.2 8A — THE MEDIAN IS A PLATEAU. THE MEAN IS A SPIKE.
+
+A 3x3 neighbourhood around the rule, on the training pools, gate unchanged:
+[MEASURED, n=317 per cell except the 150 s entries at n=303]
+
+| entry | hold | median | p75 | **mean** | **SUM** | win% | deep% |
+|---|---|---|---|---|---|---|---|
+| 90 s | +100 | +8.3% | +20.4% | +0.6% | 1.90 | 69% | 14% |
+| 90 s | +150 | +12.9% | +27.6% | −0.3% | −1.06 | 71% | 21% |
+| 90 s | +200 | +16.4% | +37.9% | 0.0% | 0.14 | 65% | 28% |
+| **115 s** | **+100** | **+8.3%** | **+21.2%** | **+2.4%** | **7.47** | **69%** | **12%** |
+| 115 s | +150 | +12.6% | +28.0% | +1.0% | 3.09 | 68% | 21% |
+| 115 s | +200 | +14.4% | +37.5% | −0.3% | −1.02 | 64% | 27% |
+| 150 s | +100 | +8.2% | +21.5% | −0.3% | −0.77 | 69% | 15% |
+| 150 s | +150 | +13.1% | +28.9% | −0.5% | −1.60 | 65% | 21% |
+| 150 s | +200 | +14.8% | +36.6% | +0.3% | 1.01 | 65% | 26% |
+
+**WHAT IS A PLATEAU AND IS THEREFORE REAL:**
+
+- **The median.** +8.2%, +8.3%, +8.3% across all three entries at hold 100 — and it
+  rises smoothly with the hold: ~+8% → ~+13% → ~+15%. Stable in both directions.
+- **The win rate.** 64–71% in every one of the nine cells.
+- **The deep-loss rate, monotonic in the hold:** 12–15% at +100 s, 21% at +150 s,
+  26–28% at +200 s. Exactly the shape §6P.1 measured.
+
+**WHAT IS A SPIKE AND IS THEREFORE NOT:**
+
+- **The mean and the SUM.** The rule's cell is **+2.4% / 7.47**. **All eight neighbours
+  sit between −0.5% and +0.6%, SUM −1.60 to +1.90.** The centre is roughly **four times
+  the best neighbour** and the neighbours average about zero.
+
+**SAID PLAINLY: §7's positive expectancy does not survive moving the entry by 25 seconds
+or the hold by 50 seconds.** The thing that is robust is *how often* it wins and *by how
+much in the median* — not whether the sum is positive.
+
+**Why the two differ is not mysterious.** The mean is set by the −82% tail, and the
+deep-loss rate barely moves across the row (12% vs 14% vs 15% at hold 100). A two-point
+difference in how many tails land, on ~317 trades, is worth several points of mean. **The
+strategy wins often and small and loses rarely and enormously, and at these sample sizes
+the sum is decided by the tail count, which is noise.**
+
+**This weakens §6P materially and should be read alongside it.** The fresh-window result
+there (mean +5.48%, SUM +2.96, t=1.19) is plausibly the same luck.
+
+### 6Q.3 8B — PARTIALS HELP, MARGINALLY
+
+Same entry, **hard deadline at +215 s, never extended.** [MEASURED, n=317, training]
+
+| rule | p10 | median | mean | **SUM** | win% | fires on |
+|---|---|---|---|---|---|---|
+| baseline, 100% at the deadline | −82.5% | +8.3% | +2.4% | 7.47 | 69% | — |
+| **50% at +20%, rest at deadline** | **−80.0%** | **+8.9%** | **+2.6%** | **8.31** | **71%** | **34.1%** |
+| 50% at +30%, rest at deadline | −82.5% | +8.5% | +2.6% | 8.14 | 69% | 18.6% |
+| 50% at +50%, rest at deadline | −82.5% | +8.3% | +2.4% | 7.53 | 69% | 4.4% |
+| 50% at +100%, rest at deadline | −82.5% | +8.3% | +2.4% | 7.47 | 69% | **0.0%** |
+| 33% at +20% then 33% at +50% | −80.0% | +8.6% | +2.5% | 8.07 | 70% | 34.1% |
+
+**The best partial adds about 11% to the SUM and two points of win rate**, and lifts p10
+from −82.5% to −80.0% because half the position is banked before some falls. **A +100%
+threshold never fires inside 100 seconds** — consistent with §6K.3's 8.2-minute median
+time to peak.
+
+**IT UNDERSTATES THE BENEFIT.** Only four sample points sit inside the window (115, 150,
+190, 215 s). A live bot polling per block would fire the threshold more often and
+earlier, so **8.31 is a floor, not an estimate.**
+
+**Our own impact of the partial, against the measured median depth of 3.512 ETH:**
+selling half a $1 position is **0.008%** of depth, half of $10 is **0.080%**, half of
+$100 is **0.800%** — material only at $100, where the figures are optimistic by roughly
+that much.
+
+**The v2 variant is committed to `docs/NAMED-RULE-P7.md` and is UNTESTED on fresh data.**
+It should not be adopted before the base rule is established, because it is a small
+improvement on a base §8A shows to be unstable.
+
+### 6Q.4 Where Part 8 leaves it
+
+- **The base rule is not dead, and it is not established.** Its median and win rate are
+  robust; its expectancy is not.
+- **The decisive test is unchanged and unavailable**: ~154 trades, ~2.5 days of waiting,
+  no money.
+- **If the base rule survives that test**, the v2 partial is the first thing to try and
+  is already committed.
+- **NOT TESTED:** the full 8x7 grid the brief asked for (~$1.00, past the check-in
+  threshold — the 3x3 was bought instead because it answers spike-vs-plateau on the full
+  sample rather than distant cells on a subsample); any partial threshold below +20%;
+  and a per-block polling grid, which is the thing that would turn 8B's floor into an
+  estimate.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4G-1:**

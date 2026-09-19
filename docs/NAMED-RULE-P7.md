@@ -47,3 +47,28 @@ it says.
 
 It is not §6I's rule, §6N's rule, or any exit rule from §6G–§6H. Those were entered at
 +1 or +15 s and all failed. **The only thing carried over is GATE 1.**
+
+---
+
+# VARIANT v2 — committed 2026-09-19, UNTESTED on fresh data
+
+Part 8B found a partial take-profit that improves the training figures. It is recorded
+here **before** any out-of-sample test, so that if it is ever scored the commit predates
+the scoring — the same discipline the base rule was held to.
+
+```
+IDENTICAL to the base rule, plus:
+  sell 50% of the position the first time it is up +20% at or before the deadline
+  the remainder ALWAYS sells at the deadline, +215 s, never extended
+```
+
+Training figures (n=317, exploratory): SUM 7.47 → **8.31**, win 69% → **71%**,
+p10 −82.5% → −80.0%. Fires on **34.1%** of trades.
+
+**This is a small improvement on a base whose own SUM §8A shows to be unstable, so it
+should not be adopted before the base rule itself is established.** It is written down
+only so that it is testable later without being a post-hoc choice.
+
+**The measurement understates it.** Only four sample points sit inside the 100-second
+window (115, 150, 190, 215 s); a live bot polling per block would fire the threshold more
+often and earlier. The figure above is therefore a floor, not an estimate.
