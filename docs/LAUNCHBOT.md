@@ -6146,6 +6146,125 @@ and would only become more so.
 
 ---
 
+## 6I. 4F-1 AND 4F-2 — UNCAPPED RULES FAIL; THE CREATOR-SHARE SPLIT SEPARATES
+
+Two spends, both stated because the brief required zero new RPC unless justified.
+**The stored paths ended at 30 minutes**, and §6G puts the best single outcomes at
++2,672% (30 m), +1,151% (1 h), +407% (2 h) and −0.0% by 6 h — so the peaks an uncapped
+rule exists to ride sat **outside** the stored path. Running "uncapped" to the end of a
+30-minute path is a 30-minute cap wearing a different name. Four points were added at
+40/60/90/120 min (**$0.05**), and creator share was read from each pool's own launch
+block (**$0.005**) because it is in no table we hold. **All 200 paths now reach 120
+minutes; zero were truncated.**
+
+### 6I.1 4F-1 — UNCAPPING MAKES IT DRAMATICALLY WORSE
+
+| rule | p25 | median | p75 | p90 | mean | **SUM** | win% | **SUM−best** |
+|---|---|---|---|---|---|---|---|---|
+| BASELINE fixed 30 s | −0.5% | +0.3% | +3.3% | +23.3% | −4.5% | −9.01 | 52% | −11.34 |
+| BASELINE TP+200% cap 15 m (§6H best) | −82.5% | −58.6% | +68.1% | +203.3% | −2.0% | **−3.99** | 28% | −7.98 |
+| TRAIL 20% UNCAPPED | −82.3% | −60.5% | −4.9% | +54.4% | −34.8% | −69.64 | 21% | −71.73 |
+| TRAIL 30% UNCAPPED | −82.5% | −69.8% | −30.3% | +38.5% | −46.8% | −93.51 | 12% | −95.61 |
+| TRAIL 50% UNCAPPED | −82.5% | −81.1% | −48.9% | −15.1% | −62.2% | −124.40 | 3% | −126.50 |
+| half at +100%, trail 30% uncapped | −82.4% | −54.2% | +18.4% | +84.2% | −26.6% | −53.14 | 28% | −56.49 |
+| ladder 25/25/25 + trail 30% uncapped | −81.9% | −46.3% | +15.9% | +95.2% | −19.1% | −38.24 | 29% | −43.30 |
+| **HOLD to 120 min, no rule** | −82.5% | −82.2% | −49.0% | −20.0% | −67.4% | **−134.81** | **0%** | −134.80 |
+
+**Every uncapped rule is worse than the capped baseline, most of them by an order of
+magnitude.** The best uncapped variant (−38.24) is ten times worse than `TP +200%`
+capped at 15 minutes (−3.99).
+
+**AND THE "LET WINNERS RUN" THESIS DIES ON ONE LINE: holding to 120 minutes has a win
+rate of ZERO.** Not one of 200 positions is positive at two hours. There is no 50x to
+wait for — §6H.3 showed why, and it is the same reason: the creator's single-transaction
+dump takes the position to −82% and it never comes back.
+
+**NO OUTLIER CARRIES ANY RESULT.** `SUM−best` — the same sum with the single best
+position removed — moves the figures by 2 to 5 points on sums of 40 to 130. On the
+120-minute hold it moves by **0.01**. Nothing here rests on one trade.
+
+### 6I.2 4F-2 — THE CREATOR-SHARE SPLIT SEPARATES, AND IN THE OPPOSITE DIRECTION
+
+**The pre-registered hypothesis was that a LARGE creator share is the danger signal.**
+§6F.6 measured it as bimodal and §6H.3 decoded a dump of 58.2% of supply — exactly the
+p75. The natural reading was that high-share launches are the ones that dump on you.
+
+**That is backwards. Under a 30-second hold, the high-share bucket is the profitable
+one.** [MEASURED]
+
+| bucket | n | dead% | p25 | median | p75 | mean | **SUM** | win% |
+|---|---|---|---|---|---|---|---|---|
+| share < 5% | 34 | **32%** | −100.0% | −7.4% | −0.1% | −34.7% | −11.80 | 24% |
+| 5–10% | 14 | 0% | −11.3% | −11.3% | −0.5% | −4.4% | −0.61 | 7% |
+| 10–20% | 8 | 0% | −0.4% | −0.4% | +23.3% | −1.9% | −0.15 | 38% |
+| 20–40% | 30 | 0% | −0.4% | −0.3% | +3.3% | −4.1% | −1.22 | 37% |
+| **share ≥ 40%** | **114** | **0%** | **−0.3%** | **+1.1%** | **+4.2%** | **+4.2%** | **+4.78** | **71%** |
+
+**THE HOLDOUT REPRODUCES IT.** Split on the parity of the pool id — fixed by the data,
+not chosen after looking — with the refutation condition stated before the measurement:
+
+| | n | dead% | median | mean | SUM | win% | net @$1 | net @$10 | net @$100 |
+|---|---|---|---|---|---|---|---|---|---|
+| share ≥ 40%, **all** | 114 | 0% | +1.1% | +4.2% | +4.78 | 71% | **−17.22** | **+2.58** | **+4.56** |
+| share ≥ 40%, **half 0** | 49 | 0% | +1.1% | +3.4% | +1.65 | 65% | −7.81 | **+0.71** | +1.56 |
+| share ≥ 40%, **half 1** | 65 | 0% | +1.1% | +4.8% | +3.13 | 75% | −9.42 | **+1.87** | +3.00 |
+| share < 40%, all | 86 | 13% | −0.5% | −16.0% | −13.79 | 27% | −30.38 | −15.45 | −13.95 |
+
+**Both halves positive, same sign, similar magnitude. The refutation condition — halves
+disagreeing in sign, or either negative — did not occur.**
+
+**AND THE MECHANISM IS MEASURED, NOT INVENTED.** On the 114 high-share launches, the
+first collapse of more than 50 points appears at:
+
+```
+p10  60 s      p25  120 s      median  375 s (6.3 min)      p75  750 s
+```
+
+**A 30-second hold exits before the creator's dump.** §6H.3 decoded that dump at block
++454 ≈ 45 seconds on one pool; across the population its median is six minutes. The
+high-share creator buys a large block at the launch price — which is *why* there is
+anything to ride — and sells it minutes later. **We are still the exit liquidity; we
+simply leave before the exit.**
+
+### 6I.3 THE HONEST ACCOUNTING OF THAT RESULT
+
+**At $1 it loses money.** Gas is an absolute $0.193, so 19.3% of a $1 position against a
++4.2% mean: **net −17.22 over 114 trades.** The $1 size is instrumentation (§6B.1) and
+cannot be profitable at any edge this small.
+
+**At $10 it is positive: +2.27% per trade, +$25.80 over 114 trades.** At $100, +4.01%
+per trade. **This is the first positive expectancy measured in five passes.**
+
+**IT IS ALSO UNFUNDABLE AS THINGS STAND.** 114 of 200 is 57% of canonical launches ≈
+**242 a day**. At $10 a position with the current rails — `MAX_TRADES_PER_RUN 10`,
+`MAX_POSITION_USD 1` — this needs the position size raised tenfold and $100 of working
+capital. **The wallet last read $7.71.**
+
+### 6I.4 THREE LIMITS ON THIS FINDING, STATED BEFORE ANYONE ACTS ON IT
+
+**1. THE HOLDOUT CONTROLS FOR THE WRONG THING.** Splitting by pool-id parity tests
+whether the result is an artefact of *particular pools*. It does **not** test whether it
+survives a different *time*. §6C measured this chain's edge halving in three weeks, and
+a within-window holdout cannot see that. **An out-of-time test on a later window is the
+test that matters and it has not been run.**
+
+**2. THE CREATOR-SHARE DISTRIBUTION MOVED BETWEEN TWO SAMPLES AND I CANNOT YET SAY
+WHY.** §6F.6, on a **more recent** window (65.8M–66.7M), measured median share **3.79%**.
+This pass, on an **older** window (63.3M–65.9M), measures median **49.9%** — while both
+put p75 at **58.2%**, the same high mode. **If the population is shifting toward the
+low-share bucket, the profitable bucket is shrinking**, and the figures above describe a
+regime that may already be ending. This is the single biggest risk to the result and it
+is cheap to check.
+
+**3. n = 114 IN ONE THREE-DAY WINDOW.** A 71% win rate on a +1.1% median is a thin edge
+carried by many small wins; it needs only a modest shift in the dump timing to invert.
+
+**WHAT WOULD REFUTE THIS RESULT:** the high-share bucket's SUM coming out negative on a
+later window, or the median collapse time moving earlier than 30 seconds. **Both are
+measurable on stored machinery, and neither has been done.**
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4C:**
