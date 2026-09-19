@@ -7218,7 +7218,223 @@ part of it.**
 
 ---
 
+## 6S. PART 9C/9D — THE FILTER FAILED OUT OF SAMPLE. THERE IS NO LOSER TAG.
+
+**Status: MEASURED. The named filter was committed to git (`e60795a`,
+`docs/NAMED-RULE-P7.md`) with its expectations and its refutation condition
+written down BEFORE the holdout was scored. Both refutation conditions fired.**
+
+### 6S.1 What was committed, and what was predicted
+
+```
+PRIMARY   "D"   ETH bought in the 90-115 s bucket  <=  0.20 ETH
+SECONDARY "A"   zero SELLS in the 90-115 s bucket
+```
+
+D was chosen on training (n=317, 39 deep losers = 12.3%) for four stated
+reasons: one condition rather than two, best SUM (11.23 vs 7.47 unfiltered),
+best p10 (-8.6% vs -82.5%), and it keeps 61% of trades. The threshold 0.20 is
+the midpoint of the two measured medians (0.280 ETH for deep losers, 0.134 for
+the rest). **It was not swept**, deliberately, so that the holdout was testing a
+threshold and not a search.
+
+Written down in advance: "deep-loss rate falling from ~12% to roughly 5-8%, a
+positive mean but LOWER than training ... and half to two-thirds of trades
+kept." Refutation: "a held-out deep rate at or above the unfiltered 12%, or a
+SUM below the unfiltered baseline on the same trades."
+
+Also stated in advance, and it matters: "n=54 fresh trades, of which a 60%
+filter leaves ~32. That cannot establish anything; it can only fail to
+contradict." It did not fail to contradict.
+
+### 6S.2 The holdout result — MEASURED
+
+Fresh §7 window, n=54, entry +115 s, exit +215 s, returns from
+`bot_rule_p7.ret`, entry state from `bot_entry_state` extracted for all 54.
+
+```
+rule                    n  kept%  deep  deep%  deepCaught  winKept    p10  median    mean    SUM  win%      t  maxDD
+BASELINE no filter     54   100%     4     7%          -        - -20.6%    6.2%    5.5%   2.96   67%   1.19   1.66
+D  ETH 90-115s<=0.20   30    56%     4    13%         0%      58% -82.3%    6.4%   -1.8%  -0.55   70%  -0.28   2.57
+A  zero sells 90-115s  10    19%     2    20%        50%      17% -82.3%    6.2%   -5.1%  -0.51   60%  -0.37   1.37
+```
+
+**Filter D caught ZERO of the four deep losers.** It kept all four and threw
+away 42% of the trades, including 42% of the winners. The deep-loss rate among
+kept trades went UP, from 7% to 13%. The SUM went from +2.96 to **-0.55** — from
+positive to negative on the same 54 launches. p10 went from -20.6% to -82.3%,
+the opposite direction from the training set, where p10 was the filter's best
+property.
+
+The secondary, A, did catch 2 of the 4 (50%) — but it keeps only 19% of trades
+and its SUM is also negative, -0.51. Catching half the deep losers while
+discarding 83% of the winners is not a filter, it is a shutdown.
+
+Net of gas, both are worse: D is **-1.13 at $10 positions and -0.61 at $100**,
+against a no-filter baseline of +1.92 and +2.86.
+
+**The compounding arithmetic the brief asked for, computed on the filtered
+distribution, is therefore a loss and not a gain:** at the inferred 88
+trades/day (158 base x the 56% kept share) and 10% position sizing, filter D
+expects **-17.8% of bankroll per day at $100 positions (-125% per week)** and
+-33.1% per day at $10. The daily sd at that sizing is 33.4% of bankroll, so the
+expectation is inside the noise in both directions — but the noise does not
+rescue a negative mean, it only means you cannot tell how fast you lose.
+
+### 6S.3 What the failure actually says
+
+The training separation was real in the sense that the numbers were computed
+correctly — 9A/9B found it on n=317 with a recalibrated bar. It did not
+generalise. The most economical reading, and it is INFERRED:
+
+- There were 39 deep losers in training and **4 in the holdout**. A rule fitted
+  to the shape of 39 events, then tested against 4, is being asked a question
+  the holdout cannot answer. The 0-of-4 catch rate is consistent with a useless
+  filter and also consistent with a weak one having a bad run.
+- But the SUM reversal is not about the four. D discarded 24 launches and the
+  discarded set was, on net, the profitable half. That is a statement about the
+  whole distribution, not about the tail, and it is the finding that carries.
+- "ETH bought in the last 25 seconds before entry" is plausibly a **momentum**
+  variable, not a risk variable. On training it happened to sit on the losers;
+  on fresh data it sits on the winners. A quantity that flips sign between two
+  adjacent windows has no stable relationship to the outcome.
+
+**This is the seventh negative result in the sequence.** Stated as plainly as
+the hits: there is no entry-time property measured so far — 21 quantities in 5B,
+the overhang family in 9B, the two committed filters here — that identifies the
+deep loser before it lands. See §6R.4 for the running list of nulls.
+
+### 6S.4 9D — SIZING, SINCE NOTHING SEPARATES
+
+Because 9C failed, 9D is the operative answer. **MEASURED** distributions:
+
+```
+                  mean   median      sd     p10      min   win%      t
+TRAINING n=317    2.4%     8.3%   37.2%  -82.5%   -90.3%   69%   1.13
+HOLDOUT  n=54     5.5%     6.2%   33.9%  -20.6%   -86.2%   67%   1.19
+POOLED   n=371    2.8%     7.8%   36.7%  -81.7%   -90.3%   69%   1.48
+```
+
+**The pooled t is 1.48. The edge is not established.** Everything below assumes
+a mean that has not been demonstrated to be non-zero, and that assumption is the
+single largest risk in the numbers — larger than the sizing itself.
+
+Kelly maximising E[log] over the empirical returns, with gas entered as the
+**absolute $0.193 per round trip** it is, not a percentage:
+
+```
+dist        position   gas%   Kelly f   E[log]/trade   half-Kelly
+TRAINING      $10      1.9%      3.0%       0.007%        1.5%
+TRAINING     $100      0.2%     14.5%       0.162%        7.3%
+POOLED        $10      1.9%      6.5%       0.028%        3.2%
+POOLED       $100      0.2%     18.0%       0.241%        9.0%
+POOLED      $1000      0.0%     19.0%       0.273%        9.5%
+HOLDOUT      $100      0.2%     40.0%       1.124%       20.0%
+```
+
+Read the HOLDOUT row as a warning, not a recommendation. Its Kelly is 40%
+purely because its p10 is -20.6% instead of -81.7%; with 54 samples it simply
+did not draw enough tail. **Size on POOLED or TRAINING. Never on the holdout.**
+
+Gas at $10 positions is the dominant term: it cuts pooled Kelly from 18.0% to
+6.5% and cuts E[log] per trade by a factor of nine. **At $10 positions there is
+essentially nothing left** — 0.028% of bankroll per trade in log terms.
+
+Probability of ruin, 500 trades, 20,000 bootstrap paths, ruin = bankroll below
+20% of start, $100 positions:
+
+```
+dist        f     P(ruin)   median end   p10 end   p90 end
+POOLED     2%       0.0%       1.284      1.037     1.585
+POOLED     5%       0.0%       1.785      1.032     3.008
+POOLED    10%       0.4%       2.659      0.895     7.731
+POOLED    25%      29.9%       2.323      0.000    43.794
+POOLED    50%      87.6%       0.000      0.000     1.702
+POOLED   100%     100.0%       0.000      0.000     0.000
+TRAINING   2%       0.0%       1.225      0.986     1.518
+TRAINING   5%       0.0%       1.571      0.913     2.686
+TRAINING  10%       1.1%       2.085      0.681     6.084
+TRAINING  25%      39.7%       1.022      0.000    23.491
+TRAINING  50%      92.3%       0.000      0.000     0.000
+```
+
+**Full Kelly (18%) sits just below the cliff between 10% and 25%, where P(ruin)
+goes from 0.4% to 30%.** That cliff is why half-Kelly is the standing answer
+here and not a convention: at f = 9% the pooled p10 over 500 trades is still
+above 0.9x, and at f = 25% it is zero.
+
+### 6S.5 The sizing that follows, and its three caveats
+
+**The operative numbers, if a live run is ever authorised:**
+
+- Position size **$100, not $10.** This is not a preference, it is the gas
+  arithmetic: $0.193 absolute per round trip is 1.93% at $10 and 0.193% at $100,
+  and that difference is most of the edge.
+- Fraction of bankroll per trade: **9% (pooled half-Kelly).** Implied bankroll
+  for $100 positions is therefore about **$1,100**.
+- At the current $100 wallet, a $100 position is f = 100%, where P(ruin) over
+  500 trades is **100.0%**. That is the arithmetic of what already happened.
+
+Three caveats, all of which weaken these numbers and none of which were
+measured away:
+
+1. **Concurrency is not in the model.** The ruin simulation resamples trades
+   sequentially. At ~158 launches a day the bot holds many positions at once, so
+   real simultaneous exposure is several times f. Any f adopted from this table
+   must be divided by the maximum concurrent position count, and that count has
+   not been measured.
+2. **The bootstrap assumes independence.** Launch outcomes on one chain in one
+   hour are plausibly correlated; if they are, the tail is fatter than simulated
+   and every P(ruin) above is understated.
+3. **The mean is not established (t = 1.48).** Kelly is acutely sensitive to the
+   mean. If the true mean is zero, every f above is a slow bleed of exactly the
+   gas, and half-Kelly only makes it slower.
+
+### 6S.6 Where Part 9 leaves it
+
+The pass was run as specified and it answered its question in the negative. To
+state it in the form the brief asked for: **a loser cannot be tagged at entry
+from anything measured so far, so the only lever left is size.** The strategy
+that remains is the §6P rule unfiltered — entry +115 s, exit +215 s, pooled mean
++2.8%, median +7.8%, win 69%, t 1.48 — traded at $100 positions on a bankroll
+around $1,100 at half-Kelly, with a t-statistic that does not yet justify
+putting money behind it.
+
+**What would prove this section wrong:** accumulate the §7 window to n >= 300
+fresh trades and re-score filter D. If its held-out SUM exceeds the unfiltered
+baseline on that larger sample, 9C was a small-sample accident and the filter
+lives. Until then it is dead and the code must not implement it.
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-19, from Part 9C/9D:**
+
+- **The code must NOT implement the Part 9 entry filter.** `docs/NAMED-RULE-P7.md`
+  commits PRIMARY "D" (ETH bought in the 90–115 s bucket ≤ 0.20 ETH) and SECONDARY
+  "A" (zero sells in that bucket). Both were refuted out of sample in §6S.2 — D
+  caught 0 of 4 deep losers and turned a SUM of +2.96 into −0.55 on the same 54
+  launches. The file stays in git as the timestamped record of what was predicted;
+  it is not a specification. If it is ever implemented it will lose money faster
+  than no filter at all.
+
+- **Position size is $100, never $10, and this is a hard rule.** Gas is an absolute
+  $0.193 per round trip, so it is 1.93% at $10 and 0.193% at $100. §6S.4 measures
+  that difference as cutting pooled Kelly from 18.0% to 6.5% and E[log] per trade by
+  a factor of nine. The bot currently has no minimum position size and would happily
+  trade $10. It must refuse.
+
+- **Bankroll fraction per trade is capped at 9% (pooled half-Kelly), and that cap
+  must be divided by the maximum concurrent open position count.** §6S.5: full Kelly
+  at 18% sits just below a cliff where P(ruin) over 500 trades goes from 0.4% at
+  f=10% to 29.9% at f=25%. The ruin simulation is sequential and the bot is not, so
+  the concurrency divisor is required, and **the maximum concurrent position count
+  has never been measured** — that measurement is a precondition for sizing, not an
+  optimisation.
+
+- **A $100 wallet cannot run this strategy.** At $100 positions on a $100 bankroll,
+  f = 100%, where measured P(ruin) over 500 trades is 100.0%. The implied minimum
+  bankroll for a $100 position at half-Kelly is about $1,100. The code has no
+  bankroll floor and does not refuse to start below it.
 
 **ADDED 2026-09-19, from Part 4G-1:**
 
