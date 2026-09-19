@@ -6675,6 +6675,108 @@ and **a live test short enough to land inside one day 75 would read as a failure
 
 ---
 
+## 6N. 5D AND 5E — THE SIGNAL IS REAL AND IT IS NOT A TRADE
+
+The one signal that survived 5C — **creator buy size**, threshold `creator_share >= 40%`
+**pre-registered in §6I** before §6K–§6M existed — fires on **379 of 1,016 launches
+(37.3%) ≈ 158 a day.** Entry at +15 s. Nine exit rules placed on §6K.3's measured
+time-to-peak quantiles. **Every exit priced with a REAL simulated sell at a reachable
+bound — no mid-price anywhere in 5D.**
+
+### 6N.1 THE RULE WAS SELECTED ON THE TRAINING HALF AND IT FAILED ON THE HOLDOUT
+
+Selection, **training half only** (n=48):
+
+```
+TP +50% or TRAIL 30%, cap p90     mean +14.2%   SUM +6.83   win 63%   <- SELECTED
+TP +50%, cap p90                  mean +12.8%   SUM +6.15   win 63%
+fixed hold to p25 (246 s)         mean +10.5%   SUM +5.05   win 58%
+```
+
+**Held out (n=331):**
+
+| rule | p10 | p25 | median | p75 | mean | **SUM** | win% | maxDD | net@$100 |
+|---|---|---|---|---|---|---|---|---|---|
+| **TP +50% or TRAIL 30% — PRE-SELECTED** | −83.1% | −82.6% | +1.7% | +65.4% | **−4.3%** | **−14.35** | 50% | 29.92 | **−14.99** |
+| fixed hold to +246 s | −82.8% | −82.4% | +19.1% | +41.5% | +0.3% | +1.13 | 62% | 14.58 | +0.49 |
+| fixed hold to +490 s | −83.6% | −82.6% | −79.3% | +61.1% | −4.1% | −13.61 | 41% | 29.10 | −14.25 |
+| TP +50%, cap p90 | −83.8% | −82.6% | +1.7% | +65.4% | −5.4% | −18.00 | 50% | 32.26 | −18.64 |
+| TRAIL 30%, cap p90 | −83.4% | −82.6% | −82.2% | +1.7% | −28.6% | −94.65 | 25% | 110.92 | −95.29 |
+| fixed hold to +768 s | −83.8% | −82.7% | −82.5% | +6.7% | −26.5% | −87.75 | 25% | 107.06 | −88.39 |
+
+**THE PRE-SELECTED RULE IS NEGATIVE: SUM −14.35 over 331 trades, −14.99 net at $100.**
+
+### 6N.2 THE ONE POSITIVE RULE IS INDISTINGUISHABLE FROM ZERO
+
+`fixed hold to +246 s` came back **SUM +1.13, net @$100 +0.49.** It was **not**
+pre-selected — it placed third in training. Reporting it as the finding would be picking
+a rule after seeing the holdout, which the brief forbids and which is how every
+overfitted backtest in this document was born. So it was tested against zero instead:
+
+```
+n 331    mean +0.34%    sd 69.8%    std error 3.84%
+t-stat 0.089            95% CI  -7.2%  to  +7.9%
+trades needed for the mean to be 2 SE from zero:  168,395
+```
+
+**A t-statistic of 0.089 is zero.** At ~158 qualifying launches a day, distinguishing
+that mean from nothing would take **168,395 trades — about 1,066 days.** [MEASURED]
+
+**And it is negative at $10** (−1.59% a trade) because absolute gas is 1.93% there. Only
+at $100 does it clear gas, by +0.15% a trade, on a mean that is not different from zero.
+
+### 6N.3 WHY — AND IT IS THE SAME REASON AS EVERY PRIOR PASS
+
+**Look down the p10 and p25 columns: every rule, without exception, sits at −82% to
+−84%.** The exit rule changes the median, the p75 and the win rate. **It does not move
+the bottom quartile at all.**
+
+§6H.3 decoded why on an individual record: the fall is **one transaction** — 582,003,607
+tokens, 58.2% of supply, in a single block, taking the position from +2.3% to −82% with
+no price in between. **No exit rule can fill at a price the pool never printed.**
+
+So the picture is consistent across five passes:
+
+- **The signal is real.** Creator buy size separates runners from non-runners, δ ≈ 0.41,
+  reproduced out of time and within regime (§6M).
+- **The runners are real.** 42% of launches peak ≥+50% within fifteen minutes (§6K).
+- **And roughly a quarter of the signal's own population still gets dumped on**, at a
+  price no stop can catch. The winners pay for some of it. They do not pay for all of it.
+
+### 6N.4 5E — STATED PLAINLY
+
+- **How many runners a day?** ~179 at +50%, ~127 at +100%, ~70 at +200% (§6K).
+- **Does anything in the first 15 seconds separate them?** **Yes — one thing.** Creator
+  buy size, δ ≈ 0.41. Twenty-one quantities were tested; the full list with every null is
+  in §6L.1. **Notably: the operator's own scored wallets do NOT — only 27 of 1,016
+  launches had any scored wallet buy within fifteen seconds.**
+- **Does it reproduce out of time?** **Yes.** δ 0.533 → 0.285 across the median split,
+  and 0.305 → 0.263 within the regime (§6M).
+- **Is it a trade?** **No.** The pre-selected rule loses (SUM −14.35 held out). The best
+  hindsight rule is +0.34% a trade with a t-statistic of 0.089 and would need ~1,066 days
+  to distinguish from zero.
+- **Worst drawdown:** 14.58 stake units on the best rule, 29.92 on the pre-selected one.
+  **At $100 a trade that is a $1,458 drawdown** — against a wallet that reads $7.71.
+- **Our impact:** median ETH in the pool at our entry is **3.512** (p10 2.917), so $1 is
+  0.016% of depth, $10 is 0.16%, **$100 is 1.60% — 1.9% at the p10 pool.** The simulated
+  sell does not contain our own buy, so **the $100 column is optimistic by about that
+  much**, which is the only column that clears gas.
+
+**WHAT WOULD REFUTE THIS.** An exit rule whose held-out SUM is positive by more than two
+standard errors — on these same stored paths, at zero RPC cost, in `bot_trade_path`. Any
+such rule must be named before it is scored, or it is a new hypothesis needing a fresh
+holdout.
+
+**ONE HONEST WEAKNESS IN THE DESIGN, STATED RATHER THAN BURIED.** The median-block split
+put only **48** signal-firing launches in the training half against 331 in the holdout,
+because the signal fires overwhelmingly in the post-§6J regime which *is* the later half.
+**A rule chosen on 48 observations is a weak choice.** It does not rescue the result —
+**eight of the nine rules are negative on the holdout and the ninth is zero** — but a
+future pass wanting a fair selection needs a population that spans the regime evenly, and
+that population does not exist yet because the regime is six days old.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4G-1:**
