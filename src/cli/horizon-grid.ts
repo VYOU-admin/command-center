@@ -260,7 +260,17 @@ async function main(): Promise<void> {
 
     for (const grp of ['POOLS_TRADE', 'CONTROL']) {
       const out: string[] = [];
-      out.push('entry  hold     n   dead%  pulled%    p10     p25   median     p75     p90');
+      /*
+       * **THE MEAN AND THE SUM ARE REPORTED BESIDE THE MEDIAN, AND FOR THIS QUESTION
+       * THEY MATTER MORE.** This document's standing rule is medians not means, and
+       * that rule is about not letting one outlier speak for a population. A TAIL
+       * STRATEGY is the one case where the outlier IS the thesis: you accept most
+       * positions going to zero because the winners pay for them, and such a strategy
+       * is judged on the SUM over the sample, not on its median. Both are printed so
+       * neither can be quoted alone.
+       */
+      out.push('entry  hold     n   dead%  pulled%    p10     p25   median     p75     p90'
+        + '     mean      SUM   win%     best');
       for (const e of ENTRIES) {
         for (const [name, hb] of HOLDS) {
           const cell = rows.filter((r) => r.grp === grp && r.entry_offset === e
@@ -274,12 +284,18 @@ async function main(): Promise<void> {
             : -1);
           const dead = cell.filter((r) => r.sell_executes === false).length;
           const pulled = cell.filter((r) => r.liq_withdrawn_by_then === true).length;
+          const sum = rets.reduce((x, y) => x + y, 0);
+          const mean = sum / rets.length;
+          const wins = rets.filter((x) => x > 0).length;
           out.push(`+${String(e).padStart(3)}  ${name.padEnd(5)} ${String(cell.length).padStart(4)} `
             + `${(100 * dead / cell.length).toFixed(0).padStart(5)}% `
             + `${(100 * pulled / cell.length).toFixed(0).padStart(7)}% `
             + `${pc(quant(rets, 0.10)).padStart(7)} ${pc(quant(rets, 0.25)).padStart(7)} `
             + `${pc(med(rets)).padStart(7)} ${pc(quant(rets, 0.75)).padStart(7)} `
-            + `${pc(quant(rets, 0.90)).padStart(7)}`);
+            + `${pc(quant(rets, 0.90)).padStart(7)} `
+            + `${pc(mean).padStart(8)} ${sum.toFixed(2).padStart(8)} `
+            + `${(100 * wins / rets.length).toFixed(0).padStart(4)}% `
+            + `${pc(Math.max(...rets)).padStart(8)}`);
         }
       }
       log.info(`*** 4D-1  ${grp} — THE GRID ***`, {
