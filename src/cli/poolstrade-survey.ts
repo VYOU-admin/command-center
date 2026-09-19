@@ -298,17 +298,67 @@ async function main(): Promise<void> {
         + 'sell. 6A.3 is the record of confusing those. 4C answers that.',
     });
 
-    const liqZero = async (ls: Log[]): Promise<{ n: number; zero: number; unread: number }> => {
-      let zero = 0; let unread = 0;
+    /*
+     * ===================================================================
+     * A ZERO `liquidity` IS NOT NECESSARILY A PULLED POSITION
+     * ===================================================================
+     *
+     * The v4 pool state's `liquidity` at offset 3 is the **ACTIVE liquidity at the
+     * current tick**, not the position's existence. A single-sided position has a
+     * bounded range; if the price moves outside it, `liquidity` reads 0 while the
+     * position is untouched. **Reporting that as a rug would be exactly the
+     * measure-the-wrong-quantity error §6A.3 records.**
+     *
+     * So every zero is followed up with the PoolManager's own ERC-20 balance of the
+     * token. The PoolManager is the singleton that custodies every v4 pool's reserves,
+     * and these tokens are days old with one canonical pool each, so its balance is
+     * effectively that pool's reserve.
+     *
+     *   liquidity 0, PoolManager still holds the token  ->  OUT OF RANGE, not pulled
+     *   liquidity 0, PoolManager holds nothing          ->  the tokens LEFT. Pulled.
+     *
+     * The two are reported separately and never summed.
+     */
+    const BALANCE_OF = '0x70a08231';
+    const liqZero = async (ls: Log[], label: string): Promise<{
+      n: number; zero: number; unread: number; outOfRange: number; drained: number;
+      examples: string[];
+    }> => {
+      let zero = 0; let unread = 0; let outOfRange = 0; let drained = 0;
+      const examples: string[] = [];
       for (const l of ls) {
-        const liq = await readPoolLiquidity(rpc, (l.topics[1] ?? '').toLowerCase(), 'latest');
-        if (liq === null) unread += 1; else if (liq === 0n) zero += 1;
+        const pid = (l.topics[1] ?? '').toLowerCase();
+        const liq = await readPoolLiquidity(rpc, pid, 'latest');
+        if (liq === null) { unread += 1; continue; }
+        if (liq !== 0n) continue;
+        zero += 1;
+        const c0 = addrTopic(l.topics[2] ?? '');
+        const c1 = addrTopic(l.topics[3] ?? '');
+        const token = c0 === '0x0000000000000000000000000000000000000000' ? c1 : c0;
+        let bal: bigint | null = null;
+        try {
+          const r = String(await rpc.call('eth_call', [{
+            to: token, data: BALANCE_OF + '0'.repeat(24) + POOL_MANAGER.slice(2),
+          }, 'latest']));
+          if (r.startsWith('0x') && r.length >= 66) bal = BigInt(r);
+        } catch { bal = null; }
+        if (bal !== null && bal > 0n) outOfRange += 1; else drained += 1;
+        if (examples.length < 8) {
+          examples.push(`${pid.slice(0, 18)} token=${token.slice(0, 12)} `
+            + `PoolManager_balance=${bal === null ? 'UNREADABLE'
+              : bal === 0n ? 'ZERO — the tokens LEFT'
+                : `${(Number(bal) / 1e18).toFixed(0)} — still custodied, OUT OF RANGE`}`);
+        }
       }
-      return { n: ls.length, zero, unread };
+      log.info(`zero-liquidity follow-up: ${label}`, {
+        zero_liquidity: zero, still_custodied_OUT_OF_RANGE: outOfRange,
+        PoolManager_holds_NOTHING_pulled: drained, examples,
+      });
+      return { n: ls.length, zero, unread, outOfRange, drained, examples };
     };
-    const ptR = await liqZero(ptS);
-    const secR = await liqZero(secS);
-    const otR = await liqZero(otS);
+    const ptR = await liqZero(ptS, 'POOLS.TRADE CANONICAL');
+    const secR = await liqZero(secS, "POOLS.TRADE TOKEN, SOMEONE ELSE'S POOL");
+    const otR = await liqZero(otS, 'EVERYTHING ELSE');
     const share = (r: { n: number; zero: number; unread: number }): string => {
       const d = r.n - r.unread;
       return d === 0 ? 'NO READABLE POOLS' : `${(100 * r.zero / d).toFixed(1)}%`;
@@ -325,9 +375,17 @@ async function main(): Promise<void> {
       why_three_groups: 'the middle group is the trap: a bot filtering on "this token '
         + 'came from Pools.trade" buys unlocked copies of locked tokens',
       same_window_both: `${wFrom}..${wTo}`,
+      /*
+       * THE VERDICT TURNS ON `drained`, NOT ON `zero`. A pool whose price left the
+       * position's range reads zero liquidity with the position intact, and calling
+       * that a rug would measure the wrong quantity.
+       */
+      DRAINED_pools_trade_canonical: `${ptR.drained} of ${ptR.n}`,
+      DRAINED_everything_else: `${otR.drained} of ${otR.n}`,
       verdict: ptR.n - ptR.unread === 0 ? 'NO POOLS.TRADE POOLS READABLE — proves nothing'
-        : ptR.zero === 0 ? 'LOCK HOLDS on this sample: not one pool went to zero'
-          : 'LOCK DOES NOT HOLD — see the share',
+        : ptR.drained === 0
+          ? 'LOCK HOLDS: no canonical pool had its tokens leave the PoolManager'
+          : `LOCK DOES NOT HOLD LITERALLY: ${ptR.drained} canonical pool(s) drained`,
       cu: inner.cuSpent,
     });
   } finally { c.release(); await app.pool.end(); }
