@@ -229,3 +229,26 @@ UNTOUCHED    the two conditions above, tested as a standalone statement
 4. A fresh-window deep rate of exactly zero again in the top bucket. That is
    listed as a REFUTATION, not a success: it would indicate the outcome
    measurement cannot register a collapse in that subgroup, i.e. a defect.
+
+## THE CUT, PINNED NUMERICALLY BEFORE THE FRESH WINDOW WAS READ
+
+Computed on the old 371-launch training sample only, 2026-09-19, before any fresh
+block was fetched:
+
+```
+eth_in_total 25th percentile = 3.6931 ETH        <- the UNTOUCHED threshold
+```
+
+On the training sample this selects **55 of 371 = 14.8%** of gated launches:
+
+```
+                        n    median     mean    deep%
+training untouched     55    +13.8%   +14.6%     3.6%
+training whole sample 371     +7.8%    +2.8%    11.6%
+```
+
+The fresh test uses **3.6931 ETH as an absolute number**, not a percentile
+recomputed on the fresh window. Recomputing it there would let the threshold
+chase the new data, and the pre-registered share check (8-30%) would then be
+unable to detect a population shift — it would be guaranteed to pass by
+construction.
