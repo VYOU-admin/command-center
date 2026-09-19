@@ -107,9 +107,15 @@ async function main(): Promise<void> {
       `select lower(wallet) as wallet, max(score)::text as score
          from wallet_scores where chain = $1 group by 1`, [CHAIN])).rows
       .map((r) => [r.wallet, Number(r.score)]));
-    /* Symbols already in use, for the collision feature. */
+    /*
+     * Symbols already in use, for the collision feature. **The column is `ticker`, not
+     * `symbol`** — `ROBINHOOD.md` step 12 records the `tokens` shape as
+     * `mint, chain, ticker, name, decimals, charted_pair, created_at, role`, and the
+     * first attempt at this query died on `column "symbol" does not exist`. Read the
+     * schema, do not assume it.
+     */
     const knownSymbols = new Set((await c.query<{ s: string }>(
-      `select distinct lower(symbol) as s from tokens where symbol is not null`)).rows
+      `select distinct lower(ticker) as s from tokens where ticker is not null`)).rows
       .map((r) => r.s));
 
     log.info('5B  BEFORE THE FIRST PAID CALL', {
