@@ -401,30 +401,69 @@ export async function checkSellable(
     tokensOut = d.actual;
   }
 
-  /* ---- 2. SLOT DISCOVERY, verified by read-back --------------------------- */
+  /*
+   * ---- 2. SLOT DISCOVERY, verified by read-back ---------------------------
+   *
+   * **THIS CARRIES BOTH FIXES §6E.1 MADE TO `simulateSellAt`, AND IT IS THE LIVE GATE,
+   * SO IT MATTERED MORE HERE THAN THERE.** Before them this function would have
+   * returned `slots_not_found` for **every Pools.trade token** — the exact population
+   * §6E.3 measures at **0 of 256 unsellable** — and `launchbot.ts` treats a non-`ok`
+   * verdict as a refusal to buy. The gate would have rejected the safest launches on
+   * the chain, for a reason that was a defect in our own probe.
+   *
+   * 1. `eth_createAccessList` is asked FIRST, because the integer scan cannot see a
+   *    namespaced storage layout. The integer scan remains as the fallback.
+   * 2. The allowance is READ before a slot is required. Pools.trade tokens hard-code an
+   *    infinite Permit2 allowance and touch no storage answering `allowance()`, so
+   *    there is no slot to find and none is needed. The absence of a slot was being
+   *    read as an inability to measure.
+   */
   const balData = `0x70a08231${owner.slice(2).padStart(64, '0')}`;
-  let balSlot: number | null = null;
-  for (let i = 0; i < MAX_SLOT; i += 1) {
-    try {
-      const r = await call([{ to: token, data: balData }, 'latest',
-        { [token]: { stateDiff: { [mapSlot(owner, i)]: h32(MAGIC) } } }]);
-      if (BigInt(r) === MAGIC) { balSlot = i; break; }
-    } catch { /* a token that cannot answer balanceOf falls through to UNKNOWN */ }
-  }
   const alData = `0xdd62ed3e${owner.slice(2).padStart(64, '0')}`
     + PERMIT2.slice(2).padStart(64, '0');
+  const verifyBal = async (slot: string): Promise<boolean> => {
+    const r = await call([{ to: token, data: balData }, 'latest',
+      { [token]: { stateDiff: { [slot]: h32(MAGIC) } } }]);
+    return BigInt(r) === MAGIC;
+  };
+  const verifyAllow = async (slot: string): Promise<boolean> => {
+    const r = await call([{ to: token, data: alData }, 'latest',
+      { [token]: { stateDiff: { [slot]: h32(MAGIC) } } }]);
+    return BigInt(r) === MAGIC;
+  };
+
+  let allowanceAlreadySufficient = false;
+  try {
+    const cur = await call([{ to: token, data: alData }, 'latest']);
+    if (cur.startsWith('0x') && cur.length >= 66 && BigInt(cur) >= tokensOut) {
+      allowanceAlreadySufficient = true;
+    }
+  } catch { /* unreadable: fall through to discovery */ }
+
+  let balKey = await slotByAccessList(rpc, token, balData, 'latest', verifyBal);
+  let allowKey = allowanceAlreadySufficient
+    ? null : await slotByAccessList(rpc, token, alData, 'latest', verifyAllow);
+
+  let balSlot: number | null = null;
+  if (balKey === null) {
+    for (let i = 0; i < MAX_SLOT; i += 1) {
+      try {
+        if (await verifyBal(mapSlot(owner, i))) {
+          balSlot = i; balKey = mapSlot(owner, i); break;
+        }
+      } catch { /* a token that cannot answer balanceOf falls through to UNKNOWN */ }
+    }
+  }
   let allowSlot: number | null = null;
-  if (balSlot !== null) {
+  if (allowKey === null && !allowanceAlreadySufficient && balKey !== null) {
     for (let i = 0; i < MAX_SLOT; i += 1) {
       const slot = keccak256(concat([h32(PERMIT2), mapSlot(owner, i)]));
       try {
-        const r = await call([{ to: token, data: alData }, 'latest',
-          { [token]: { stateDiff: { [slot]: h32(MAGIC) } } }]);
-        if (BigInt(r) === MAGIC) { allowSlot = i; break; }
+        if (await verifyAllow(slot)) { allowSlot = i; allowKey = slot; break; }
       } catch { /* same */ }
     }
   }
-  if (balSlot === null || allowSlot === null) {
+  if (balKey === null || (allowKey === null && !allowanceAlreadySufficient)) {
     /*
      * FAIL CLOSED, AND SAY WHICH WAY. A token whose storage we cannot model is a token
      * whose sell we cannot simulate, and an unknown here is not a pass. It is reported
@@ -432,7 +471,8 @@ export async function checkSellable(
      * the two mean different things about the population and must not be summed.
      */
     return { ...base, reason: 'slots_not_found',
-      detail: `bal=${String(balSlot)} allow=${String(allowSlot)}`,
+      detail: `bal=${balKey ?? 'none'} allow=${allowKey ?? 'none'}`
+        + `${allowanceAlreadySufficient ? ' (allowance already infinite)' : ''}`,
       tokensOut, balSlot, allowSlot, codeBytes, calls };
   }
 
@@ -446,8 +486,11 @@ export async function checkSellable(
   const overrides = {
     ...ethBalOverride,
     [token]: { stateDiff: {
-      [mapSlot(owner, balSlot)]: h32(tokensOut),
-      [keccak256(concat([h32(PERMIT2), mapSlot(owner, allowSlot)]))]: h32((1n << 256n) - 1n),
+      /* THE VERIFIED KEYS, not a re-derivation from an integer — a namespaced layout
+       * has no integer to re-derive from, and re-deriving is the
+       * two-implementations-of-one-rule trap this document records six times. */
+      [balKey]: h32(tokensOut),
+      ...(allowKey === null ? {} : { [allowKey]: h32((1n << 256n) - 1n) }),
     } },
     [PERMIT2]: { stateDiff: { [p2slot]: h32((PERMIT2_EXPIRY << 160n) | MAXU160) } },
   };
