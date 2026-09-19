@@ -300,92 +300,111 @@ async function main(): Promise<void> {
 
     /*
      * ===================================================================
-     * A ZERO `liquidity` IS NOT NECESSARILY A PULLED POSITION
+     * THE DISCRIMINATING TEST: `ModifyLiquidity` WITH A NEGATIVE DELTA
      * ===================================================================
      *
-     * The v4 pool state's `liquidity` at offset 3 is the **ACTIVE liquidity at the
-     * current tick**, not the position's existence. A single-sided position has a
-     * bounded range; if the price moves outside it, `liquidity` reads 0 while the
-     * position is untouched. **Reporting that as a rug would be exactly the
-     * measure-the-wrong-quantity error §6A.3 records.**
+     * Two weaker tests were tried and both are recorded because each failed in a
+     * different, instructive way.
      *
-     * So every zero is followed up with the PoolManager's own ERC-20 balance of the
-     * token. The PoolManager is the singleton that custodies every v4 pool's reserves,
-     * and these tokens are days old with one canonical pool each, so its balance is
-     * effectively that pool's reserve.
+     * **1. `liquidity == 0` is the wrong quantity.** The v4 pool state's `liquidity` at
+     * offset 3 is the ACTIVE liquidity at the current tick, not the position's
+     * existence. A single-sided position has a bounded range, and when price leaves it
+     * the field reads 0 with the position untouched. Reporting that as a rug is the
+     * measure-the-wrong-quantity error §6A.3 records.
      *
-     *   liquidity 0, PoolManager still holds the token  ->  OUT OF RANGE, not pulled
-     *   liquidity 0, PoolManager holds nothing          ->  the tokens LEFT. Pulled.
+     * **2. "Does the PoolManager still hold the token" DOES NOT DISCRIMINATE.** It came
+     * back `0 of 150` drained for the Pools.trade sample AND `0 of 150` for the control.
+     * A test that returns the same answer for both groups is not a test — it is the
+     * "a guard that fires in both directions is an outage, not a guard" shape. The
+     * PoolManager is a singleton custodying every pool's reserves, so its balance never
+     * cleanly reaches zero.
      *
-     * The two are reported separately and never summed.
+     * **The exact thing being asked is "was liquidity withdrawn from this pool", and v4
+     * emits exactly that.** `ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)`
+     * — topic derived from the signature and CONFIRMED against real logs on BCAT's pool,
+     * matching `ROBINHOOD.md`'s truncated `0xf208f491…`. Data word 2 is
+     * `liquidityDelta`, a signed int256: **negative means removed.**
+     *
+     * One sparse `eth_getLogs` per pool, `topics = [ModifyLiquidity, poolId]`.
      */
-    const BALANCE_OF = '0x70a08231';
-    const liqZero = async (ls: Log[], label: string): Promise<{
-      n: number; zero: number; unread: number; outOfRange: number; drained: number;
-      examples: string[];
-    }> => {
-      let zero = 0; let unread = 0; let outOfRange = 0; let drained = 0;
+    const MODIFY_LIQUIDITY =
+      '0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec';
+    const i256 = (w: string): bigint => {
+      const v = BigInt(`0x${w}`);
+      return v >= (1n << 255n) ? v - (1n << 256n) : v;
+    };
+
+    interface LockResult {
+      n: number; withdrawn: number; unread: number; noEvents: number;
+      activeZero: number; examples: string[];
+    }
+    const lockTest = async (ls: Log[], label: string): Promise<LockResult> => {
+      let withdrawn = 0; let unread = 0; let noEvents = 0; let activeZero = 0;
       const examples: string[] = [];
       for (const l of ls) {
         const pid = (l.topics[1] ?? '').toLowerCase();
         const liq = await readPoolLiquidity(rpc, pid, 'latest');
-        if (liq === null) { unread += 1; continue; }
-        if (liq !== 0n) continue;
-        zero += 1;
-        const c0 = addrTopic(l.topics[2] ?? '');
-        const c1 = addrTopic(l.topics[3] ?? '');
-        const token = c0 === '0x0000000000000000000000000000000000000000' ? c1 : c0;
-        let bal: bigint | null = null;
+        if (liq === 0n) activeZero += 1;
+        let evs: Log[] | null = null;
         try {
-          const r = String(await rpc.call('eth_call', [{
-            to: token, data: BALANCE_OF + '0'.repeat(24) + POOL_MANAGER.slice(2),
-          }, 'latest']));
-          if (r.startsWith('0x') && r.length >= 66) bal = BigInt(r);
-        } catch { bal = null; }
-        if (bal !== null && bal > 0n) outOfRange += 1; else drained += 1;
-        if (examples.length < 8) {
-          examples.push(`${pid.slice(0, 18)} token=${token.slice(0, 12)} `
-            + `PoolManager_balance=${bal === null ? 'UNREADABLE'
-              : bal === 0n ? 'ZERO — the tokens LEFT'
-                : `${(Number(bal) / 1e18).toFixed(0)} — still custodied, OUT OF RANGE`}`);
+          evs = (await rpc.call('eth_getLogs', [{
+            address: POOL_MANAGER, topics: [MODIFY_LIQUIDITY, pid],
+            fromBlock: `0x${Number(BigInt(l.blockNumber)).toString(16)}`,
+            toBlock: 'latest',
+          }])) as Log[];
+        } catch { unread += 1; continue; }
+        if (evs.length === 0) { noEvents += 1; continue; }
+        const deltas = evs.map((e) => i256(e.data.slice(2).slice(128, 192)));
+        const neg = deltas.filter((d2) => d2 < 0n);
+        if (neg.length > 0) {
+          withdrawn += 1;
+          if (examples.length < 8) {
+            examples.push(`${pid.slice(0, 18)} ${evs.length} ModifyLiquidity, `
+              + `${neg.length} NEGATIVE, largest removal ${(-neg.reduce(
+                (a2, b2) => a2 < b2 ? a2 : b2, 0n)).toString()}`);
+          }
         }
       }
-      log.info(`zero-liquidity follow-up: ${label}`, {
-        zero_liquidity: zero, still_custodied_OUT_OF_RANGE: outOfRange,
-        PoolManager_holds_NOTHING_pulled: drained, examples,
+      log.info(`LOCK TEST — ${label}`, {
+        pools: ls.length,
+        pools_with_a_NEGATIVE_liquidityDelta: withdrawn,
+        share: ls.length === 0 ? 'n/a' : `${(100 * withdrawn / ls.length).toFixed(1)}%`,
+        pools_with_NO_ModifyLiquidity_events_at_all: noEvents,
+        active_liquidity_currently_zero: activeZero,
+        note: 'active_liquidity_zero is reported separately and is NOT a withdrawal: '
+          + 'an out-of-range position reads zero',
+        getLogs_failed: unread,
+        examples: examples.length === 0
+          ? ['NONE — no pool in this sample had liquidity withdrawn'] : examples,
       });
-      return { n: ls.length, zero, unread, outOfRange, drained, examples };
-    };
-    const ptR = await liqZero(ptS, 'POOLS.TRADE CANONICAL');
-    const secR = await liqZero(secS, "POOLS.TRADE TOKEN, SOMEONE ELSE'S POOL");
-    const otR = await liqZero(otS, 'EVERYTHING ELSE');
-    const share = (r: { n: number; zero: number; unread: number }): string => {
-      const d = r.n - r.unread;
-      return d === 0 ? 'NO READABLE POOLS' : `${(100 * r.zero / d).toFixed(1)}%`;
+      return { n: ls.length, withdrawn, unread, noEvents, activeZero, examples };
     };
 
-    log.info('*** 4B  THE HEADLINE — LIQUIDITY AT ZERO, 24-48 H AFTER CREATION ***', {
-      POOLS_TRADE_CANONICAL: `${ptR.zero} of ${ptR.n - ptR.unread} at ZERO = ${share(ptR)}`
-        + ` (unreadable ${ptR.unread})`,
+    const ptR = await lockTest(ptS, 'POOLS.TRADE CANONICAL');
+    const secR = await lockTest(secS, "POOLS.TRADE TOKEN, SOMEONE ELSE'S POOL");
+    const otR = await lockTest(otS, 'EVERYTHING ELSE');
+    const share = (r: LockResult): string =>
+      r.n === 0 ? 'NO POOLS' : `${(100 * r.withdrawn / r.n).toFixed(1)}%`;
+
+    log.info('*** 4B  THE HEADLINE — WAS LIQUIDITY WITHDRAWN? ***', {
+      method: 'ModifyLiquidity with a negative liquidityDelta, per pool, from its '
+        + 'creation block to latest. The exact event for the exact question.',
+      window_both_groups: `${wFrom}..${wTo} (created 24-48 h ago)`,
+      POOLS_TRADE_CANONICAL: `${ptR.withdrawn} of ${ptR.n} withdrawn = ${share(ptR)}`,
       POOLS_TRADE_TOKEN_SOMEONE_ELSES_POOL:
-        `${secR.zero} of ${secR.n - secR.unread} at ZERO = ${share(secR)}`
-        + ` (unreadable ${secR.unread})`,
-      EVERYTHING_ELSE: `${otR.zero} of ${otR.n - otR.unread} at ZERO = ${share(otR)}`
-        + ` (unreadable ${otR.unread})`,
-      why_three_groups: 'the middle group is the trap: a bot filtering on "this token '
-        + 'came from Pools.trade" buys unlocked copies of locked tokens',
-      same_window_both: `${wFrom}..${wTo}`,
-      /*
-       * THE VERDICT TURNS ON `drained`, NOT ON `zero`. A pool whose price left the
-       * position's range reads zero liquidity with the position intact, and calling
-       * that a rug would measure the wrong quantity.
-       */
-      DRAINED_pools_trade_canonical: `${ptR.drained} of ${ptR.n}`,
-      DRAINED_everything_else: `${otR.drained} of ${otR.n}`,
-      verdict: ptR.n - ptR.unread === 0 ? 'NO POOLS.TRADE POOLS READABLE — proves nothing'
-        : ptR.drained === 0
-          ? 'LOCK HOLDS: no canonical pool had its tokens leave the PoolManager'
-          : `LOCK DOES NOT HOLD LITERALLY: ${ptR.drained} canonical pool(s) drained`,
+        `${secR.withdrawn} of ${secR.n} withdrawn = ${share(secR)}`,
+      EVERYTHING_ELSE: `${otR.withdrawn} of ${otR.n} withdrawn = ${share(otR)}`,
+      /* Reported beside it, explicitly NOT as a withdrawal. */
+      active_liquidity_zero_canonical: `${ptR.activeZero} of ${ptR.n}`,
+      active_liquidity_zero_control: `${otR.activeZero} of ${otR.n}`,
+      verdict: ptR.n === 0 ? 'NO CANONICAL POOLS SAMPLED — proves nothing'
+        : ptR.withdrawn === 0 && otR.withdrawn > 0
+          ? 'LOCK HOLDS AND THE TEST DISCRIMINATES: zero withdrawals in the canonical '
+            + 'set against a non-zero control'
+          : ptR.withdrawn === 0 && otR.withdrawn === 0
+            ? 'NON-DISCRIMINATING: neither group shows a withdrawal, so this says '
+              + 'nothing about the lock'
+            : `LOCK DOES NOT HOLD: ${ptR.withdrawn} canonical pool(s) withdrawn`,
       cu: inner.cuSpent,
     });
   } finally { c.release(); await app.pool.end(); }
