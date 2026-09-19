@@ -5433,7 +5433,210 @@ for. Testing it needs a WebSocket subscription we have never opened.
 
 ---
 
+## 6D. POOLS.TRADE — 4A AND 4B, 2026-09-19
+
+Part 3 checked NOXA (dead) and The Odyssey (4 launches) and **never looked at
+Pools.trade, Uniswap Labs' own launchpad.** This is that check. **No live trading; the
+chain-wide halt stayed set throughout.**
+
+### 6D.1 A CORRECTION FIRST: `0x58daec…` IS NOT A LAUNCHPAD
+
+**MEASURED, from the contract's own views:**
+
+```
+0x58daec3116aae6d93017baaea7749052e8a04fa7
+  name()   = "Uniswap v4 Positions NFT"
+  symbol() = "UNI-V4-POSM"
+```
+
+**It is the Uniswap v4 PositionManager.** `ROBINHOOD.md` section 8 calls it "a
+launchpad", built a finding on it — *"the dominant launchpad decayed five-fold"* — and
+**I repeated that claim in Part 3 and in §6C.** It is wrong.
+
+So `tx.to` on an `Initialize` transaction is **not a launchpad identifier at all.** Both
+values we ever saw are Uniswap's own contracts:
+
+| address | what it actually is |
+|---|---|
+| `0x8366a39cc670…` | the **PoolManager** — `initialize()` called directly |
+| `0x58daec3116aa…` | the **PositionManager** — initialize + mint via `multicall` |
+
+A real launchpad sits in front of both. **Every conclusion in §6C that used the word
+"launchpad" for these two is really about which Uniswap entry point was used**, and
+`ROBINHOOD.md`'s decay finding rests on the same misidentification. The filters still
+measured something real; the label was wrong.
+
+### 6D.2 4A — Pools.trade, identified on chain
+
+All three claimed addresses carry code. [MEASURED]
+
+```
+factory         0x000000e200088d55c39a11f609e5f667729ad49b   13,380 bytes
+entry, current  0x0000ffffbe8efe702c8703ae3477ff5de3d319c0    4,127 bytes
+entry, original 0x00004c4ccc709ef590f7c81102c0689f0263d4e9    3,747 bytes
+```
+
+**The factory emits exactly ONE event.** Found by pulling its logs with **no topic
+filter** and grouping by `topic0`, per the rule that a topic is never taken on trust:
+
+```
+topic0  0x4ef8284ecf42d4cd19686572ffd87f630858c82398911e776cb831de35eddbf4
+        1 topic, 512 data bytes — everything unindexed
+        data word 0 = the token; then a metadata tuple of four strings
+```
+
+Word 0 being the token was confirmed by `symbol()` resolving on six consecutive
+records — **BCAT, Bcat, WhiteBull, ASKR, BabyChimp, BIDDY** — not by reading the ABI.
+
+**THE FACTORY IS SWEPT, NOT THE ENTRY CONTRACTS, AND THAT IS THE POINT.** The brief
+warns that Crowd Launch auctions fire from a fresh contract per auction and that
+filtering on the current entry contract drops ~40% of launches. The **factory address is
+constant**, so sweeping it catches every launch whatever entry point produced it.
+
+**One launch, decoded end to end** — BCAT, `0xb968a173…a90d`: [MEASURED]
+
+```
+TokenCreated   factory, block 66,660,815
+Initialize     SAME BLOCK, SAME TRANSACTION
+               currency0 = 0x0 (native ETH)   currency1 = BCAT
+               fee = 2500 (0.25%)   tickSpacing = 25   hooks = 0x0 (none)
+tx.to          0x0000ffffbe8efe702c8703ae3477ff5de3d319c0   the current entry contract
+tx.value       3.8 ETH                the creator funds it in the creation transaction
+totalSupply    1e27 raw / 18 decimals = exactly 1,000,000,000
+```
+
+**Every structural claim about Pools.trade holds**: fixed 1 billion supply (6 of 6
+records), a v4 pool, 0.25% fee, created atomically with the token.
+
+**The launch rate, from BLOCK NUMBERS.** Part 3 computed a rate from `block_times` and
+undercounted **tenfold** because only 15.6% of rows were dated; this buckets by block
+number over 864,000-block days.
+
+```
+TokenCreated events, 30 days        14,823    distinct tokens 14,823
+launches per day                    median 424    max 1,192
+most recent launch                  326 blocks before the measurement — LIVE
+share of the chain's v4 initializations       602 of 10,456 = 5.76%
+```
+
+**The reported "11,437 launches on 5 August" is a launch-day figure, not a rate.** The
+sustained rate is ~424/day. That is still four orders of magnitude above "a few dozen a
+week", and Pools.trade is **5.76% of this chain's v4 pool creation**, not the majority.
+
+### 6D.3 WHY WE TRADED ZERO OF THEM — WE FILTERED THEM OUT, TWICE
+
+**0 of our 130 rows were Pools.trade tokens, and it is NOT because we never saw them.**
+
+```
+ALLOWED_FEES = [100, 500, 10000]      Pools.trade uses 2500        -> REJECTED
+LAUNCHPADS   = [PositionManager, PoolManager]
+                                      entry is 0x0000ffff…          -> REJECTED
+our own traded fee tiers: {100: 8, 500: 69, 10000: 50, 803369: 3}
+```
+
+The bot's watcher sees these `Initialize` events — exactly one pricing side, native ETH
+paired — and the rule discards every one **on two independent allow-lists, both derived
+from the corpus whose launchpad attribution was wrong.** A filter that matches nothing
+was treated as a finding, at the level of the entry rule itself.
+
+### 6D.4 INSTANT vs CROWD LAUNCH — distinguishable for free
+
+[MEASURED, 120 creating transactions sampled deterministically]
+
+```
+TokenCreated whose transaction ALSO contains an Initialize   111 (92.5%)   fee 2500 on all 111
+TokenCreated with NO same-transaction Initialize               9  (7.5%)
+```
+
+**They are distinguishable at creation time at zero extra cost**: the `Initialize` event
+is either in the same transaction as `TokenCreated` or it is not. An Instant Launch is
+tradeable in the creation block, so **our watcher can see 92.5% of Pools.trade launches
+at the moment they become tradeable.** The remaining 7.5% have no pool at creation and
+are invisible to an `Initialize` watcher until one appears.
+
+`fee = 2500` is a perfect proxy for the canonical pool on this population — **111 of 111
+here and 362 of 362 in the 4B window.**
+
+### 6D.5 4B — THE LOCK. THE HEADLINE NUMBER OF THIS PASS
+
+**TWO WEAKER TESTS WERE TRIED FIRST AND BOTH FAILED, each instructively.**
+
+1. **`liquidity == 0` is the wrong quantity.** The v4 pool state's `liquidity` at offset
+   3 is the **active liquidity at the current tick**, not the position's existence. A
+   single-sided position has a bounded range and reads zero when price leaves it, with
+   the position untouched. Calling that a rug is the measure-the-wrong-quantity error
+   §6A.3 exists to record.
+2. **"Does the PoolManager still hold the token" DOES NOT DISCRIMINATE.** It returned
+   **0 of 150 drained for Pools.trade and 0 of 150 for the control.** A test that gives
+   the same answer to both groups is not a test. The PoolManager is a singleton
+   custodying every pool's reserves, so its balance never cleanly reaches zero.
+
+**The exact question is "was liquidity withdrawn from this pool", and v4 emits exactly
+that.** `ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)`, topic derived from
+the signature and **confirmed against real logs on BCAT's pool**, matching
+`ROBINHOOD.md`'s truncated `0xf208f491…`. Data word 2 is `liquidityDelta`, signed:
+**negative means removed.** One sparse `eth_getLogs` per pool.
+
+**REFUTATION CONDITION, STATED BEFORE THE MEASUREMENT:** any material share of canonical
+Pools.trade pools showing a negative `liquidityDelta` disproves the lock. And separately:
+the test only counts if the **control shows withdrawals** — otherwise a zero means
+nothing.
+
+**Pools created 24–48 hours before the measurement, same window for all three groups:**
+
+| group | n | liquidity WITHDRAWN | active liquidity now 0 |
+|---|---|---|---|
+| **Pools.trade, canonical** (same tx as `TokenCreated`) | 150 | **0 — 0.0%** | 7 (4.7%) |
+| Pools.trade token, **someone else's pool** | 150 | 56 — **37.3%** | 55 (36.7%) |
+| **everything else** | 150 | 55 — **36.7%** | 83 (55.3%) |
+
+**THE LOCK HOLDS, AND THE TEST DISCRIMINATES.** Zero withdrawals across 150 canonical
+pools against ~37% in both controls. Every canonical pool *had* `ModifyLiquidity` events
+— 0 with none — so the filter is not matching nothing; the events exist and are all
+positive (autocompounding fees).
+
+**10 of our 12 live losses were liquidity pulled during the hold. On this population
+that failure mode did not occur once in 150 pools.**
+
+**AND THE TRAP, WHICH IS THE OTHER HALF OF THE RESULT.** Filtering on *"this token came
+from Pools.trade"* rather than *"this is the pool Pools.trade created"* admits **433
+secondary pools a day that other people opened on those tokens, and 37.3% of those have
+liquidity withdrawn — statistically identical to the chain at large.** A bot using the
+loose rule gets unlocked copies of locked tokens. **The correct filter is
+`Initialize.transactionHash == TokenCreated.transactionHash`**, with `fee == 2500` as the
+cheap proxy.
+
+### 6D.6 What 4B does NOT establish
+
+**A held lock is not a sellable position, and §6A.3 is the record of confusing those.**
+A pool can keep every unit of its liquidity and still pay nothing for our tokens — the
+price can collapse inside a locked range, and the token itself can refuse transfers. The
+only measured claim here is that **liquidity was not withdrawn.** Whether we could have
+sold, and at what, is 4C's question and is not answered above.
+
+Also not established: the CREATOR's position. BCAT's creation transaction carried **3.8
+ETH of the creator's own money** [MEASURED], which is consistent with the claim that
+Instant Launch lets the creator buy in the launch block. That is 4E and is not measured
+here.
+
+---
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-19, from Part 4:**
+
+- **`LAUNCHPADS` NAMES TWO UNISWAP CONTRACTS AND CALLS THEM LAUNCHPADS.** Section 6D.1.
+  `0x58daec…` is the v4 PositionManager and `0x8366a3…` is the PoolManager. The rule's
+  primary filter is therefore "which Uniswap entry point was used", not "which
+  launchpad", and `rule.ts`'s own comment describing the launchpad as the productive
+  signal is describing something else.
+- **THE ENTRY RULE DISCARDS EVERY POOLS.TRADE LAUNCH.** Section 6D.3. `ALLOWED_FEES`
+  excludes 2500 and `LAUNCHPADS` excludes the entry contract, so ~424 launches a day
+  with a **measured 0% liquidity-withdrawal rate** are rejected twice over. This is the
+  single highest-value fix on this list.
+- **A LOOSE POOLS.TRADE FILTER IS WORSE THAN NONE.** Section 6D.5. Matching on the
+  token's origin rather than on the creating transaction admits 433 secondary pools a
+  day whose withdrawal rate is 37.3%, indistinguishable from the chain at large.
 
 **ADDED 2026-09-18, from Part 3:**
 
