@@ -174,8 +174,38 @@ export async function simulateSellAt(
     return BigInt(r) === MAGIC;
   };
 
+  /*
+   * ===================================================================
+   * AN ALLOWANCE THAT IS ALREADY INFINITE NEEDS NO SLOT AND NO OVERRIDE
+   * ===================================================================
+   *
+   * **MEASURED, and it is why every Pools.trade token came back `slots_not_found`:**
+   * `allowance(anyone, Permit2)` on those tokens returns `0xffff…ffff` and the access
+   * list for the call is **EMPTY** — the function short-circuits and reads no storage
+   * at all. They hard-code an infinite Permit2 allowance for every holder.
+   *
+   * So there is no allowance slot to find, and the old code treated that as fatal:
+   * `slots_not_found` -> `executes: null` -> the entire population unscored. **The
+   * absence of a slot was the absence of a NEED for one.**
+   *
+   * The allowance is therefore READ FIRST. If it already covers the amount, no override
+   * is written and no slot is required. Only when it does not is a slot needed, and
+   * then a missing one is still fatal.
+   *
+   * This also means **the Permit2 two-step approval deadlock of §6B.9 does not apply to
+   * this population at all** — there is nothing to approve.
+   */
+  let allowanceAlreadySufficient = false;
+  try {
+    const cur = await call([{ to: token, data: alData }, args.block]);
+    if (cur.startsWith('0x') && cur.length >= 66 && BigInt(cur) >= args.amount) {
+      allowanceAlreadySufficient = true;
+    }
+  } catch { /* unreadable: fall through to slot discovery, which may still succeed */ }
+
   let balKey = await slotByAccessList(rpc, token, balData, args.block, verifyBal);
-  let allowKey = await slotByAccessList(rpc, token, alData, args.block, verifyAllow);
+  let allowKey = allowanceAlreadySufficient
+    ? null : await slotByAccessList(rpc, token, alData, args.block, verifyAllow);
 
   /* The integer scan still runs where the access list gave nothing, so an ordinary
    * mapping is found exactly as before and nothing regresses. */
@@ -190,7 +220,7 @@ export async function simulateSellAt(
     }
   }
   let allowSlot: number | null = null;
-  if (allowKey === null && balKey !== null) {
+  if (allowKey === null && !allowanceAlreadySufficient && balKey !== null) {
     for (let i = 0; i < MAX_SLOT; i += 1) {
       const slot = keccak256(concat([h32(PERMIT2), mapSlot(owner, i)]));
       try {
@@ -198,9 +228,11 @@ export async function simulateSellAt(
       } catch { /* same */ }
     }
   }
-  if (balKey === null || allowKey === null) {
+  /* A missing allowance slot is fatal ONLY when an allowance is actually needed. */
+  if (balKey === null || (allowKey === null && !allowanceAlreadySufficient)) {
     return { ethOut: null, reason: 'slots_not_found',
-      detail: `bal=${balKey ?? 'none'} allow=${allowKey ?? 'none'}`,
+      detail: `bal=${balKey ?? 'none'} allow=${allowKey ?? 'none'}`
+        + `${allowanceAlreadySufficient ? ' (allowance already infinite)' : ''}`,
       executes: null, executeReason: 'not_attempted',
       balSlot, allowSlot, calls };
   }
@@ -214,7 +246,9 @@ export async function simulateSellAt(
        * has no integer slot to re-derive from, and re-deriving is the two-
        * implementations-of-one-rule trap this project has recorded six times. */
       [balKey]: h32(args.amount),
-      [allowKey]: h32((1n << 256n) - 1n),
+      /* Only written when one is needed. A token that pre-approves Permit2 has no
+       * allowance slot, and inventing one would write to an unrelated slot. */
+      ...(allowKey === null ? {} : { [allowKey]: h32((1n << 256n) - 1n) }),
     } },
     [PERMIT2]: { stateDiff: { [p2slot]: h32((PERMIT2_EXPIRY << 160n) | MAXU160) } },
   };
