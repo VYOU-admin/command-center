@@ -106,7 +106,8 @@
     "receipt-timing": "node dist/cli/receipt-timing.js",
     "signer-check": "node dist/cli/signer-check.js",
     "resolve-unsellable": "node dist/cli/resolve-unsellable.js",
-    "halt-control": "node dist/cli/halt-control.js"
+    "halt-control": "node dist/cli/halt-control.js",
+    "creator-backfill": "node --enable-source-maps dist/cli/creator-backfill.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
