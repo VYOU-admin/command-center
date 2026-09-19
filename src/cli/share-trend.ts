@@ -103,6 +103,15 @@ async function main(): Promise<void> {
     for (let b = Math.floor(START_BLOCK / BLOCKS_PER_DAY); b * BLOCKS_PER_DAY < END_BLOCK; b += 1) {
       days.push(b);
     }
+    /*
+     * **AND ONE PARTIAL BUCKET FOR THE MOST RECENT BLOCKS.** The whole-bucket loop stops
+     * at the last COMPLETE day, which left 66,528,000..head unmeasured — the very period
+     * §6F sampled and the period 4G-2 needs. It is included and its row is labelled
+     * PARTIAL so a short day is never read as a collapse in launch count.
+     */
+    const partialFrom = END_BLOCK;
+    const partialTo = head - 5_000;
+    if (partialTo > partialFrom) days.push(Math.floor(partialFrom / BLOCKS_PER_DAY) + 1);
 
     log.info('4G-1  BEFORE THE FIRST PAID CALL', {
       reconciliation: 'the §6F and §6I call sites were read side by side and compute the '
@@ -120,14 +129,19 @@ async function main(): Promise<void> {
       `select day_bucket||'|'||pool_id as k from bot_share_trend where chain=$1`, [CHAIN]))
       .rows.map((r) => r.k));
 
-    const perDay: Array<{ d: number; total: number; shares: number[] }> = [];
+    const perDay: Array<{ d: number; total: number; shares: number[];
+      partial: boolean; from: number; to: number }> = [];
 
     for (const d of days) {
-      const from = d * BLOCKS_PER_DAY;
-      const to = Math.min(from + BLOCKS_PER_DAY - 1, END_BLOCK);
+      const isPartial = d * BLOCKS_PER_DAY >= END_BLOCK;
+      const from = isPartial ? partialFrom : d * BLOCKS_PER_DAY;
+      const to = isPartial ? partialTo : Math.min(from + BLOCKS_PER_DAY - 1, END_BLOCK - 1);
       const created = await sweep(rpc, { address: PT_FACTORY, topics: [TOKEN_CREATED] },
         from, to, 900_000);
-      if (created.length === 0) { perDay.push({ d, total: 0, shares: [] }); continue; }
+      if (created.length === 0) {
+        perDay.push({ d, total: 0, shares: [], partial: isPartial, from, to });
+        continue;
+      }
       const ptTxs = new Set(created.map((l) => l.transactionHash.toLowerCase()));
       const inits = await sweep(rpc, { address: POOL_MANAGER, topics: [TOPICS.initializeV4] },
         from, to, 40_000);
@@ -174,8 +188,10 @@ async function main(): Promise<void> {
         `select creator_share::text as s from bot_share_trend where chain=$1 and day_bucket=$2`,
         [CHAIN, d])).rows;
       for (const r of stored) if (r.s !== null) shares.push(Number(r.s));
-      perDay.push({ d, total: canon.length, shares });
-      log.info('day done', { bucket: d, canonical_launches: canon.length, sampled: shares.length });
+      perDay.push({ d, total: canon.length, shares, partial: isPartial,
+        from, to });
+      log.info('day done', { bucket: d, partial: isPartial, from, to,
+        canonical_launches: canon.length, sampled: shares.length });
     }
 
     const out: string[] = [];
@@ -183,13 +199,13 @@ async function main(): Promise<void> {
       + '   >=40%   >=40%/day(INFERRED)');
     for (const r of perDay) {
       if (r.shares.length === 0) {
-        out.push(`${String(r.d).padStart(6)}  ${String(r.d * BLOCKS_PER_DAY).padStart(11)}  `
+        out.push(`${String(r.d).padStart(6)}${r.partial ? '*' : ' '} ${String(r.from).padStart(11)}  `
           + `${String(r.total).padStart(8)}   0   RETURNED NO ROWS`);
         continue;
       }
       const hi = r.shares.filter((s) => s >= 0.40).length;
       const rate = hi / r.shares.length;
-      out.push(`${String(r.d).padStart(6)}  ${String(r.d * BLOCKS_PER_DAY).padStart(11)}  `
+      out.push(`${String(r.d).padStart(6)}${r.partial ? '*' : ' '} ${String(r.from).padStart(11)}  `
         + `${String(r.total).padStart(8)} ${String(r.shares.length).padStart(3)} `
         + `${pc(quant(r.shares, 0.10)).padStart(6)} ${pc(quant(r.shares, 0.25)).padStart(6)} `
         + `${pc(quant(r.shares, 0.50)).padStart(6)} ${pc(quant(r.shares, 0.75)).padStart(6)} `
@@ -201,11 +217,30 @@ async function main(): Promise<void> {
     const inWin = (lo: number, hi: number): number[] => perDay
       .filter((r) => r.d * BLOCKS_PER_DAY >= lo && r.d * BLOCKS_PER_DAY < hi)
       .flatMap((r) => r.shares);
-    const w6I = inWin(63_269_189, 65_861_189);
-    const w6F = inWin(65_815_455, 66_715_455);
+    /*
+     * **THE FIRST RUN'S §6F RECONCILIATION RETURNED n=0 AND THAT WAS MY DEFECT.**
+     * `inWin` selects whole day buckets by their FIRST block, and §6F's window
+     * (65,815,455..66,715,455) starts inside bucket 76 and ends inside bucket 77, which
+     * the loop never created because it is incomplete. So the comparison I most needed
+     * matched nothing — a filter matching nothing is a suspected defect, and reporting
+     * "§6F cannot be reconciled" would have been reporting my own bucket arithmetic as
+     * a fact about the chain.
+     *
+     * Both windows are now measured DIRECTLY, by pool init block, independent of the
+     * bucket grid.
+     */
+    const directWindow = async (lo: number, hi: number): Promise<number[]> =>
+      (await c.query<{ s: string | null }>(
+        `select creator_share::text as s from bot_share_trend
+          where chain=$1 and init_block >= $2 and init_block < $3`, [CHAIN, lo, hi]))
+        .rows.filter((r) => r.s !== null).map((r) => Number(r.s));
+    const w6I = await directWindow(63_269_189, 65_861_189);
+    const w6F = await directWindow(65_815_455, 66_715_455);
 
     log.info('*** 4G-1  CREATOR SHARE PER DAY ***', {
-      note: 'launches = FULL enumeration of canonical Pools.trade launches that day. '
+      note: 'a * marks a PARTIAL bucket — fewer blocks, so its launch COUNT is not '
+        + 'comparable with a full day, though its share distribution is. '
+        + 'launches = FULL enumeration of canonical Pools.trade launches that day. '
         + 'n = sampled pools. ">=40%/day" is launches x sampled rate — INFERRED from a '
         + 'MEASURED rate, not a census.',
       table: out,
