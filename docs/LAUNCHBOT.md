@@ -6777,6 +6777,107 @@ that population does not exist yet because the regime is six days old.
 
 ---
 
+## 6O. 6A — THE DEEP LOSS IS ONE MECHANISM, AND IT IS NOT "THE CREATOR"
+
+379 signal-firing launches (`creator_share >= 40%`). **305 of them — 80.5% — end at or
+below −70%.** This characterises those and nothing else.
+
+### 6O.1 A METHOD THAT PRODUCED A SPECTACULAR FALSE FINDING, AND HOW IT WAS CAUGHT
+
+The first pass attributed each sell by `tx.from` of the swap transaction. It reported
+**22 launches where the creator never sold, median outcome +138.8%, deep-loss rate
+0.0%** — an apparently decisive filter.
+
+**It was an artefact.** These creators sell through a router, so `tx.from` is a relayer
+and not them. Two checks killed it:
+
+```
+creator's token BALANCE at +20 min, "never sold" group    median  0.3% of what they bought
+                                    "did sell" control    median 45.5%          <- backwards
+Transfer logs, "never sold" group   18 of 22 sent a median 58.0% of supply
+                                    STRAIGHT TO THE POOLMANAGER
+```
+
+**The group I had labelled as non-sellers had sold more than the group I had labelled as
+sellers.** The finding was not weak, it was inverted.
+
+**The reliable signal is the ERC-20 `Transfer` from the creator to the PoolManager** —
+that IS the token leaving them into the pool, whoever submitted the transaction, and it
+needs no identity guess. Everything below uses it. The 379 rows measured the old way
+were deleted, not amended.
+
+**Worth recording how it was caught: not by re-reading the logic, but by asking the chain
+a different question — what does this address still hold?** A second view is what
+`ROBINHOOD.md` step 7 requires for exactly this reason, and it is the only thing that
+would have found it.
+
+### 6O.2 THE ANSWER: IT IS ONE MECHANISM — A SINGLE LARGE SELL
+
+| | **deep losers** (n=305) | **the rest** (n=74) |
+|---|---|---|
+| creator sold at all | 265 — **86.9%** | 65 — **87.8%** |
+| **biggest single sell, share of supply** | **42.5%** | **6.2%** |
+| creator's total share sold, median | 58.2% | 43.0% |
+| creator's total, p25 / p75 | 58.2% / 69.6% | 27.2% / 58.0% |
+| creator's first sell, median | **92 s** | 104 s |
+| first sell, p25 / p75 | 48 s / 139 s | 74 s / 167 s |
+| creator sold in ONE transaction | 74 of 265 (28%) | 40 of 65 (62%) |
+
+**The discriminator is the SIZE of the largest single sell: 42.5% of supply against
+6.2%.** Everything else is nearly identical between the two groups — the same share of
+creators sell, at almost the same time.
+
+**AND WHETHER THE CREATOR SELLS DOES NOT PREDICT THE OUTCOME AT ALL:**
+
+```
+creator never sold  (49 of 379, 12.9%)   deep-loss rate  81.6%   median outcome -82.5%
+creator DID sell    (330)                deep-loss rate  80.3%   median outcome -82.5%
+```
+
+**81.6% against 80.3%. Identical.** So the loss is **not** "the creator dumps" — it is
+**a large holder exiting**, and the creator is simply the largest holder in ~87% of
+cases. When they are not, someone else does it and the outcome is the same.
+
+**This reframes the whole pass.** A rule watching *the creator address* would miss the
+13% where someone else sells and would fire on the 87% regardless of whether the sell is
+large enough to matter. **The quantity that separates is the size of the largest sell,
+not its sender.**
+
+### 6O.3 THE TIMING, WHICH IS WHAT 6B AND 6C DEPEND ON
+
+**The creator's first sell lands at a median of 92 seconds — p25 48 s, p75 139 s.**
+
+**Our entry is +15 s.** So on the median launch there are **~77 seconds, roughly 770
+blocks, between our entry and the first sell.** That is not a single-digit window. It
+is enough blocks for a per-block poll to exist — which is 6C's question, and 6C also
+has to establish whether anything is *visible* in those blocks, because §6H.3 measured
+the price going from +2.3% to −82% inside ONE block once the sell lands.
+
+Ten deep losers, individually, showing the shape is consistent:
+
+```
+0x441de7fd2db2  -82.6%  biggest sell 58.2% at 456 s   total sold  70.2%  (81 sells)
+0x854f2fe95e2b  -85.3%  biggest sell 55.3% at  96 s   total sold  71.7%  (87 sells)
+0xe9e0720bb199  -85.1%  biggest sell 36.2% at 1042 s  total sold 130.7% (135 sells)
+```
+
+*(a total above 100% means tokens cycled through the pool more than once — bought back
+and resold, not a decoding error)*
+
+### 6O.4 What 6A settles, and what it does not
+
+- **ONE mechanism, not several.** A single large sell, median 42.5% of supply. Not one
+  deep loser lacks it.
+- **It is NOT specific to the creator.** 12.9% of launches have no creator→pool transfer
+  at all and lose just as often.
+- **It cannot be avoided by watching an address.** The creator is not the discriminator.
+- **The median window between our entry and the first sell is 77 seconds**, which leaves
+  6B and 6C open rather than foreclosed.
+- **NOT TESTED HERE:** whether the size of the *coming* sell is predictable at entry
+  (6B), and whether the sell is visible before inclusion (6C).
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4G-1:**

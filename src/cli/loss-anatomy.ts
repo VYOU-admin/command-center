@@ -264,9 +264,12 @@ async function main(): Promise<void> {
       DID_outcome_median: pc(quant(out(didSell), 0.5)),
       DID_deep_loss_rate: didSell.length === 0 ? 'n/a'
         : pc(didSell.filter((r) => Number(r.outcome) <= DEEP).length / didSell.length),
-      CAVEAT: 'seller identity is resolved on the LARGEST few sells only '
-        + `(${MAX_TX_READS} tx reads per pool), so a creator who sold only in small `
-        + 'pieces reads as "never sold". This is a LOWER BOUND on creator selling.',
+      CAVEAT: 'creator selling is now measured from ERC-20 Transfers creator -> '
+        + 'PoolManager, which needs no identity guess. The remaining blind spot is a '
+        + 'creator who TRANSFERS to another wallet and sells from there: that reads as '
+        + '"never sold" here. Measured on a 22-pool check, 3 of 22 dispersed to other '
+        + 'addresses rather than selling directly, so this is still a LOWER BOUND — but '
+        + 'a much tighter one than the tx.from method it replaced.',
     });
 
     /* INDIVIDUAL RECORDS — an aggregate is a hypothesis. */
