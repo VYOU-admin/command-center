@@ -6265,7 +6265,104 @@ measurable on stored machinery, and neither has been done.**
 
 ---
 
+## 6J. 4G-1 — THE POPULATION IS SHIFTING *TOWARD* THE PROFITABLE BUCKET
+
+### 6J.1 A CORRECTION: §6F.6's "MEDIAN CREATOR SHARE 3.79%" IS WRONG
+
+**Re-measured over §6F.6's own window (65,815,455–66,715,455) by a single code path,
+the median creator share is 58.2%, not 3.79%.** [MEASURED, n=69]
+
+**It is not a method difference, and that was checked two ways rather than argued.**
+Both call sites were read side by side — same `eth_getLogs` filter
+(`topics = [swapV4, poolId]`, the pool's own init block alone), same v4
+swapper-perspective sign convention, same "TOKEN side positive" selection, same 1e27
+denominator. Then the two predicates that *did* differ (`c0 === native ETH` against
+`PRICING.includes(c0)`) were run against each other on **25 individual records: 0
+disagreements, because every canonical Pools.trade pool has `currency0 = native ETH`,
+which makes the difference inert.**
+
+**THE CAUSE IS THAT A MEDIAN IS THE WRONG STATISTIC FOR THIS QUANTITY.** Creator share
+is strongly bimodal [MEASURED, n=1,395 across 30 days]:
+
+```
+  0– 5%   909  ███████████████████████████████████████
+  5–10%   127  █████
+ 10–15%    45  ██
+ 25–30%    61  ███
+ 55–60%   135  ██████        <- the second mode, tight
+ 60–65%     7
+```
+
+**65.2% sit below 5% and a hard spike sits at 55–60%. There is almost nothing in
+between.** With two modes and no middle, the median reports *whichever mode holds the
+majority of the sample* and flips on a modest sampling difference — which is exactly
+what happened between §6F.6's 120 pools and this pass's 69. **§6F.6's 3.79% should be
+read as "the low mode was the majority in that sample", never as a population median.**
+
+This is the same shape `ROBINHOOD.md` records for metric 5, where a statistic kept
+landing on a round function of a configured count and was read as a fact about wallets
+three times. **The robust statistic here is the SHARE AT OR ABOVE 40%**, which is also
+the only one the strategy depends on, and it is what the table below reports.
+
+### 6J.2 THE TREND — AND IT IS THE OPPOSITE OF THE RISK I FLAGGED
+
+Canonical Pools.trade launches per day, full enumeration; creator share sampled at 45
+pools a day. `≥40%/day` is **launches × sampled rate — INFERRED from a MEASURED rate**,
+not a census.
+
+| bucket | first block | launches | n | median | **≥40%** | **≥40%/day** |
+|---|---|---|---|---|---|---|
+| 47–69 | 40.6M–59.6M | 220–1,168 | 45 | 0.0–7.3% | **0.0–8.9%** | 0–41 |
+| 70 | 60,480,000 | 220 | 45 | 3.6% | 0.0% | 0 |
+| 71 | 61,344,000 | 217 | 45 | 4.6% | 2.2% | 5 |
+| **72** | 62,208,000 | 497 | 45 | 5.6% | **11.1%** | 55 |
+| **73** | 63,072,000 | 437 | 45 | 37.4% | **46.7%** | **204** |
+| **74** | 63,936,000 | 432 | 45 | 49.9% | **62.2%** | **269** |
+| **75** | 64,800,000 | 332 | 45 | 58.2% | **66.7%** | **221** |
+| **76** | 65,664,000 | 320 | 45 | 58.2% | **60.0%** | **192** |
+| **78\*** | 66,528,000 | 101\* | 45 | 58.2% | **60.0%** | 61\* |
+
+*\* partial bucket — fewer blocks, so its launch COUNT is not comparable with a full
+day; its share distribution is.*
+
+**THE ≥40% BUCKET IS GROWING, NOT SHRINKING.** It sat at 0–9% for twenty-four days
+(buckets 47–71), stepped up at bucket 72, and has held at **46.7% → 62.2% → 66.7% →
+60.0% → 60.0%** for the five buckets since. **In absolute terms it went from ~0–40
+launches a day to roughly 190–270 a day.**
+
+**THE REGIME CHANGE IS AT BLOCK ~62.2–63.1M** and is a step, not a drift.
+
+### 6J.3 WHAT THIS DOES AND DOES NOT MEAN FOR §6I
+
+**GOOD:** §6I's sample window (63,269,189–65,861,189) sits **entirely inside the new
+regime**, and the most recent measurable days are in the same regime at the same rate.
+**§6I is not describing a regime that has already ended** — that specific risk, the one
+I named as most likely to kill it, is **refuted.**
+
+**BAD, AND IT REPLACES THE OLD RISK WITH A NEW ONE:** the regime is **about five days
+old.** Everything §6I measured, and everything 4G-2 can measure, comes from those same
+five days. **There is no long history to validate against, and a five-day-old regime can
+end as abruptly as it began** — it began abruptly. A step change with no identified
+cause is not a foundation.
+
+**WHAT WOULD REFUTE THE TREND:** the ≥40% rate falling back toward 0–9% in the next
+buckets. That is cheap to re-measure — `share-trend` is pinned, idempotent and costs
+~$0.008 a day to extend.
+
+**I have not projected anything**, per the brief. The table is what was measured; the
+five buckets since the step are what exist.
+
+---
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-19, from Part 4G-1:**
+
+- **§6F.6's "median creator share 3.79%" IS WRONG and is corrected in §6J.1.** The same
+  window re-measures at 58.2%. The quantity is bimodal — 65% below 5%, a spike at
+  55–60%, almost nothing between — so its median flips on a sampling difference. Any
+  figure in this document quoting a *median* creator share is unreliable; the **share at
+  or above 40%** is the statistic to use.
 
 **ADDED 2026-09-19, from Part 4C:**
 
