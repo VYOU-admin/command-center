@@ -7578,6 +7578,197 @@ the only genuinely unseen data that exists. If v2's Spearman is <= 0 there, or i
 dollar P&L fails to beat flat, or its top quintile does not beat the whole-sample
 mean, the section dies.
 
+## 6U. PART 11A/11B — THE SCORE IS A TWO-CONDITION RULE, AND THE LADDER PROTECTS NOTHING
+
+**Status: MEASURED on stored data, zero spend. Correction to §6T issued in 6U.1.**
+
+### 6U.1 CORRECTION TO §6T — it is five features, not six
+
+§6T.2 lists the six features that cleared the screen bar and §6T.3 gives the
+composite. They are **not the same set** and the prose let "six" slide from one
+to the other. The composite uses **five**: it drops `sold_90` and `sp_sold_90`
+(both of which cleared) as near-duplicates of `sold_115`, and it adds `pool_eth`,
+which **did not clear** (rho -0.118 against a 0.167 bar). That substitution was a
+judgement call made in-sample and it is exactly the kind of choice that makes
+something a fit rather than a mechanism.
+
+### 6U.2 What the five features actually are, in plain language
+
+Read off the extraction in `src/cli/loser-tag.ts`, all over blocks 0..1150 only:
+
+| name | what it counts |
+|---|---|
+| `sold_115` | the fraction of the token's **entire supply** that has been sold back into the pool before we buy |
+| `largest_sell` | the **single biggest** sell so far, as a fraction of entire supply |
+| `n_sells` | how many separate sell transactions have hit the pool before we buy |
+| `eth_in_total` | **gross** ETH that buyers have paid into the pool before we buy |
+| `pool_eth` | **net** ETH in the pool: everything buyers paid in, minus everything sellers took out |
+
+**`pool_eth` is not pool depth.** The name is misleading. The code accumulates
+`-amount0` over every swap, which adds on a buy and subtracts on a sell, so it is
+net flow. **Whenever `n_sells == 0` it is arithmetically identical to
+`eth_in_total`** — which is why the two concrete top-quintile cases below print
+the same number twice.
+
+### 6U.3 The weights
+
+There are none to fit. Each feature is converted to its percentile rank **within
+the training window only**, averaged within its family, and the two family
+averages are averaged and negated:
+
+```
+SCORE = - ( mean(pctrank of the 3 sell features) + mean(pctrank of the 2 size features) ) / 2
+```
+
+Effective weight is therefore **1/6 per sell feature and 1/4 per size feature** —
+the size family carries more per feature. Nothing is fitted, so nothing can be
+overfitted except the choice of features and their signs.
+
+### 6U.4 THE COMPOSITE IS 98% A TWO-CONDITION RULE
+
+Out-of-fold top-quintile membership agrees with
+
+```
+n_sells == 0   AND   eth_in_total <= 25th pct of the training window (~3.7 ETH)
+```
+
+on **256 of 260 trades**. Drop-one ablation confirms nothing is load-bearing:
+
+```
+variant                    rho     delta $   q5 n   q5 mean  q5 deep
+FULL (5 features)       +0.248      +83.49     39     16.8%        0
+  drop sold_115         +0.248      +81.00     39     16.8%        0
+  drop largest_sell     +0.243      +93.12     39     16.8%        0
+  drop n_sells          +0.248      +89.62     41     16.7%        0
+  drop eth_in_total     +0.264     +102.58     39     16.8%        0
+  drop pool_eth         +0.236      +83.51     41     16.7%        0
+  largest_sell ALONE    +0.222      +78.84     68     13.6%        2
+  eth_in_total ALONE    +0.224      +79.67     29     13.1%        2
+```
+
+Removing any feature leaves rho within 0.012 of the full composite, and removing
+`eth_in_total` **improves** the dollar result. The best single feature reaches
++0.224 against the full +0.248. The ensemble buys about 0.02 of rho by averaging
+noise, not by combining distinct information.
+
+The reason is visible in the concrete cases: **all three sell features are exactly
+zero throughout the top bucket**, so inside it they carry no information, and the
+two size features are the same number there.
+
+### 6U.5 The plain rule, and where the edge actually lives
+
+```
+                                 n    median     mean    deep%
+untouched (0 sells, low ETH)    62    +14.0%   +14.7%     3.2%
+everything else                309     +6.1%    +0.4%    13.3%
+```
+
+**Essentially the entire edge of §6P lives in the 17% of launches that are
+untouched at +115 s.** The other 83% mean +0.4% before gas, which is a loss after
+it. That is a far stronger and far more testable statement than "a composite
+score sorts trades".
+
+### 6U.6 The mechanism, and it is MEASURED not asserted
+
+Splitting by `sold_115` quartile and following the **median** price path forward
+from our entry at +115 s:
+
+```
+sold_115 quartile   n    +115   +150   +190   +215   +240   +290   +350
+Q1 least sold      84    0.0%   2.5%   9.7%  14.5%  15.3%  26.4%  31.4%
+Q2                 75    0.0%   5.3%   8.9%  11.5%  17.0%  16.1%  20.0%
+Q3                 79    0.0%   0.6%  -0.0%  -0.4%   1.9%   6.4%  11.0%
+Q4 most sold       79    0.0%   3.6%   1.8%   4.3%   0.5%   0.0%  -0.0%
+```
+
+The quartiles separate **after** we buy and keep separating, so this is not
+merely "it already fell". Per-leg increments show why: Q4's median leg return is
+**exactly 0.00% from 215 s onward** — the median heavily-sold pool stops trading
+altogether.
+
+**The mechanism: heavy pre-entry selling marks a launch that has already been
+discovered, distributed and finished. We buy into a pool with no remaining
+demand.** An untouched launch has not had its buying yet, and we are early in the
+demand curve rather than late.
+
+Two competing explanations were tested and **both refuted**:
+
+- *"3.5 ETH is a structural constant, so the rule is an artefact."* **No.**
+  `eth_in_total` deciles run 2.00, 3.57, 3.68, 3.72, 3.92, 4.06, 4.26, 4.49,
+  5.23, 5.62, 8.17. The minimum is 2.00, not a floor at 3.5. The cluster is a
+  dense mode (24% inside [3.40, 3.70]), not a constant.
+- *"The top bucket wins because dead pools cannot move, so a 0% is scored as a
+  non-loss."* **No.** Only **1 of 39** top-quintile trades is an exact zero, and
+  excluding it moves the median from +14.0% to +14.2%. The gains are real price
+  moves.
+
+### 6U.7 11B — THE LADDER PROTECTS NOTHING ON THE DOWNSIDE
+
+```
+ladder                      total P&L    max DD    capital   P&L/cap
+11B $5->$25 ladder            +182.81     57.83       3925     4.66%
+FLAT at same capital ($15.10) +100.28     80.92       3925     2.56%
+6T top-only $15/$25           +164.75     78.78       4290     3.84%
+FLAT $15                       +99.33     80.46       3900     2.55%
+```
+
+The $5->$25 ladder earns **+82% more than flat on identical capital and cuts max
+drawdown by 29%**, so it is the better shape and it is adopted as the reported
+ladder.
+
+**But the answer to the question asked is: the bottom bucket is average.**
+
+```
+bucket   n   size   deep   deep%   $ lost by deep   share of $ lost
+q1      35     $5      4   11.4%          -17.31              6.1%
+q2      62    $10      9   14.5%          -75.44             26.5%
+q3      65    $15      6    9.2%          -75.81             26.6%
+q4      59    $20      7   11.9%         -116.35             40.8%
+q5      39    $25      0    0.0%            0.00              0.0%
+```
+
+q1 holds **15.4% of all deep losses against an even share of 20%** — slightly
+*fewer* than its share. Deep rates across q1-q4 are 11.4 / 14.5 / 9.2 / 11.9,
+which is flat. **The ladder's downside benefit is arithmetic, not selection**: q1
+loses fewer dollars only because $5 is a small number, and it gives up q1's
++13.9% median winners to do it. §6T's -$20.63 was that trade-off measured.
+
+**The entire edge is the top bucket.** Everything below q5 is noise around a mean
+of roughly zero.
+
+### 6U.8 Is it a mechanism or a fit? Both, and they can be separated
+
+- The **two conditions** — nobody has sold, little has been bought — are a
+  mechanism. It is stated in 6U.6, measured on forward price paths, and it
+  survived two attempts to explain it away.
+- The **five-feature composite wrapped around them** is a fit. The ablation shows
+  no feature earns its place, `pool_eth` was included despite failing the screen,
+  and the extra structure buys 0.02 of rho.
+
+The honest position: **treat the two-condition rule as the finding and the
+composite as a ranking convenience for the ladder.** `docs/NAMED-RULE-P11.md`
+commits the stripped rule with its own refutation conditions, including the
+unusual one that a second 0-of-N deep rate would be treated as evidence of a
+measurement defect rather than of a stronger edge.
+
+### 6U.9 Concurrency — MEASURED, and it is small
+
+Positions run from +115 s to +215 s, a 100 s hold. Over the 260 out-of-time
+trades at the measured sample rate:
+
+```
+peak simultaneous positions        2
+peak capital at risk             $50
+median capital at risk           $15
+```
+
+At ~48 gated launches/day a 100 s hold implies 48 x 100/86400 = **0.056 expected
+concurrent positions**. The 9D caveat that "f must be divided by the maximum
+concurrent position count" therefore costs a factor of about 2 at the peak, not
+the several-fold penalty that was feared. **This figure is on the measured sample
+rate, not the full chain launch rate**, and must be re-derived if the bot ever
+trades every launch rather than a sampled subset.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 9C/9D:**
