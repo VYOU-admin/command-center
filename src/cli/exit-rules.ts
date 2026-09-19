@@ -70,8 +70,22 @@ const BLOCKS_PER_DAY = 864_000;
 /** §6G: entry offset is flat within noise, so the earliest reachable one is used. */
 const ENTRY = 1;
 /** Dense where §6G shows the action, coarse after. Blocks at 10/second. */
-const GRID = [0, 10, 30, 50, 100, 150, 300, 600, 900, 1_500, 3_000, 4_500, 6_000,
-  9_000, 12_000, 18_000];
+/**
+ * **THE FIRST GRID UNDER-TESTED THE STOP LOSSES AND THE OUTPUT SAID SO.**
+ * `TP +50% SL -20%` and `TP +50% SL -30%` returned IDENTICAL sums (-22.51) with a p25
+ * of -82.4%. A -20% stop that exits at -82% has not been tested; it has been sampled
+ * too coarsely. Between 150 s and 300 s the old grid had a 150-second hole, and §6G
+ * shows the collapse happening across exactly that span (median -0.4% at 90 s, -11.3%
+ * at 5 m, -60.9% at 15 m). A position falling from -10% to -82% inside one hole gets
+ * filled at -82%.
+ *
+ * **That biases the measurement against the one rule class that could plausibly flip
+ * the sign**, which is the class the whole 4D-2 question turns on. The points below
+ * roughly double the resolution from 20 s to 12 m. Only the new points are paid for —
+ * the stored path makes that cheap, which is what the store is for.
+ */
+const GRID = [0, 10, 30, 50, 100, 150, 200, 300, 400, 600, 750, 900, 1_200, 1_500,
+  2_000, 2_500, 3_000, 3_750, 4_500, 5_250, 6_000, 7_500, 9_000, 12_000, 18_000];
 const CAP_BLOCKS = 9_000;   /* the 15-minute hard cap the brief asks for */
 const PER_GROUP = 200;
 const SIZE_WEI = 562_000_000_000_000n;   /* ~$1 */
