@@ -76,12 +76,25 @@ async function main(): Promise<void> {
 
     const pools = (await c.query<{ pool_id: string; init_block: string; token: string;
       creator: string | null }>(
+      /*
+       * BOTH POPULATIONS: the 379 training pools AND the fresh §7 window, which lives
+       * in `bot_rule_p7` and has no `bot_loss_anatomy` row. The fresh pools are the
+       * holdout for the Part 9 filter, so their entry state has to exist before the
+       * filter can be scored — and it is extracted with the identical code, which is
+       * the point of using one query.
+       */
       `select a.pool_id, a.init_block::text, l.token, f.creator
          from bot_loss_anatomy a
          join bot_runner_label l on l.chain=a.chain and l.pool_id=a.pool_id
          join bot_runner_features f on f.chain=a.chain and f.pool_id=a.pool_id
          left join bot_entry_state e on e.chain=a.chain and e.pool_id=a.pool_id
-        where a.chain=$1 and e.pool_id is null order by a.init_block`, [CHAIN])).rows;
+        where a.chain=$1 and e.pool_id is null
+       union
+       select r.pool_id, r.init_block::text, ''::text as token, null::text as creator
+         from bot_rule_p7 r
+         left join bot_entry_state e on e.chain=r.chain and e.pool_id=r.pool_id
+        where r.chain=$1 and r.passed and e.pool_id is null
+        order by 2`, [CHAIN])).rows;
 
     log.info('9A/9B  BEFORE THE FIRST PAID CALL', {
       pools_to_do: pools.length,
@@ -96,6 +109,20 @@ async function main(): Promise<void> {
     for (const p of pools) {
       const ib = Number(p.init_block);
       const hi = ib + ENTRY_BLOCKS;
+      /* A fresh-window row carries no token; resolve it from the Initialize log. */
+      let token = p.token;
+      if (token === '') {
+        try {
+          const il = (await rpc.call('eth_getLogs', [{
+            address: POOL_MANAGER, topics: [TOPICS.initializeV4, p.pool_id],
+            fromBlock: `0x${ib.toString(16)}`, toBlock: `0x${ib.toString(16)}`,
+          }])) as Log[];
+          if (il.length === 0) continue;
+          const c0 = `0x${(il[0]!.topics[2] ?? '').slice(26)}`.toLowerCase();
+          const c1 = `0x${(il[0]!.topics[3] ?? '').slice(26)}`.toLowerCase();
+          token = c0 === '0x0000000000000000000000000000000000000000' ? c1 : c0;
+        } catch { continue; }
+      }
       let sw: Log[]; let xf: Log[];
       try {
         sw = (await rpc.call('eth_getLogs', [{
@@ -103,7 +130,7 @@ async function main(): Promise<void> {
           fromBlock: `0x${ib.toString(16)}`, toBlock: `0x${hi.toString(16)}`,
         }])) as Log[];
         xf = (await rpc.call('eth_getLogs', [{
-          address: p.token, topics: [TOPICS.transfer],
+          address: token, topics: [TOPICS.transfer],
           fromBlock: `0x${ib.toString(16)}`, toBlock: `0x${hi.toString(16)}`,
         }])) as Log[];
       } catch { continue; }
