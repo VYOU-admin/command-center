@@ -7769,6 +7769,177 @@ the several-fold penalty that was feared. **This figure is on the measured sampl
 rate, not the full chain launch rate**, and must be re-derived if the bot ever
 trades every launch rather than a sampled subset.
 
+## 6V. PART 11C/11D — THE FRESH TEST COULD NOT RUN, AND THE REASON IS THE FINDING
+
+**Status: MEASURED. Spend 13,340 CU ≈ $0.007. Chain-wide halt verified from a
+fresh connection; `bot_trades` unchanged at 130 rows, last 2026-09-17.**
+
+### 6V.1 There is no fresh data, and that is not a scheduling problem
+
+`rule-p7` re-run over blocks 66,528,000..67,473,365 found 195 canonical launches,
+of which **192 were already stored**. Of the 7 canonical launches newer than the
+analysis sample's last row (67,305,971), **ZERO passed the gate.** The rule's
+fresh-window figures are unchanged: n=54, mean +5.48%, SUM 2.96, t=1.187.
+
+**P10-v2 and P11 therefore could not be scored. Not one of their eight
+pre-registered refutation conditions was evaluated.** They remain committed and
+untested.
+
+### 6V.2 Block time — MEASURED, and the assumption was right
+
+Before blaming the schedule, the 10 blocks/s constant the code assumes
+(`ENTRY_BLOCKS = 1150 /* +115 s */`) was measured rather than trusted:
+
+```
+     10,000 blocks over     1,011 s  =>  9.891 blocks/sec
+    173,508 blocks over    17,453 s  =>  9.941 blocks/sec
+    951,479 blocks over    95,835 s  =>  9.928 blocks/sec
+  6,808,471 blocks over   688,920 s  =>  9.883 blocks/sec
+```
+
+**9.88-9.94 blocks/s across four spans including an eight-day one.** The constant
+is right within 1% and every "+115 s" label in this document is sound. The
+hypothesis that the timing was wrong by 10x is refuted.
+
+### 6V.3 THE POPULATION HAS SHIFTED, AND GATE 1 IS WHAT BROKE
+
+```
+bucket  from-block   canon  gate1  gate2  gated   med creator_share
+   462    66530927      54     33     48     27           58.2%
+   463    66672020      37     17     32     16           37.4%
+   464    66818474      37      3     36      3            2.5%
+   465    66962713      20      0     19      0            3.6%
+   466    67112116      29      5     29      5            3.5%
+   467    67255944      18      3     18      3            3.5%
+```
+
+**Gate 2 passes essentially everything (18/18, 29/29, 19/20). Gate 1 —
+`creator_share >= 40%` — does all the rejecting.** The median creator share
+collapsed from 58.2% to 3.5% inside a single day.
+
+```
+                 n    share>=40%    share<5%    median share
+EARLY (<67.0M) 133    53 (40%)      60 (45%)        9.0%
+LATE (>=67.0M)  62     8 (13%)      40 (65%)        3.5%
+```
+
+The bimodal distribution §6J.1 recorded — 65% below 5%, a spike at 55-60% — has
+emptied out of its upper mode. **Creators have stopped taking a large share of
+their own launch.** Measured rates, using the measured block time:
+
+```
+whole fresh window (1.00 day)   canonical 195/day   gated 54.0/day
+most recent 0.41 days           canonical 150/day   gated 19.4/day
+```
+
+Canonical launches fell 23%; **gated launches fell 64%**, and the last 2.3 hours
+of the window produced **zero**.
+
+### 6V.4 The external-validity problem this exposes
+
+The 379 stored launches have `creator_share` ranging **0.4104 to 0.6416**. Not
+one is below 0.41. **Gate 1 was applied upstream when the sample was built**, so
+every finding in §6I through §6U — including UNTOUCHED — is conditioned on a
+launch type that has fallen from 40% of the population to 13%.
+
+This also makes the obvious rescue untestable. "Does UNTOUCHED work without gate
+1?" cannot be answered from stored data, because no stored launch has a low
+creator share. The attempt returned an empty cell, and per the standing rule it
+was investigated rather than reported:
+
+- `ungated + UNTOUCHED` **RETURNED NO ROWS**, and it is **not a defect**. The 62
+  "ungated" stored launches failed **gate 2**, not gate 1 — median `sold_90`
+  0.592, median 32 sells before entry. UNTOUCHED requires `n_sells == 0`. The two
+  are mutually exclusive by construction.
+
+### 6V.5 Creator history — TESTED AND REFUTED
+
+`creator-backfill` swept every `TokenCreated` in a pinned 65,000,000..67,478,097
+window: **828 launches, 421 distinct creators, 0 unresolved, 12,610 CU**. Match to
+the 54 gated launches by init block: **54 matched, 0 ambiguous, 0 unmatched.**
+
+```
+                          n    median    mean     SUM   deep    win      t
+ALL matched              54     +6.2%   +5.5%    2.96   7.4%    67%   1.19
+prior == 0 (first ever)  16    +15.5%   +4.9%    0.79   6.3%    50%   0.57
+prior >= 1 (repeat)      38     +6.2%   +5.7%    2.18   7.9%    74%   1.03
+prior >= 3               27     +5.5%   +2.4%    0.65   7.4%    74%   0.45
+```
+
+In sample the gap was 4.9 points (prior==0 mean -0.8%, prior>=1 mean +4.1%). Out
+of sample it is **0.8 points, and the medians invert** — first-ever launches have
+the *better* median (+15.5% vs +6.2%) and the *lower* deep rate (6.3% vs 7.9%).
+**Family C does not replicate.** n=16 against 38 is thin and cannot be decisive,
+but the effect is gone and the sign of the median flipped. This is why it was
+refused a score in §6T.7 until the history existed.
+
+### 6V.6 11D — the arithmetic, and why the good numbers should not be believed
+
+MEASURED on the 260 out-of-time trades, $5..$25 ladder:
+
+```
+mean $ P&L per trade    $+0.7031   (net of $0.193 absolute gas)
+average position        $15.10
+return per $ deployed   +4.66%
+peak simultaneous       2 positions, $50 at risk
+```
+
+```
+                        trades/day     per day      per week
+window-average rate           54.0     $+37.97      $+265.78
+CURRENT rate                  19.4     $+13.64       $+95.49
+```
+
+```
+bankroll   avg position   peak exposure   current-rate/day   current-rate/week
+   $100          15.1%           50.0%            +13.64%            +95.5%
+ $1,100           1.4%            4.5%             +1.24%             +8.7%
+```
+
+Probability of ruin, 500 trades, 20,000 bootstrap paths, ruin = below 20% of
+start, **with concurrency modelled** (trades drawn in overlapping pairs at the
+measured peak of 2, both sized off the same bankroll):
+
+```
+scenario                                  P(ruin)   median end   p10 end   p90 end
+$100 bankroll, $5..$25 ladder                0.1%       17.802     3.846    74.799
+$1,100 bankroll, $5..$25 ladder              0.0%        1.370     1.200     1.562
+$1,100 bankroll, ladder x3                   0.0%        2.497     1.673     3.683
+$1,100 bankroll, ladder x6.6 (~half-Kelly)   0.0%        6.572     2.703    15.492
+```
+
+**A median 17.8x on a $100 bankroll is not a forecast. It is what compounding a
++4.66%-per-deployed-dollar edge 500 times produces if the edge is real, stable
+and repeatable, and §6V.3 is direct measured evidence that it is not stable.** The
+concurrency caveat from §9D is now resolved and it is benign — peak exposure is 2
+positions — but resolving it does not make the mean trustworthy. The underlying
+per-trade return distribution still carries t = 1.48.
+
+### 6V.7 The single most likely way this blows up — MEASURED, not guessed
+
+**The launch population changes underneath the rule, exactly as it did this
+week.** Every number above is conditioned on `creator_share >= 40%`, a launch
+type whose share of the chain fell from 40% to 13% in under a day and whose
+absolute rate fell 64%. A bot left running would not have stopped; it would have
+found fewer and fewer qualifying launches while its stored expectations kept
+describing a population that no longer exists. That is not a tail risk — it is
+the measured state of the chain today.
+
+The second most likely: the edge is concentrated. The top 10 of 260 trades supply
+$62.95 of the $83.49 sizing gain. A month where those do not appear returns the
+strategy to roughly zero before gas.
+
+### 6V.8 What would change the answer
+
+1. **Accumulate.** At the current 19.4 gated/day, ~100 fresh gated launches takes
+   about five days. The eight pre-registered refutation conditions can then be
+   evaluated as written.
+2. **Measure the ungated population.** The 87% of launches with low creator share
+   have never been priced at all — no entry/exit outcomes exist for any of them.
+   If UNTOUCHED works there, the addressable rate is restored roughly eight-fold.
+   If it does not, gate 1 is load-bearing and the strategy's market is shrinking.
+   This is the single highest-value measurement available and it is not expensive.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 9C/9D:**
