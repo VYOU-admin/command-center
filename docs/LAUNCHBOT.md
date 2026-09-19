@@ -7109,6 +7109,115 @@ improvement on a base §8A shows to be unstable.
 
 ---
 
+## 6R. PART 9A/9B — THE OVERHANG DOES NOT SEPARATE. RECENT SELLING DOES.
+
+Within the §7 population only (`creator_share >= 40%` AND `sold-by-90s < 25%`), **n=317,
+39 deep losers (12.3%)**, compared against the rest on 29 quantities observable at or
+before **+115 s**. Spend **~$0.02**.
+
+### 6R.1 A CONTROL SEPARATED, AND IT RE-CALIBRATES THE WHOLE TABLE
+
+**`CONTROL ETH in by +15 s` came back δ = −0.159, above the 0.15 bar — with medians of
+3.511 against 3.512.** A difference of one thousandth of an ETH, 0.03%.
+
+That is the estimator ordering a tightly-clustered distribution, not finding structure.
+**I set the bar at 0.15 before reading and the control says 0.15 is too low for this
+sample** — 39 against 121 across 31 hour-strata leaves enough freedom for |δ| ≈ 0.16 by
+chance. **The honest bar for this table is |δ| ≥ 0.20**, and everything between 0.15 and
+0.20 is reported as noise rather than as a hit.
+
+**Carrying controls is what made that visible.** Two others behaved: `buyers by +15 s`
+δ 0.024 and `init block parity` δ 0.041.
+
+### 6R.2 9B — THE OVERHANG FAILS. THIS IS THE HEADLINE NULL.
+
+§6O found the loss is one large sell of a median 42.5% of supply, and the obvious
+inference was that the supply must be sitting in a wallet we can see. **It is sitting
+there, and it does not predict anything.** [MEASURED]
+
+| feature | med(deep) | med(rest) | δ | verdict |
+|---|---|---|---|---|
+| **top non-pool holder share @115 s** | 51.2% | 43.1% | **0.135** | **below the control — nothing** |
+| holders over 5% of supply @115 s | 1 | 1 | 0.182 | medians identical — nothing |
+| creator still holds @115 s | 51.2% | 43.1% | 0.147 | below the control — nothing |
+| **top holder IS the creator** | 1 | 1 | **0.006** | **nothing at all** |
+
+**The most mechanically plausible filter in the pass does not work.** A deep loser's
+largest holder sits on 51.2% of supply and a non-loser's on 43.1% — a real gap in
+direction, but a δ smaller than a control that is pure noise.
+
+**And `top holder IS the creator` is δ 0.006 — as close to exactly nothing as this
+document has measured.** §6O said the *seller's* identity does not matter; this says the
+*holder's* identity does not either.
+
+### 6R.3 WHAT DOES SEPARATE: SELLING THAT HAS ALREADY STARTED
+
+| feature | med(deep) | med(rest) | **δ** |
+|---|---|---|---|
+| **ETH in during 90–115 s** | 0.280 | 0.134 | **+0.335** |
+| **sells in the 90–115 s bucket** | **1** | **0** | **+0.318** |
+| **top buyer's share of buy volume** | 74.6% | 85.6% | **−0.318** |
+| **cumulative sold by +115 s** | **0.77%** | **0.04%** | **+0.312** |
+| number of sells so far | 4 | 2 | +0.294 |
+| ETH into the pool, total | 4.374 | 3.981 | +0.282 |
+| cumulative sold by +90 s | 0.11% | 0.01% | +0.241 |
+| price multiple at entry vs launch | 1.245 | 1.143 | +0.224 |
+| largest single sell so far | 0.22% | 0.03% | +0.218 |
+| peak multiple before entry | 1.276 | 1.170 | +0.200 |
+
+**The plain reading: the launch that dumps is the one already being sold into in the
+twenty-five seconds before we buy.** Median 1 sell in the 90–115 s bucket against 0; a
+twenty-fold difference in cumulative supply sold by entry. That is mechanically sensible
+— the dump has begun and we are buying into it.
+
+**Two that are less obvious and worth recording.** Deep losers have **less concentrated
+buying** (top buyer 74.6% of volume against 85.6%), and they are **already up more**
+(1.245× against 1.143× at entry, peak 1.276× against 1.170×). **Buying strength is not
+the signal; a crowd arriving is.**
+
+### 6R.4 EVERY NULL, STATED AS CLEARLY AS EVERY HIT
+
+**Nothing** in: the overhang (all four measures), cumulative sold by +30 s or +60 s,
+seconds since the last sell, buys in any bucket including 90–115 s, how far it has faded
+from its own peak, net ETH in the pool, distinct buyer transactions, **creator supply
+share as a continuous variable (δ −0.094)**, and **creator ETH as a continuous variable
+(δ −0.094)**.
+
+**That last pair matters.** Creator buy size is §5B's one surviving separator for
+*runners*. **Within the §7 population it carries no information about who loses** —
+which is consistent, because the gate has already selected on it.
+
+### 6R.5 THE 9B THRESHOLD SWEEP, AND WHY IT IS NOT ADOPTED
+
+The brief asked for it, so it was run — and it looks better than 6R.2 says it should:
+
+```
+keep if top holder <=    n   deep%   mean    SUM  win%  kept%
+              20%      135      7%   6.0%   8.13   73%    43%
+              30%      141      8%   5.4%   7.60   72%    44%
+              50%      177     11%   3.6%   6.37   70%    56%
+             none      317     12%   2.4%   7.47   69%   100%
+```
+
+**It halves the deep-loss rate and more than doubles the mean — and barely moves the
+SUM (7.47 → 8.13), because it discards 57% of the trades.** That is exactly the
+trade-off the brief predicted.
+
+**It is NOT adopted, and the reason is 6R.1.** A single threshold cut on training data
+has no multiple-comparison control; the stratified δ does, and it puts this variable
+**below a pure-noise control**. **When a sweep and a properly-controlled effect size
+disagree, the effect size is the honest one.** Adopting this would be picking a
+threshold that looked good after the fact — the thing that produced every false positive
+in this document.
+
+### 6R.6 What goes to 9C
+
+The candidate is **recent selling, not the overhang**. It will be written down and
+committed before it is scored on anything. **9C is the next step and 6R.5's sweep is not
+part of it.**
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4G-1:**
