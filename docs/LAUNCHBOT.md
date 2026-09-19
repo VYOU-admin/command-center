@@ -5906,6 +5906,119 @@ splits on it.
 
 ---
 
+## 6G. 4D-1 — THE HORIZON GRID. NO FIXED ENTRY/EXIT PAIR HAS POSITIVE EXPECTANCY
+
+Three entry offsets crossed with ten holding periods, on **canonical Pools.trade
+launches** and a control at the same cells. $1. No-exit = **−100% in the cell**, never
+dropped. **Nothing is filtered on an exit-time property**, and `dead%` sits beside every
+median so the circularity §6C caught cannot recur.
+
+n = **200 per Pools.trade cell**, 80–91 per control cell. Window
+`63,269,189..65,861,189` plus a second overlapping pass — see 6G.5.
+
+### 6G.1 THE GRID — POOLS.TRADE, ENTRY +1 BLOCK
+
+| hold | dead% | pulled% | p10 | p25 | median | p75 | p90 | **mean** | **SUM** | win% | best |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 15 s | 6% | **0%** | −11.3% | −0.5% | −0.2% | +0.4% | +5.1% | −6.0% | −11.91 | 37% | +155% |
+| **30 s** | 6% | **0%** | −33.0% | −0.5% | **+0.3%** | +2.7% | +25.4% | **−2.7%** | **−5.49** | **53%** | +121% |
+| 90 s | 5% | **0%** | −82.5% | −49.0% | −0.4% | +11.0% | +41.6% | −12.7% | −25.36 | 47% | +104% |
+| 5 m | 4% | **0%** | −82.5% | −82.3% | −11.3% | +31.5% | +85.5% | −10.4% | −20.83 | 37% | +224% |
+| 15 m | 4% | **0%** | −82.8% | −82.5% | −60.9% | −5.1% | **+136.3%** | −19.9% | −39.71 | 21% | +360% |
+| 30 m | 4% | **0%** | −83.5% | −82.5% | −81.9% | −34.2% | −3.4% | −27.8% | −55.54 | 8% | **+2672%** |
+| 1 h | 4% | **0%** | −83.5% | −82.5% | −82.2% | −48.8% | −16.1% | −55.1% | −110.20 | 2% | +1151% |
+| 2 h | 4% | **0%** | −83.5% | −82.5% | −82.2% | −48.8% | −16.1% | −62.4% | −124.73 | 1% | +407% |
+| 6 h | 4% | 1% | −83.5% | −82.5% | −82.2% | −48.9% | −19.6% | −65.9% | −131.88 | 0% | −0.0% |
+| 24 h | 4% | 1% | −83.5% | −82.5% | −82.2% | −49.0% | −20.3% | −66.4% | −132.89 | 0% | −0.1% |
+
+`+10` and `+150` are within noise of `+1` at every horizon, confirming §6F.5's flatness
+survives a long hold. Full rows are in the run output.
+
+### 6G.2 THE HEADLINE: EVERY ONE OF THE THIRTY CELLS HAS A NEGATIVE SUM
+
+**Not one Pools.trade cell, at any entry offset or any horizon, has a positive mean or a
+positive sum.** [MEASURED, n=200 per cell]
+
+The best is **entry +1, hold 30 s**: median **+0.3%**, win rate **53%**, and still
+**mean −2.7%, SUM −5.49 over 200 trades.** A 53% win rate with a negative mean is the
+signature of small wins and large losses, and the 6% that cannot be sold at all are
+enough on their own to do it.
+
+**THE +2672% BEST OUTCOME DOES NOT RESCUE ANYTHING.** At the 30-minute hold, one
+position returned twenty-seven times its stake and the cell's mean is still **−27.8%**.
+That is the whole case for reporting the sum next to the median: the tail is real, it is
+large, and **it is not large enough.**
+
+### 6G.3 THE LOCK HOLDS FOR TWENTY-FOUR HOURS. SELLABILITY DOES NOT DECAY. VALUE DOES
+
+Three separate things that §6E could not separate, now separated:
+
+- **`pulled%` is 0% at every horizon out to 6 h and 1% at 24 h.** [MEASURED] The
+  permanent-lock claim holds on a fresh 200-pool sample across a full day. §6D measured
+  it at 24–48 h on 150 pools; this confirms it per-horizon from the creation block.
+- **`dead%` FALLS with time — 6% at 15 s to 4% at 24 h.** Sellability does not decay; it
+  slightly improves. **This settles the worry §6F.1 raised** when 4 of 12 pools "paid
+  zero": those sells *executed* and paid almost nothing, which is a price collapse and
+  not an unsellable token. The two are different and the grid keeps them in different
+  columns.
+- **Value collapses hard.** Median **+0.3% at 30 s → −82.2% by 1 h**, and it stays there.
+  p25 is already −49% at 90 seconds.
+
+**So the token is sellable the whole time and there is nothing left to sell.** That is a
+worse problem than a rug, because no sellability check can see it coming.
+
+### 6G.4 THE CONTROL SAYS THE EFFECT IS THE POPULATION, NOT TIME
+
+| | dead% 15 s → 24 h | pulled% 15 s → 24 h | median 15 s | mean 24 h |
+|---|---|---|---|---|
+| **POOLS.TRADE** | **6% → 4%** | **0% → 1%** | −0.2% | −66.4% |
+| **CONTROL** | **18% → 58%** | **3% → 44%** | −97.4% | −96.0% |
+
+The control's unsellability **triples** and its withdrawals go from 3% to **44%**, while
+Pools.trade's barely move. **The shape difference is the population.** And the control is
+so much worse at every cell — median −97.4% at fifteen seconds — that Pools.trade is
+plainly the right pond even though nothing in it is profitable yet.
+
+**ONE METHODOLOGICAL CAVEAT, STATED BECAUSE IT MATTERS FOR THE CONTROL ONLY.** This grid
+anchors entry at `init + offset`. For Pools.trade that is the right anchor — the creator
+buys in the creation transaction, so initialization *is* first trade (§6F.3). **For the
+control, a pool may be initialized long before anything trades on it**, so `init + 1`
+can mean buying into a pool with no market. That is part of why the control looks worse
+here than in §6E.3, which anchored on the first swap. **The control's absolute figures
+are therefore not comparable across sections; its time-SHAPE is what this table is for.**
+
+### 6G.5 A REPRODUCIBILITY FLAW I CREATED AND FIXED
+
+The window end was derived from `head`, so a second run sampled a **different**
+population, the resume logic could not match, and a re-run intended only to reprint the
+table with two extra columns **re-bought the entire grid** — another ~800,000 CU, and
+every cell's n doubled from 100 to 200. The larger sample is genuinely better and the
+figures above use it, but the spend was avoidable. `GRID_TO_BLOCK` now pins the window
+and the report states whether it was pinned.
+
+### 6G.6 What is still open, and what 4D-1 does NOT settle
+
+**4D-1 rules out every FIXED entry/exit pair. It does not rule out a path-dependent
+exit, and it would be wrong to read it that way.** A fixed horizon forces a position to
+be held through the collapse in 6G.3; a take-profit or a trailing stop does not. The
+grid shows exactly the shape such a rule would feed on:
+
+```
+at  5 m   median -11.3%   p90  +85.5%
+at 15 m   median -60.9%   p90 +136.3%
+```
+
+**A rule that exits a winner near its peak and a loser early is measuring something this
+grid structurally cannot.** That is 4D-2, and it is the last open question before the
+honest answer in 4D-3.
+
+**What would refute a negative verdict in 4D-2:** a trigger rule whose SUM over the same
+200 positions is positive after the 0.50% round trip and gas. **What would confirm it:**
+every trigger rule's sum still negative, which — given that the median collapses faster
+than the p90 rises after five minutes — is the more likely outcome on this evidence.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4C:**
