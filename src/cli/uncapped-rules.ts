@@ -388,6 +388,82 @@ async function main(): Promise<void> {
         table: out,
       });
     }
+    /* =================================================================
+     * THE HOLDOUT. The high-creator-share bucket came back POSITIVE under a
+     * 30-second hold, which is the first positive expectancy in five passes and
+     * the exact opposite of the pre-registered hypothesis. **A result that
+     * surprising is reported only after it reproduces on data it was not found
+     * on.**
+     *
+     * The split is a parity bit of the pool id — fixed by the data, not chosen
+     * after looking, and reproducible by anyone. Both halves are printed whatever
+     * they say.
+     * ================================================================= */
+    const half = (pid: string): number => Number(BigInt(pid) & 1n);
+    const netAt = (sum: number, n: number, usd: number): number =>
+      sum - n * (GAS_USD / usd);
+
+    const holdout: string[] = [];
+    holdout.push('bucket / half                 n    dead%  median    mean      SUM'
+      + '   win%   net@$1  net@$10 net@$100');
+    const cases: Array<[string, (s: number) => boolean]> = [
+      ['share >= 40%', (s) => s >= 0.40],
+      ['share <  40%', (s) => s < 0.40],
+    ];
+    for (const [bname, pred] of cases) {
+      for (const h of [-1, 0, 1]) {
+        const set = withShare.filter(([pid]) => pred(facts.get(pid)!)
+          && (h === -1 || half(pid) === h));
+        const rs = set.map(([, p]) => walk(p, { fixed: 300 }))
+          .filter((x): x is number => x !== null);
+        if (rs.length === 0) {
+          holdout.push(`${`${bname} ${h === -1 ? 'ALL' : `half ${h}`}`.padEnd(28)} `
+            + 'RETURNED NO ROWS'); continue;
+        }
+        const sum = rs.reduce((a2, b2) => a2 + b2, 0);
+        const dead = rs.filter((x) => x <= -0.999).length;
+        holdout.push(`${`${bname} ${h === -1 ? 'ALL' : `half ${h}`}`.padEnd(28)} `
+          + `${String(rs.length).padStart(4)} ${(100 * dead / rs.length).toFixed(0).padStart(6)}% `
+          + `${pc(quant(rs, 0.5)).padStart(7)} ${pc(sum / rs.length).padStart(7)} `
+          + `${sum.toFixed(2).padStart(8)} `
+          + `${(100 * rs.filter((x) => x > 0).length / rs.length).toFixed(0).padStart(5)}% `
+          + `${netAt(sum, rs.length, 1).toFixed(2).padStart(8)} `
+          + `${netAt(sum, rs.length, 10).toFixed(2).padStart(8)} `
+          + `${netAt(sum, rs.length, 100).toFixed(2).padStart(8)}`);
+      }
+    }
+    log.info('*** 4F-2  HOLDOUT — DOES THE HIGH-SHARE BUCKET REPRODUCE? ***', {
+      rule: 'fixed 30-second hold, entry +1 block',
+      split: 'parity of the pool id — fixed by the data, not chosen after looking',
+      gas: `absolute $${GAS_USD} per round trip; net columns subtract n x that at each size`,
+      what_would_refute_it: 'the two halves disagreeing in sign, or either half being '
+        + 'negative. A result found on one half and absent from the other is a sample, '
+        + 'not a finding.',
+      table: holdout,
+    });
+
+    /* WHY might a LARGE creator share be good? A mechanism, checked not assumed. */
+    const dumpBlocks: number[] = [];
+    for (const [pid, p] of withShare) {
+      if ((facts.get(pid) ?? 0) < 0.40) continue;
+      const sorted = [...p].sort((a2, b2) => a2.off - b2.off);
+      for (let i = 1; i < sorted.length; i += 1) {
+        const a2 = sorted[i - 1]!.ret; const b2 = sorted[i]!.ret;
+        if (a2 === null || b2 === null) continue;
+        if (a2 - b2 > 0.5) { dumpBlocks.push(sorted[i]!.off); break; }
+      }
+    }
+    log.info('THE MECHANISM — WHEN DOES THE VALUE COLLAPSE ON HIGH-SHARE LAUNCHES?', {
+      high_share_pools_with_a_collapse: dumpBlocks.length,
+      collapse_first_seen_at_p10_seconds: quant(dumpBlocks, 0.10) === null ? 'n/a'
+        : quant(dumpBlocks, 0.10)! / 10,
+      p25_seconds: quant(dumpBlocks, 0.25) === null ? 'n/a' : quant(dumpBlocks, 0.25)! / 10,
+      median_seconds: quant(dumpBlocks, 0.50) === null ? 'n/a' : quant(dumpBlocks, 0.50)! / 10,
+      p75_seconds: quant(dumpBlocks, 0.75) === null ? 'n/a' : quant(dumpBlocks, 0.75)! / 10,
+      note: 'if the median collapse lands AFTER 30 s, a 30-second hold is exiting '
+        + 'before the dump, which would be the mechanism rather than a coincidence',
+    });
+
     log.info('CU SPENT', { cu: inner.cuSpent, ceiling: CU_CEILING });
   } finally { c.release(); await app.pool.end(); }
 }
