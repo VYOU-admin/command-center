@@ -5746,6 +5746,166 @@ unsellable, −11% vs −100% at p25 — not the exact medians.
 
 ---
 
+## 6F. 4D-0 — THE ENTRY, MEASURED AS A FREE VARIABLE
+
+**+15 seconds was discarded before this ran.** It came from a corpus study whose
+launchpad attribution was wrong (§6D.1), whose sell oracle never executed a transfer
+(§6A.3), and whose exit horizon was chosen on a survivorship metric (§6C). Nothing about
+it is load-bearing. This measures entry timing from scratch on **canonical Pools.trade
+launches**, with the **exit held constant** so an entry effect cannot be confused with
+an exit effect.
+
+### 6F.1 THE BLOCKER FIRST — 4D-5, THE LIVE GATE
+
+`checkSellable` now carries both fixes §6E.1 made to `simulateSellAt`. Exercised against
+**12 real Pools.trade tokens**, with the old integer-scan path re-run on the same token
+in the same call so the comparison is a measurement and not a memory:
+
+```
+BEFORE  integer scan found both slots        0 of 12   -> slots_not_found = REFUSE TO BUY
+AFTER   gate returns ok                      8 of 12
+        the other 4: reason = sell_pays_zero, ethOut = 0 -- the gate correctly
+        refusing pools that genuinely pay nothing now, which is not a defect
+tokens with an effectively infinite Permit2 allowance   12 of 12  (MAX_UINT256)
+```
+
+**The refutation condition was stated in advance — a high BEFORE count would have meant
+these tokens were never the problem. It came back 0 of 12.** The old gate would have
+refused every one of the launches §6E.3 measures at 0 of 256 unsellable.
+
+**And an incidental finding worth carrying into 4D-1: 4 of 12 pools sampled from the
+last ~5.5 hours pay ZERO now.** §6E measured 0% unsellable at +90 s. **Sellability
+therefore decays somewhere between 90 seconds and a few hours**, and 4D-1 must measure
+where rather than assume the lock holds at 24 h.
+
+### 6F.2 OUR DETECTION LAG IS ZERO BLOCKS — AND THAT IS NOT THE CONSTRAINT
+
+[MEASURED, n=13 detections over 200 s, 5,513 polls]
+
+```
+lag, blocks behind head when the poll first returns the log
+  min 0   median 0   p75 0   max 0
+first-poll round trip  54-73 ms
+```
+
+**An `eth_getLogs` poll returns an `Initialize` log in the same block it was produced.**
+Detection is not what stops us being early.
+
+**BUT THE POLL RATE THAT BUYS IT IS THE REAL COST, AND IT IS PRICED HERE RATHER THAN
+ASSUMED:**
+
+```
+5,513 polls / 200 s = 27.6 polls per second
+per poll: eth_blockNumber 10 CU + eth_getLogs 60 CU = 70 CU
+                          385,910 CU per 200 s
+                        6,946,380 CU per hour   = $3.13/hour
+                                                = $75.02 per day
+```
+
+**$75 a day against a $7.71 wallet, to buy sub-second detection that §6F.4 shows is
+worth 0.13 percentage points of median.** One poll per second gives a lag of at most
+~10 blocks and costs **$2.70/day**. **The cheap poll is the correct one**, and that is a
+measurement rather than a preference.
+
+### 6F.3 WE CANNOT REACH BLOCK 0, AND THE REASON IS STRUCTURAL
+
+**The creator's buy is inside the creation transaction itself.** BCAT's `TokenCreated`,
+the pool's `Initialize` and the creator's 3.8 ETH all sit in one `multicall` (§6D.2).
+**No external party can be in someone else's transaction.** The earliest block any bot
+can occupy is N+1.
+
+[MEASURED] **Exactly one address buys in the launch block — median 1, maximum 1 across
+120 launches.** There is no race for block 0 because there is no block-0 slot to race
+for. The "creator buys first so outside bots cannot" claim is structurally true and
+needs no latency advantage to enforce.
+
+### 6F.4 THE PRICE PATH IS FLAT — THERE IS NO EARLY MOVE TO CATCH
+
+Median price relative to the pool at +0 blocks, read from `slot0`. **A price, not a
+quote** — it excludes our size and the fee. [MEASURED, n=120 per row]
+
+| offset | median | p25 | p75 |
+|---|---|---|---|
+| +1 blk (0.1 s) | **0.00%** | 0.00% | 0.00% |
+| +2 blk | 0.00% | −0.15% | 0.00% |
+| +5 blk | 0.00% | −0.15% | 0.00% |
+| +10 blk (1 s) | 0.00% | −0.15% | 0.00% |
+| +30 blk (3 s) | −0.05% | −0.17% | 0.00% |
+| +60 blk (6 s) | −0.11% | −0.26% | −0.05% |
+| +300 blk (30 s) | −0.42% | −3.28% | −0.11% |
+
+**Nothing happens.** The price does not run after launch; it drifts very slightly down.
+**The creator's launch-block buy is the whole of the early move**, and it is inside a
+transaction we cannot join.
+
+### 6F.5 RETURN BY ENTRY OFFSET, EXIT HELD CONSTANT — ENTRY TIMING BARELY MATTERS
+
+Exit fixed at init + 900 blocks (90 s). $1. No-exit = −100%. [MEASURED, n=120 per row]
+
+| entry | dead | p25 | median | p75 | p90 |
+|---|---|---|---|---|---|
+| **+0 blk** | 10 | −4.27% | **−0.22%** | **+10.98%** | **+33.42%** |
+| +1 blk | 10 | −4.27% | −0.29% | +10.98% | +33.42% |
+| +2 blk | 10 | −4.27% | −0.32% | +10.98% | +33.42% |
+| +5 blk | 10 | −4.27% | −0.35% | +10.98% | +33.42% |
+| +10 blk | 10 | −4.27% | −0.35% | +10.98% | +33.42% |
+| +30 blk | 10 | −4.38% | −0.48% | +10.73% | +33.35% |
+| +60 blk | 10 | −4.34% | −0.54% | +10.73% | +33.35% |
+| **+150 blk (15 s)** | 10 | −2.10% | −0.54% | +9.65% | +33.18% |
+| +300 blk (30 s) | 10 | −1.97% | −0.54% | +4.45% | +31.12% |
+
+**ENTERING FIFTEEN SECONDS EARLIER IS WORTH 0.32 PERCENTAGE POINTS OF MEDIAN** (−0.54%
+→ −0.22%). Every offset's median is the 0.50% round-trip fee, within noise. **The entry
+offset is not where the answer is.**
+
+Two things that do move, in opposite directions:
+
+- **p25 is BETTER late** — −1.97% at +300 against −4.27% at +0. Waiting avoids some
+  early damage.
+- **p75 is better early** — +10.98% at +0 against +4.45% at +300. Waiting gives up
+  upside.
+- **p90 is flat at ~+33% everywhere.** The tail does not care when you enter.
+
+`dead = 10 of 120` at **every** offset — unsellability is a property of the launch, not
+of when we bought it.
+
+### 6F.6 THE COUNTERPARTY, AND THE ONE STRONG SIGNAL IN THIS PASS
+
+[MEASURED, 120 launches, decoded from the launch block's own `Swap` logs]
+
+```
+distinct buyers in the launch block    median 1, MAXIMUM 1      <- only ever the creator
+share of the 1,000,000,000 supply taken in the launch block:
+    p25  2.52%      median  3.79%      p75  58.20%      max  64.16%
+```
+
+**THAT DISTRIBUTION IS BIMODAL AND IT IS THE MOST ACTIONABLE THING IN 4D-0.** Half of
+creators take 2–4% of supply. **The top quartile take 58–64% — nearly two thirds of the
+entire float, bought at the launch price, one block before anyone else can act.**
+
+If we buy at +1 block from a creator holding 64% of supply at a lower basis, **that is
+who we are buying from and that is who can sell into us.** The share is readable from
+the launch block's `Swap` log **before we buy at +1**, which makes it a creation-time
+filter and not an exit-time one.
+
+**This is a hypothesis, not a finding: it has not yet been crossed with returns.** 4D-1
+splits on it.
+
+### 6F.7 What 4D-0 settles
+
+- **Detection is solved and cheap.** 0-block lag; sub-second polling costs $75/day and
+  buys 0.13 points; one poll a second costs $2.70/day. Take the cheap one.
+- **Block 0 is unreachable and it does not matter.** The creator is inside the creation
+  transaction; the price does not move afterwards anyway.
+- **Entry timing is not the free parameter that rescues this.** Every offset's median is
+  the fee.
+- **The tail is real and flat across entry: p90 ≈ +33% at every offset, with 8.3%
+  unsellable.** Whether anything captures it is entirely an EXIT question, which is
+  4D-1.
+- **The creator's supply share is the one strong creation-time signal found so far.**
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4C:**
