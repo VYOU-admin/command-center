@@ -6469,6 +6469,112 @@ consistent — but that is 41 pools, not 1,016.
 
 ---
 
+## 6L. 5B — 21 QUANTITIES TESTED, ONE REAL SEPARATOR
+
+§6K labelled 1,016 launches; 428 are runners (peak ≥+50% within 15 min of a +15 s
+entry). **This asks whether a runner was identifiable before or at our entry.**
+
+**Two constraints decided what could be measured.** Nothing observable after **+15
+seconds** — the operator enters there, so a quantity readable only at +60 s is useless
+whatever it correlates with, and the cut-off is enforced in the query. And runners are
+compared only with **non-runners from the same hour**: §6K.5 measured median swaps per
+launch moving 9 → 502 across these days, so unstratified, chain activity would carry any
+signal it liked. **133 hour buckets, 105 of them containing both classes.**
+
+**The effect size is a stratified Cliff's delta, not a p-value** — `P(runner >
+non-runner) − P(runner < non-runner)`, computed within each hour and pooled by pair
+count. A t-test on a distribution whose p99 is +1,381% would be reporting the tail.
+**The bar was set before the table was read: |δ| ≥ 0.15 and a visible median gap.**
+
+### 6L.1 THE FULL TABLE — EVERYTHING TESTED, INCLUDING THE NULLS
+
+| feature | med(runner) | med(non) | **δ** | verdict |
+|---|---|---|---|---|
+| **largest single buy by +15 s** | 3.200 | 0.150 | **+0.418** | **SIGNAL** |
+| **creator supply share** | 56.0% | 5.6% | **+0.412** | **SIGNAL** |
+| **creator ETH into creation tx** | 3.200 | 0.150 | **+0.412** | **SIGNAL** |
+| **total ETH in by +15 s** | 3.202 | 0.161 | **+0.309** | **SIGNAL** |
+| distinct buyers by +10 s | 4 | 4 | −0.226 | nothing |
+| has emoji | 1 | 0 | **+0.169** | **SIGNAL** |
+| distinct buyers by +5 s | 3 | 4 | **−0.169** | **SIGNAL** |
+| swaps by +15 s | 5 | 5 | −0.151 | nothing |
+| creator appears >1× in sample | 1 | 0 | +0.150 | nothing (at the bar) |
+| distinct buyers by +15 s | 5 | 5 | −0.150 | nothing |
+| sells by +15 s | 0 | 0 | −0.126 | nothing |
+| sell/swap ratio by +15 s | 0 | 0 | −0.122 | nothing |
+| someone sold inside +15 s | 0 | 0 | −0.130 | nothing |
+| pool liquidity at init | 5.007e22 | 5.007e22 | +0.091 | nothing |
+| best scored-wallet score | 0.3878 | 0.3878 | +0.077 | nothing |
+| token name length | 8 | 8 | −0.058 | nothing |
+| token symbol length | 5 | 5 | −0.036 | nothing |
+| description length | 8 | 9 | +0.030 | nothing |
+| symbol collides with a known token | 0 | 0 | +0.029 | nothing |
+| **a SCORED wallet bought by +15 s** | 0 | 0 | **−0.024** | nothing |
+| description empty | 0 | 0 | −0.010 | nothing |
+
+### 6L.2 FOUR OF THE SIX "SIGNALS" ARE ONE VARIABLE — VERIFIED ON RECORDS
+
+**MEASURED, n=1,016:**
+
+```
+creator_eth EXACTLY equals largest_buy_15s      952 of 1,016   93.7%
+creator_eth is >95% of ALL ETH in by +15 s      649 of 1,016   63.9%
+creator_share >= 40%   ->  median creator ETH   3.500
+creator_share <  40%   ->  median creator ETH   0.150
+```
+
+**The creator's own launch buy IS the largest buy, IS most of the ETH that arrives in
+the first fifteen seconds, AND is what the supply share measures.** Reporting four
+signals would be reporting one four times — the collinearity trap `ROBINHOOD.md`
+section 8 records for fee tier and launchpad.
+
+**So: 21 quantities tested, THREE distinct separators.**
+
+| | δ | size |
+|---|---|---|
+| **creator buy size** (4 collinear measures) | **≈ +0.41** | **medium** |
+| has emoji | +0.169 | small |
+| fewer distinct buyers by +5 s | −0.169 | small |
+
+**And the two small ones must be read against 21 tests.** At that many comparisons a
+couple of |δ| ≈ 0.17 results are what chance produces; only the δ ≈ 0.41 is clear of it.
+**The honest count is one strong separator and two that need 5C to survive.**
+
+### 6L.3 THE NULLS THAT MATTER MORE THAN THE SIGNALS
+
+- **THE OPERATOR'S SCORED WALLETS DO NOT APPEAR. δ = −0.024, and only 27 of 1,016
+  launches (2.7%) had ANY scored wallet buy within fifteen seconds.** [MEASURED] The
+  hypothesis that the existing Discord alert system could front-run these is refuted at
+  the entry point — **it is consistent with the operator's own observation that good
+  wallets arrive 5–15 minutes late, and it means they arrive after the median 8.2-minute
+  peak (§6K.3), not before it.**
+- **Pool liquidity at init carries no information at all** — medians identical to four
+  significant figures (5.007e22). It is a template constant, exactly as §6D.5 found for
+  the lock. A filter on it would match everything.
+- **No metadata feature separates**: name length, symbol length, description length,
+  empty description, symbol collision — all |δ| ≤ 0.06. **Effort put into the listing
+  does not predict a run**, with the marginal exception of an emoji.
+- **Nothing about early SELLING separates.** Sells by +15 s, sell ratio, and whether
+  anyone sold at all are all null. The dump that §6H.3 decoded happens at a median of
+  six minutes — **far outside the window we can see before buying.**
+
+### 6L.4 WHAT THIS CONFIRMS, FROM A SECOND DIRECTION
+
+§6I found the **creator share ≥40% bucket** was the only profitable one, by splitting on
+returns. 5B arrives at the same variable from a completely different route — by
+labelling outcomes and asking what differs. **Two independent methods, one variable.**
+
+That is the strongest thing in this pass. It is also the *only* substantial thing, and
+**it has not yet been tested out of time** — §6I's holdout was pool-id parity, which
+tests for a pool artefact and not for a regime. **5C is that test and it is free**, since
+every feature is stored.
+
+**WHAT WOULD REFUTE 6L.2:** the creator-buy δ falling below the bar on the later half of
+the window. **WHAT WOULD CONFIRM THE TWO SMALL ONES ARE NOISE:** emoji and early-buyer
+count failing to reproduce there — which, at 21 comparisons, is what I expect.
+
+---
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 4G-1:**
