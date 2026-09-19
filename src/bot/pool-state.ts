@@ -83,3 +83,36 @@ export function poolIdOf(pool: {
     ['address', 'address', 'uint24', 'int24', 'address'],
     [pool.currency0, pool.currency1, pool.fee, pool.tickSpacing, pool.hooks]));
 }
+
+/**
+ * THE POOL'S `slot0` — `sqrtPriceX96` and the current tick.
+ *
+ * Same `extsload` route and the same confirmed layout as `readPoolLiquidity`: the pool's
+ * state begins at `keccak256(poolId ‖ 6)` and `slot0` is offset **0**. The word packs
+ * `sqrtPriceX96` (160 bits), `tick` (24, signed), `protocolFee` (24) and `lpFee` (24).
+ *
+ * **THIS IS A PRICE, NOT A QUOTE.** It is what the pool's curve says, free of our size
+ * and free of the fee, so it is the right instrument for *"did the price move"* and the
+ * wrong one for *"what would we receive"*. Anything about our own proceeds must go
+ * through a simulated swap — §6A.3 is the record of using a price where an
+ * executability figure was needed.
+ *
+ * `null` is UNKNOWN and never zero.
+ */
+export async function readPoolSlot0(
+  rpc: RpcLike, poolId: string, block: string = 'latest',
+): Promise<{ sqrtPriceX96: bigint; tick: number } | null> {
+  const base = BigInt(keccak256(concat([poolId, h32(6n)])));
+  try {
+    const r = String(await rpc.call('eth_call', [{
+      to: POOL_MANAGER, data: EXTSLOAD + h32(base).slice(2),
+    }, block]));
+    if (!r.startsWith('0x') || r.length < 66) return null;
+    const v = BigInt(r);
+    const sqrtPriceX96 = v & ((1n << 160n) - 1n);
+    if (sqrtPriceX96 === 0n) return null;   /* an uninitialised pool, not a price of 0 */
+    const raw = Number((v >> 160n) & ((1n << 24n) - 1n));
+    const tick = raw >= 1 << 23 ? raw - (1 << 24) : raw;
+    return { sqrtPriceX96, tick };
+  } catch { return null; }
+}
