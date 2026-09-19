@@ -159,3 +159,73 @@ Every gated launch with `init_block > 67,305,971` — strictly after the last
 launch in the existing 371. None of it has been looked at in any form. Roughly
 two days of chain history at the measured ~48 gated launches/day, so n ≈ 90-100
 with ~11 expected deep losers. Estimated cost ~41,000 CU ≈ $0.02.
+
+---
+
+# P11 — THE SCORE, STRIPPED TO WHAT IT ACTUALLY IS
+
+Written 2026-09-19 during Part 11A, still **before** any launch after block
+67,305,971 has been collected.
+
+## The composite was never a five-feature model
+
+Out-of-fold membership of the composite's top quintile agrees with this
+two-condition rule on **256 of 260 trades (98%)**:
+
+```
+UNTOUCHED  =  n_sells == 0                                     (nobody has sold yet)
+          AND eth_in_total <= 25th percentile of the training window
+                                                               (~3.7 ETH in this era)
+```
+
+Everything else in the composite is redundant:
+
+- `sold_115`, `largest_sell` and `n_sells` are **all exactly zero** in the top
+  bucket, so within it they carry no information at all.
+- `pool_eth` equals `eth_in_total` exactly whenever `n_sells == 0`, because
+  `pool_eth` is net ETH flow and there are no outflows. They are the same number.
+- Drop-one ablation: removing ANY single feature leaves rho at 0.236-0.264
+  against the full 0.248, and dropping `eth_in_total` **improves** the dollar
+  result to +$102.58. No feature is load-bearing.
+
+## The plain rule
+
+**Buy the launches where nobody has sold yet and total buying is still small.**
+
+Measured on the full n=371 gated sample:
+
+```
+                                 n    median     mean    deep%
+untouched (0 sells, low ETH)    62    +14.0%   +14.7%     3.2%
+everything else                309     +6.1%    +0.4%    13.3%
+```
+
+**Essentially the entire edge of the §6P strategy lives in the 17% of launches
+that are untouched at +115 s.** The other 83% have a mean of +0.4% before gas,
+which is a loss after it.
+
+## P11 as committed
+
+```
+SCORE        unchanged (kept only as the ranking device for the ladder)
+LADDER       $5 / $10 / $15 / $20 / $25 by ascending score quintile
+UNTOUCHED    the two conditions above, tested as a standalone statement
+```
+
+## Predictions on the fresh window, written before it exists
+
+- `UNTOUCHED` launches are **15-20%** of gated launches.
+- Their median return exceeds the whole-sample median by **at least 5 points**.
+- Their deep-loss rate is **below 8%** but **NOT zero** — 0 of 39 will not repeat.
+- The `UNTOUCHED` split reproduces at least as much separation as the full
+  five-feature composite, because it is 98% the same rule.
+
+## REFUTATION
+
+1. `UNTOUCHED` median at or below the whole-sample median on fresh data.
+2. `UNTOUCHED` deep-loss rate at or above the whole-sample rate.
+3. `UNTOUCHED` share of gated launches outside 8-30% — that would mean the
+   population shifted and the percentile cut is not measuring the same thing.
+4. A fresh-window deep rate of exactly zero again in the top bucket. That is
+   listed as a REFUTATION, not a success: it would indicate the outcome
+   measurement cannot register a collapse in that subgroup, i.e. a defect.
