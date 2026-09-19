@@ -173,7 +173,7 @@ async function main(): Promise<void> {
       } catch { continue; }
       const passed = share >= GATE1_SHARE && sold90 < GATE2_SOLD;
 
-      let entryOut: bigint | null = null; let exitOut: bigint | null = null;
+      const entryOut: bigint | null = null; let exitOut: bigint | null = null;
       let entryOk = false; let exitOk = false;
       if (passed) {
         const buy = buildSwap({ pool, zeroForOne: zeroIsPricing, amountIn: SIZE_WEI,
@@ -211,7 +211,7 @@ async function main(): Promise<void> {
          values ($1,$2,$3,$4::numeric,$5::numeric,$6,$7::numeric,$8,$9::numeric,$10,$11,$12::numeric)
          on conflict do nothing`,
         [CHAIN, pid, ib, share.toString(), sold90.toString(), passed,
-          SIZE_WEI.toString(), entryOut === null ? null : entryOut.toString(),
+          SIZE_WEI.toString(), entryOut,
           exitOut === null ? null : exitOut.toString(), entryOk, exitOk,
           ret === null ? null : ret.toString()]);
       n += 1;
