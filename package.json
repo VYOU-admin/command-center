@@ -57,6 +57,7 @@
     "filter-join": "npm run build && node dist/cli/filter-join.js",
     "launchpad-backfill": "npm run build && node dist/cli/launchpad-backfill.js",
     "current-population": "npm run build && node dist/cli/current-population.js",
+    "poolstrade-survey": "npm run build && node dist/cli/poolstrade-survey.js",
     "decay-trajectory": "npm run build && node dist/cli/decay-trajectory.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
