@@ -129,7 +129,19 @@ async function main(): Promise<void> {
      * EVERY POOL MUST HAVE LIVED PAST THE LONGEST HORIZON, or the 24 h cell would be
      * simulated at a block that does not exist. So the window ENDS 24 h + slack back.
      */
-    const to = head - (BLOCKS_PER_DAY + 10_000);
+    /*
+     * **THE WINDOW IS PINNABLE, AND IT HAD TO BECOME SO.** Deriving `to` from `head`
+     * means every run samples a DIFFERENT population, so the resume logic cannot match
+     * and a second invocation re-buys the whole grid. That happened once here: a re-run
+     * meant only to reprint the table with two extra columns spent another ~800,000 CU
+     * and doubled every cell's n.
+     *
+     * `GRID_TO_BLOCK` pins it. The default still tracks head, because a first run has
+     * nothing to pin to, but any re-report should pass the same value.
+     */
+    const to = process.env['GRID_TO_BLOCK'] !== undefined
+      ? Number(process.env['GRID_TO_BLOCK'])
+      : head - (BLOCKS_PER_DAY + 10_000);
     const from = to - 3 * BLOCKS_PER_DAY;
 
     const created = await sweep(rpc, { address: PT_FACTORY, topics: [TOKEN_CREATED] },
@@ -154,6 +166,7 @@ async function main(): Promise<void> {
 
     log.info('4D-1  BEFORE THE FIRST PAID CALL', {
       window: `${from}..${to}`,
+      window_pinned: process.env['GRID_TO_BLOCK'] !== undefined,
       note: 'the window ends 24 h + slack before head so every pool has lived past the '
         + 'longest horizon; a 24 h cell must not be simulated at a future block',
       TokenCreated: created.length,
