@@ -68,6 +68,7 @@
     "runner-label": "npm run build && node dist/cli/runner-label.js",
     "runner-features": "npm run build && node dist/cli/runner-features.js",
     "runner-separate": "npm run build && node dist/cli/runner-separate.js",
+    "runner-holdout": "npm run build && node dist/cli/runner-holdout.js",
     "decay-trajectory": "npm run build && node dist/cli/decay-trajectory.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
