@@ -63,6 +63,7 @@
     "entry-timing": "npm run build && node dist/cli/entry-timing.js",
     "horizon-grid": "npm run build && node dist/cli/horizon-grid.js",
     "exit-rules": "npm run build && node dist/cli/exit-rules.js",
+    "uncapped-rules": "npm run build && node dist/cli/uncapped-rules.js",
     "decay-trajectory": "npm run build && node dist/cli/decay-trajectory.js",
     "launch-search": "node dist/cli/launch-search.js",
     "v4-swap-sweep": "node dist/cli/v4-swap-sweep.js",
