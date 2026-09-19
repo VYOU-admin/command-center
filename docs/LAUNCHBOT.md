@@ -7405,6 +7405,179 @@ fresh trades and re-score filter D. If its held-out SUM exceeds the unfiltered
 baseline on that larger sample, 9C was a small-sample accident and the filter
 lives. Until then it is dead and the code must not implement it.
 
+## 6T. PART 10 — THE FIRST POSITIVE OUT-OF-TIME RESULT. IT IS A WEIGHT, NOT A GATE.
+
+**Status: MEASURED, out-of-time, on 260 launches. The rule was committed to git
+(`befb361`) before it was scored. One pre-stated refutation condition fired and is
+dealt with in §6T.5 rather than hidden.**
+
+### 6T.1 Two zeros that redirected the search
+
+**Every pool sells, at every horizon.** `bot_timing_path` holds `sell_executes` at
+twelve timestamps from 90 s to 350 s for all 379 measured pools. It is **true in
+379 of 379 at every single one of the twelve**. There are no blocked exits in this
+population. Every deep loss is therefore a genuine price collapse, and any search
+for an executability predictor is searching for something that does not exist here.
+
+**The pre-entry price path does not predict anything.** Built with the identical
+estimator as the outcome — `eth_out(90)/eth_out(115) - 1`, literally "the return of
+buying at 90 s and selling at 115 s" — momentum scores Spearman **-0.071** against
+the realised return (n=317, p=0.21) against a null bar of 0.167. A null, stated
+plainly.
+
+### 6T.2 Why Part 9 failed, in one table
+
+Part 9 screened features against the **binary** deep-loss label. Screening the same
+features against the **continuous** return, with an empirical multiple-comparison
+null (2000 shuffles of the outcome across all 40 features; max |rho| under the null
+= 0.167 at p95), six clear the bar:
+
+```
+feature          n     rho(return)   rho(deep loss)
+largest_sell   371       -0.194          0.076
+sp_sold_90     317       -0.194          0.131
+sold_115       371       -0.189          0.095
+n_sells        371       -0.175          0.095
+sold_90        371       -0.172          0.130
+eth_in_total   371       -0.168          0.079
+```
+
+**Every one correlates twice as strongly with the return as with the tail event.**
+That is the whole explanation for seven consecutive negative results: the features
+shift the entire distribution and do not isolate the tail, so a binary gate is the
+one instrument guaranteed not to see them. They are weights.
+
+They fall into two coherent families — **selling already underway** (`sold_115`,
+`largest_sell`, `n_sells`) and **launch size and heat** (`eth_in_total`,
+`pool_eth`) — not isolated winners.
+
+### 6T.3 The composite, and the protocol
+
+```
+S_sell = mean pctrank( sold_115 , largest_sell , n_sells )
+S_size = mean pctrank( eth_in_total , pool_eth )
+SCORE  = - ( S_sell + S_size ) / 2
+```
+
+No fitted coefficients, so there is nothing to overfit but the choice of features
+and their signs. Percentile ranks are computed on the training window only.
+
+**Rolling-origin validation**, fixed in advance: sort all 371 by `init_block`,
+train on the first 30%, then ten sequential out-of-time folds over the remaining
+260. Every prediction is made from strictly earlier data. That gives **260
+out-of-time trades containing 30 deep losers — six times the event count the Part 9
+holdout could offer**, which is the specific defect that made Part 9 unresolvable.
+
+### 6T.4 The result — MEASURED
+
+```
+quintile        n   deep%   median     mean   size     $ P&L
+q1 (worst)     35   11.4%    13.9%     5.9%     $5      3.56
+q2             62   14.5%    -1.7%    -6.2%    $10    -50.34
+q3             65    9.2%     7.3%     2.0%    $15      6.91
+q4             59   11.9%    11.5%     6.6%    $20     66.65
+q5 (best)      39    0.0%    13.8%    16.8%    $25    156.03
+
+SIZE-WEIGHTED  $182.81 on $3925 deployed   (4.66% of capital)
+FLAT $15        $99.33 on $3900 deployed   (2.55% of capital)
+DELTA          $+83.49                     (+84.1% vs flat)
+```
+
+- Out-of-fold **Spearman(SCORE, return) = +0.248, p = 0.0001** — higher than the
+  in-sample 0.19, which is the opposite of what a fitting artefact does.
+- **9 of 10 folds** beat flat (P = 0.011 under a fair coin). Per-fold rho is
+  positive in 9 of 10.
+- Top quintile: **0 deep losses in 39** against an 11.6% base rate, exact binomial
+  **p = 0.0082**.
+
+**It is a top-end effect, not a bottom-end one.** Decomposed one lever at a time:
+
+```
+full ladder 5/10/15/20/25        $ +83.49
+ONLY top quintile up   ($25)     $ +65.42
+ONLY bottom quintile down ($5)   $ -20.63     <- shrinking the worst LOSES money
+```
+
+q1's mean was +5.9%, better than q2 and q3. **The composite finds a good top; it
+does not find a bad bottom.** That agrees with Part 9 rather than overturning it:
+the deep loser is still not identifiable. Something else is.
+
+### 6T.5 THE CONTROL FIRED, AND WHAT IT ACTUALLY CAUGHT
+
+Refutation condition 3 — "if the control also beats flat, the machinery invents
+structure" — **fired**. The committed control (`name_len`, `symbol_len`,
+`buyers_5s`, all |rho| <= 0.013) beat its own flat arm by $+26.98.
+
+Two defects in the control, both mine:
+
+1. **It ran on 206 trades, not 260**, because those three features are null for
+   the holdout era. It was never the same comparison.
+2. **The dollar-delta metric is simply noisy.** A permutation null — shuffling the
+   size assignment within each fold, 5000 times — gives a null delta with **sd
+   $31.87, p90 $+33.28, p95 $+44.94**. A sizing map carrying no information wins
+   by $27 routinely.
+
+Re-run against the null, on the identical 260 trades:
+
+```
+                              delta vs flat   permutation p
+SCORE                            $ +83.49        0.0028      BEYOND NOISE
+CTL2 (same 260, dead features)   $ +46.92        0.0658      inside the band
+```
+
+So the finding survives, but **the pre-committed pass/fail on the dollar delta was
+the wrong test and the control is what exposed it.** The robust statistic is the
+out-of-fold Spearman, which needs no sizing map: **+0.248 for SCORE against -0.010
+for the true-null control**. This is the second time a carried control has caught a
+bad bar (§6R.1 was the first) and it is the reason they are carried.
+
+### 6T.6 Caveats that are not resolved
+
+- **Concentration.** The top 10 contributors supply $62.95 of the $83.49. The
+  remaining 250 trades supply $20.53 — still positive, still 9 of 10 folds, but
+  the gain is not evenly earned.
+- **In-sample family selection.** The two feature families were chosen from a
+  screen computed on all 371, holdout included. Rolling-origin cannot manufacture
+  temporal stability, but it also cannot undo that leak. Disclosed in
+  `docs/NAMED-RULE-P10.md`.
+- **0 of 39 will not repeat.** It is a 39-trade estimate of a rate that is
+  certainly not zero.
+
+### 6T.7 Two findings parked, with reasons
+
+**Creator history is a real in-sample effect that CANNOT be tested yet.** Counted
+causally — launches strictly earlier by the same creator, from the 1016-launch
+table, never using future launches:
+
+```
+prior == 0 (first ever)   n=111   median +5.7%   mean -0.8%   SUM -0.94   deep 15.3%   win 61%
+prior >= 1                n=206   median +8.6%   mean +4.1%   SUM +8.41   deep 10.7%   win 73%
+```
+
+It is a **step at zero, not a trend** — Spearman on the raw count is +0.022, which
+is why every rank-based screen has missed it. It is excluded from the rule because
+the creator-history table ends at block 66,439,983 and the holdout era starts at
+66,530,927: **every holdout launch would read `prior = 0`, a filter matching
+nothing**, which would look like a finding and be an artefact. One creator holds 41
+of the 317 launches (mean -3.6%, win 49%); excluding them lifts `prior >= 1` to
+n=166, mean +6.0%, win 80% — reported for completeness, **not** adopted, because
+dropping a creator for being bad is selection on the outcome.
+
+**Time-of-day and launch density found nothing.** A 4-way control split of n≈90
+moves the mean by ±1.7 points on its own, and the two time cuts contradict each
+other: the quietest launch-density quartile had the **best** mean (+4.5%) while the
+lowest-activity hours had the **worst** (-6.7% on n=38). Both are inside noise and
+they disagree, which is what noise looks like.
+
+### 6T.8 What would prove this section wrong
+
+`docs/NAMED-RULE-P10.md` commits **P10-v2** — SCORE unchanged, $25 on the top
+quintile, $15 on all others, nothing filtered — with four refutation conditions,
+timestamped before any launch after block 67,305,971 was collected. That window is
+the only genuinely unseen data that exists. If v2's Spearman is <= 0 there, or its
+dollar P&L fails to beat flat, or its top quintile does not beat the whole-sample
+mean, the section dies.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-19, from Part 9C/9D:**
