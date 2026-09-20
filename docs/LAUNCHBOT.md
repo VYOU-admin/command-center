@@ -8168,7 +8168,153 @@ measured in 6X.2 it will be **materially fewer**. The result is very likely to b
 **not evaluable**, and that will be reported as such rather than dressed as a
 finding in either direction.
 
+## 6Y. PART 13 — n = 4. NOT EVALUABLE. TWO DEFECTS FOUND INSTEAD.
+
+**Status: MEASURED. 108 cycles over 17h50m, 0 failures, 0 non-zero exits, 7,540 CU
+≈ $0.004. Halt verified from a fresh connection at start and at end: `bot_control`
+mode `*` halted = true, `bot_trades` 130 rows, last 2026-09-17. No trading.**
+
+### 6Y.1 n FIRST
+
+```
+canonical launches stored   178
+QUALIFIED (all four conds)    4
+SCORED (has a return)         4        <-- n
+block span   67,512,037..68,106,895 = 16.64 hours
+```
+
+**n = 4 is below the evaluability floor of 10. No conclusion is drawn from the
+return figures in either direction.** The rate is 5.8 qualifying launches/day
+against the 12.1/day measured in Part 12 — reaching n = 10 needs roughly another
+41 hours, n = 30 about five days.
+
+### 6Y.2 The funnel — MEASURED, every gate evaluated on all 178
+
+```
+canonical launches seen                      178   100.0%
+  pass GATE 1 (creator_share >= 40%)          65    36.5%
+  pass GATE 2 (sold by +90 s < 25%)          156    87.6%
+  pass BOTH gates                             49    27.5%
+  UNTOUCHED (n_sells=0 & eth <= 3.6931)       28    15.7%
+  both gates AND untouched                     4     2.2%
+  pass liquidity floor (pool_eth > 0)        178   100.0%
+QUALIFIED (all four)                           4     2.2%
+```
+
+**Gate 1 is again the binding constraint** — it rejects 113 of 178 while gate 2
+rejects 22. The 12-hour share≥40% rate is 36% and 37%, at the bottom of the 36-90%
+range §6W.5 recorded but not below it. Median creator share 37.4% in both buckets.
+
+### 6Y.3 DEFECT 1 — THE LIQUIDITY FLOOR AS WRITTEN DOES NOT WORK
+
+The §7 floor is `pool_eth > 0`. It rejected **zero of 178**, and that is not
+because the launches are healthy:
+
+```
+pool_eth over all 178:  min 0.0000   p10 0.0018   median 0.1721   p90 3.7128
+pool_eth <= 0:      0
+pool_eth < 0.001:  11
+```
+
+Of the 28 UNTOUCHED launches, **24 have a median `pool_eth` of 0.0018 ETH** — dust,
+about a twentieth of a percent of a real 3.5 ETH pool, and functionally the same
+empty shell §6W.3 measured at mean -97.9% with 94.3% unsellable. Part 12's empty
+pools happened to read exactly `0.000`; this window's read `0.0018`. **A strict
+`> 0` test passes them all.**
+
+The floor is presently doing nothing, and the strategy is protected only by gate 1
+— the same accidental protection §6W.3 warned about, now demonstrated. **The floor
+must be an absolute ETH minimum, not a positivity test.** It is not re-specified
+here on a single window's data; that is a measurement to make deliberately, and it
+is added to §7 as an open defect.
+
+### 6Y.4 DEFECT 2 — THE COLLECTOR CANNOT EVALUATE TWO OF THE FOUR CONDITIONS
+
+To save compute, `p13-collect` prices entry and exit **only for launches that pass
+all four conditions**. Refutation conditions 1 and 2 compare UNTOUCHED against the
+rest of the fresh sample, and the rest of the fresh sample was never priced:
+
+```
+qualified launches with a return      4
+NON-qualified launches with a return  0     RETURNED NO ROWS
+```
+
+**This is a design defect in my collector, not a property of the data.** Conditions
+1 and 2 are uncomputable regardless of how long collection runs. Fixing it means
+pricing the non-qualifying gated launches too — 49 gated against 4 qualified in
+this window, so roughly 12x the pricing cost, still only about 14,000 CU per 17
+hours. The saving was not worth the blindness.
+
+### 6Y.5 The four pre-registered conditions, scored as written
+
+```
+1. UNTOUCHED median <= whole-sample median    NOT EVALUABLE — comparison arm never
+                                               priced (6Y.4), not an n problem
+2. UNTOUCHED deep rate >= whole-sample rate   NOT EVALUABLE — same cause
+3. UNTOUCHED share of gated outside 8-30%     DID NOT FIRE — 4/49 = 8.16%, inside
+                                               the band by 0.16 points. One fewer
+                                               qualifier would be 6.1% and would
+                                               have fired. Fragile, not clean.
+4. deep rate exactly zero again               TECHNICALLY MET (0 of 4) but NOT
+                                               EVALUABLE: P(0 deep in 4 | true rate
+                                               11.6%) = 0.61. Four trades cannot
+                                               distinguish 0% from 12%.
+```
+
+**Not one condition returned an interpretable verdict.**
+
+### 6Y.6 The four trades, reported because they were asked for, not because they mean anything
+
+```
+block 67,718,201  share 44.3%  eth_in 3.077  RETURN -21.22%
+block 67,743,067  share 44.3%  eth_in 2.446  RETURN +46.01%
+block 67,795,153  share 49.8%  eth_in 2.795  RETURN  +1.96%
+block 68,091,740  share 58.5%  eth_in 3.553  RETURN +17.31%
+
+n=4  median +17.31%  mean +11.01%  SUM 0.4406  win 75%  deep 0
+AT $25/TRADE: gross $11.01, gas $0.77, NET $10.24
+```
+
+Entry failed 0 times, unsellable 0 times, empty-pool 0 times among qualifiers.
+**Peak concurrent positions 1, peak capital at risk $25** — the four trades are
+separated by 25,000 to 296,000 blocks, so no two overlap a 1,000-block hold.
+
+A +11% mean on four trades is not evidence. The standard deviation of the four is
+27 points, so the standard error is 14 points and the mean is within one of zero.
+
+### 6Y.7 What this pass actually established
+
+- **Nothing about the rule.** n = 4, and two of four conditions are structurally
+  uncomputable with the current collector.
+- **The liquidity floor in §7 is ineffective as written** and must become an
+  absolute minimum. MEASURED.
+- **Gate 1 remains the binding constraint** at a 36-37% pass rate — the bottom of
+  the recorded range, but stable across both 12-hour buckets rather than still
+  falling. This moderates §6X.2: the launchpad's overnight rate recovered to 178
+  canonical launches in 16.6 hours (257/day), against the 2.2-hour dead patch that
+  section recorded. **§6X.2's "collapse" was a several-hour lull, not a trend**,
+  and saying otherwise would have been over-reading a short window — the same
+  error §6V.3 made and §6W.5 corrected.
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-20, from Part 13:**
+
+- **THE LIQUIDITY FLOOR `pool_eth > 0` IS INEFFECTIVE AND MUST BECOME AN ABSOLUTE
+  MINIMUM.** §6Y.3 measured it rejecting **0 of 178** canonical launches while 24
+  UNTOUCHED launches sat at a median `pool_eth` of **0.0018 ETH** — dust, and
+  functionally the same shell §6W.3 measured at mean -97.9% with 94.3%
+  unsellable. Part 12's empty pools read exactly `0.000`; this window's read
+  `0.0018`, and a strict `> 0` test passes them. The threshold must be measured
+  deliberately rather than guessed, but until it exists the strategy is protected
+  only by gate 1 — the accidental protection §6W.3 explicitly warned against.
+
+- **A COLLECTOR THAT PRICES ONLY QUALIFYING LAUNCHES CANNOT SCORE ITS OWN
+  RULE.** §6Y.4: `p13-collect` skipped pricing for non-qualifying launches to
+  save compute, which made refutation conditions 1 and 2 — both of which compare
+  UNTOUCHED against the rest of the sample — uncomputable no matter how long it
+  runs. Any future collector must price the comparison arm. The cost is ~12x the
+  pricing calls and still only ~14,000 CU per 17 hours.
 
 **ADDED 2026-09-20, from Part 12:**
 
