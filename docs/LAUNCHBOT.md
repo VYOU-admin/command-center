@@ -8090,6 +8090,84 @@ and a bot sized on last week's rate will be wrong in either direction.
   **12.1 launches/day** in this window, on a population whose share of the chain
   swings between 12% and 90%.
 
+## 6X. PART 13 — OVERNIGHT COLLECTION (IN PROGRESS)
+
+**Status at start: MEASURED. Collection running. Scored in the morning.**
+
+### 6X.1 Setup
+
+`src/cli/p13-collect.ts`, committed and pushed **before** it ran, scores the
+committed rule unchanged:
+
+```
+GATE 1     creator_share >= 40%
+GATE 2     cumulative supply sold by +90 s < 25%
+UNTOUCHED  n_sells == 0  AND  eth_in_total <= 3.6931 ETH   (absolute, per P11)
+FLOOR      pool_eth > 0                                     (per §7, from §6W.3)
+ENTRY +115 s   EXIT +215 s   unconditional
+```
+
+`START_BLOCK` is pinned at **67,493,776**, the `to` block of the Part 12 run, so
+every launch it sees postdates the rule. It stores **every** canonical launch, not
+only the qualifying ones, so the gate funnel is measured rather than inferred; the
+expensive entry/exit pricing runs only for launches that pass all four conditions.
+A launch is processed only once its exit block exists, and the resume point is the
+highest stored `init_block`, so an immature launch is picked up on a later cycle
+rather than stored unpriced and skipped forever.
+
+Run as a detached `setsid nohup` loop re-invoking the CLI every 20 minutes. A
+crashing cycle does not stop the loop. **Nothing may be pushed while it runs** — a
+redeploy replaces the container and kills it.
+
+Halt verified from a fresh connection at start: `bot_control` mode `*` halted =
+true; `bot_trades` 130 rows, last 2026-09-17. No trading.
+
+### 6X.2 THE LAUNCHPAD HAS GONE QUIET — MEASURED, AND IT IS NOT A DEFECT
+
+Cycle 1 covered blocks 67,493,776..67,503,679 (9,903 blocks, ~16.6 min) and found
+**zero canonical launches**. At the rate measured only hours earlier that window
+should have held roughly three. Investigated before reporting, per the standing
+rule:
+
+```
+range                                    blocks   TokenCreated   Initialize   canonical
+cycle-1 window                            9,903             1          104           0
+just before it (Part 12 covered this)    13,776             2          141           2
+67,400,000..67,480,000                   80,000             0          948           0
+most recent 20,000 blocks (~33 min)      20,000             2          219           1
+```
+
+**Uniswap v4 pools are still being created in quantity — 948 `Initialize` events in
+2.2 hours — while Pools.trade emitted ZERO `TokenCreated` in the same span.**
+
+Three explanations were checked:
+
+1. *The sweep is broken.* **No.** The same code found 2 canonical launches in the
+   immediately preceding range.
+2. *Pools.trade migrated to a new factory.* **No.** All three known addresses still
+   carry code (factory 26,762 hex chars, entry 8,256, original entry 7,496), and
+   none appears as `tx.to` in a sample of the 60 most recent `Initialize` logs.
+   No replacement launchpad dominates that sample either — the creators are
+   34x `0x58daec3116aae6d93017baaea7749052e8a04fa7`, which **§6C already
+   established is the Uniswap v4 PositionManager and not a launchpad at all**,
+   8x one address, and thirteen singletons.
+3. *Launch activity genuinely stopped.* **This is what the data shows.** Ordinary
+   manual v4 pool creation continues; the launchpad's own output has fallen to
+   roughly 1-2 per half hour against ~10 per hour earlier in the day.
+
+This extends §6W.5. The population is not merely volatile in composition — the
+**absolute launch rate of the only launchpad this strategy trades has collapsed**.
+Part 12's last 12-hour bucket already showed volume halving (124-167 per 12 h down
+to 67); this is the continuation.
+
+### 6X.3 What this means for the overnight n
+
+At the Part 12 rate of 12.1 qualifying launches/day, twelve hours would give ~6 —
+already below the n=10 the operator set as the evaluability floor. At the rate
+measured in 6X.2 it will be **materially fewer**. The result is very likely to be
+**not evaluable**, and that will be reported as such rather than dressed as a
+finding in either direction.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-20, from Part 12:**
