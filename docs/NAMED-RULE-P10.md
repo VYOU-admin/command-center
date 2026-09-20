@@ -252,3 +252,70 @@ recomputed on the fresh window. Recomputing it there would let the threshold
 chase the new data, and the pre-registered share check (8-30%) would then be
 unable to detect a population shift — it would be guaranteed to pass by
 construction.
+
+---
+
+# P12 — UNTOUCHED ON THE UNGATED POPULATION
+
+Committed 2026-09-19, **before a single ungated launch has ever been priced.** No
+entry or exit outcome exists for any launch with `creator_share < 40%` anywhere in
+this project, so nothing below can have been chosen by looking.
+
+## Why this is the test that matters
+
+Every finding from §6I to §6U is conditioned on `creator_share >= 40%`. §6V.4
+established that the 379 stored launches all sit between 0.4104 and 0.6416 — gate
+1 was applied upstream when the sample was built. §6V.3 then measured that launch
+type falling from 40% of the chain to 13% in under a day, with the gated rate
+dropping 54.0 to 19.4 per day.
+
+So either UNTOUCHED describes something about launches in general, or it
+describes something about a launch type that is disappearing. **That is a binary
+question and it has never been asked.**
+
+## The rule under test — unchanged, not re-fitted
+
+```
+UNTOUCHED  =  n_sells == 0                  (nobody has sold by +115 s)
+          AND eth_in_total <= 3.6931 ETH    (the cut pinned in P11, NOT recomputed)
+ENTRY  +115 s      EXIT  +215 s     unconditional, as in §6P
+```
+
+The 3.6931 threshold is carried over as an **absolute number**. Recomputing a
+percentile on the ungated population would let the cut chase the new data and
+would make the population-shift check unfalsifiable.
+
+## Predictions, in advance
+
+- **Ungated launches are the majority.** 60-90% of canonical launches in the
+  window fail gate 1.
+- **UNTOUCHED will be RARER among ungated launches than among gated ones** —
+  below 14.8%, plausibly far below. A low creator share means the creator did not
+  buy much at block 0, which mechanically lowers `eth_in_total`, but such
+  launches are also the ones that get sold into early. Direction is genuinely
+  uncertain and this prediction is the weakest one here.
+- **If UNTOUCHED is a general mechanism**: ungated + UNTOUCHED shows a median
+  above the ungated median by at least 5 points, and a deep-loss rate below the
+  ungated rate.
+- **If gate 1 is load-bearing**: ungated + UNTOUCHED is indistinguishable from
+  ungated + touched, and the strategy's addressable market is shrinking with no
+  available substitute.
+
+## REFUTATION of "UNTOUCHED is general"
+
+1. `ungated + UNTOUCHED` median at or below `ungated + touched` median.
+2. `ungated + UNTOUCHED` deep-loss rate at or above `ungated + touched`.
+3. Fewer than 15 ungated UNTOUCHED launches priced — then the cell is too thin to
+   claim anything in either direction, and that must be stated rather than
+   papered over.
+
+## Controls carried
+
+- The **gated** arm is re-priced by the same code path in the same window, so any
+  difference between gated and ungated cannot be an artefact of a different
+  measurement.
+- A **dead-pool check**: the fraction of returns that are exactly 0.000 is
+  reported per cell. §6U.6 refuted that explanation on gated launches and it must
+  be re-checked here, where low activity is the norm.
+- Truncation is **reported, never silent**: if the compute ceiling stops the run,
+  the number priced and the number left unpriced are both logged.
