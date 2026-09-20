@@ -107,7 +107,8 @@
     "signer-check": "node dist/cli/signer-check.js",
     "resolve-unsellable": "node dist/cli/resolve-unsellable.js",
     "halt-control": "node dist/cli/halt-control.js",
-    "creator-backfill": "node --enable-source-maps dist/cli/creator-backfill.js"
+    "creator-backfill": "node --enable-source-maps dist/cli/creator-backfill.js",
+    "ungated-price": "node --enable-source-maps dist/cli/ungated-price.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
