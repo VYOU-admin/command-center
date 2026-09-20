@@ -7940,7 +7940,179 @@ strategy to roughly zero before gas.
    If it does not, gate 1 is load-bearing and the strategy's market is shrinking.
    This is the single highest-value measurement available and it is not expensive.
 
+## 6W. PART 12 — UNTOUCHED IS NOT GENERAL. IT INVERTS. GATE 1 IS LOAD-BEARING.
+
+**Status: MEASURED on 770 launches, 193,410 CU ≈ $0.10. All 770 priced, 0 skipped,
+0 unpriced, no truncation. The rule was committed (`14d522c`) before a single
+ungated launch had ever been priced — and no launch with `creator_share < 40%` had
+ever had an entry or exit price computed anywhere in this project.**
+
+### 6W.1 The result — both refutation conditions fired
+
+UNTOUCHED cut held at the P11-pinned **3.6931 ETH absolute**, not recomputed.
+
+```
+cell                     n    median     mean      SUM    deep    win    unsellable    t
+GATED   + UNTOUCHED     35    +14.1%   +15.4%    +5.38    2.9%    94%         0.0%  +4.04
+GATED   + touched      348     +3.3%    -0.5%    -1.57   10.6%    55%         0.0%  -0.25
+UNGATED + UNTOUCHED    165    -31.7%   -47.9%   -79.07   46.7%     8%        40.0%  -11.69
+UNGATED + touched      222     -0.5%    +6.4%   +14.19    0.9%    13%         0.0%  +1.52
+```
+
+```
+1. ungated+UNTOUCHED median <= ungated+touched median?   FIRED  (-31.7% vs -0.5%)
+2. ungated+UNTOUCHED deep   >= ungated+touched deep?     FIRED  (46.7% vs 0.9%)
+3. fewer than 15 priced?                                 passed (n=165)
+```
+
+**UNTOUCHED is not merely useless outside the gate. It is inverted, and violently
+so** — mean **-47.9%**, deep-loss rate **46.7%**, win rate **8%**, t = -11.69.
+Applied to the population that is now the majority of the chain, it would have
+lost roughly half of every position.
+
+**Method-consistency control passes.** The gated arm was priced by the identical
+code path in the same run: n=35, median +14.1%, mean +15.4%, deep 2.9% against the
+stored §6U figure of n=51, median +12.6%, mean +14.3%, deep 3.9%. The two arms are
+comparable, so the inversion cannot be a measurement artefact.
+
+### 6W.2 WHY — the threshold means opposite things in the two populations
+
+```
+cell                     n   unsellable   med eth_in_total   med pool_eth   med creator_share
+GATED   + UNTOUCHED     35     0 ( 0.0%)            3.643          3.643             58.2%
+GATED   + touched      348     0 ( 0.0%)            4.028          3.802             58.2%
+UNGATED + UNTOUCHED    165    66 (40.0%)            0.000          0.000              0.0%
+UNGATED + touched      222     0 ( 0.0%)            0.141          0.047              3.1%
+```
+
+**`UNGATED + UNTOUCHED` has a median `eth_in_total` of 0.000 and a median
+`pool_eth` of 0.000.** These are not quiet launches. They are **empty pools** —
+nothing has been bought, nothing has been sold, and there is no ETH in the pool at
+all. Forty percent of them cannot be sold into, which is a -100% by the standing
+backtest rule.
+
+So `eth_in_total <= 3.6931` was never measuring "little buying so far":
+
+- Inside `creator_share >= 40%`, ~3.5-3.65 ETH **is the creator's own seed buy**.
+  It is the floor of that population, and "untouched" genuinely means *seeded,
+  liquid, and not yet discovered*.
+- Outside the gate, the same condition selects the bottom of a range that reaches
+  **0.000** — an empty shell.
+
+§6U.6 tested "is 3.5 ETH a structural floor?" and answered no, minimum 2.00. **That
+answer was correct and its scope was wrong**: it was computed on a sample where
+gate 1 had already been applied upstream. Across the whole population the minimum
+is zero.
+
+### 6W.3 The empty pools are the single largest destroyer measured on this chain
+
+```
+                                 n    median     mean      SUM    deep    unsellable      t
+EVERYTHING                     770     -0.5%    -7.9%   -61.07   15.2%         8.6%   -4.21
+pool_eth == 0 (empty at +115s)  70   -100.0%   -97.9%   -68.51   97.1%        94.3%  -69.26
+pool_eth >  0 (any liquidity)  700     -0.5%    +1.1%    +7.44    7.0%         0.0%   +0.61
+```
+
+**70 launches destroy 68.51 stake-units on their own.** Removing them alone moves
+the entire 770-launch population from a mean of -7.9% to +1.1%. The current rule
+avoids them only *by accident*, because an empty pool has a creator share near
+zero and gate 1 rejects it. **If gate 1 is ever relaxed — and §6V.3 is pressure to
+relax it — the empty pools walk straight in.**
+
+### 6W.4 The mid-band: the one remaining lead, and it is a lottery
+
+Among pools with liquidity, by creator share:
+
+```
+                               n    median     mean      SUM    deep      t
+pool_eth>0 & share < 1%       62     -0.6%   -20.8%   -12.87   16.1%  -4.50
+pool_eth>0 & share 1-40%     255     -0.5%    +6.5%   +16.51    0.4%  +1.72
+pool_eth>0 & share >= 40%    383     +4.0%    +1.0%    +3.80    9.9%  +0.58
+```
+
+The **1-40% band has ONE deep loss in 255** — a rate 20x below the population the
+strategy currently trades — with a higher mean, and it is **87.9 launches/day
+against the current rule's 12.1/day**.
+
+**But its payoff is the opposite kind of thing, and the mean is five trades:**
+
+```
+                             p10    p25    p50    p75    p90     p99     max    win
+gated >=40% (all)           -62%    -2%    +4%   +17%   +31%    +70%    +99%    58%
+MID-BAND 1-40%, liquid       -6%    -4%    -1%    -1%    +7%   +238%   +791%    13%
+
+SUM = 16.51 over 255 trades
+  top  1 trade   =  7.91   remainder mean  +3.4%
+  top  3 trades  = 12.69   remainder mean  +1.5%
+  top  5 trades  = 15.93   remainder mean  +0.2%
+  top 10 trades  = 22.15   remainder mean  -2.3%
+```
+
+**87% of mid-band trades lose, and the entire positive mean is five observations.**
+Median -0.5% becomes **-2.5% net at $10 positions** and -0.7% at $100, because gas
+is an absolute $0.193. This is an unresolved lottery, not a demonstrated edge, and
+it is **not adopted**. It is recorded as the one hypothesis worth a pre-registered
+fresh test.
+
+### 6W.5 CORRECTION TO §6V.3 — the shift is noisier than one day showed
+
+With 2.90 days instead of 1.00:
+
+```
+12h bucket   from-block   launches   share>=40%   share 1-40%   empty   med share
+       150    65005032        124    111 (90%)       5 ( 4%)   7 ( 6%)     58.2%
+       151    65233170        129     47 (36%)      61 (47%)  10 ( 8%)     10.6%
+       152    65664543        167     91 (54%)      53 (32%)  13 ( 8%)     56.8%
+       153    66102568        153     71 (46%)      53 (35%)  14 ( 9%)      3.8%
+       154    66530927        128     53 (41%)      45 (35%)  24 (19%)      9.0%
+       155    66962713         67      8 (12%)      38 (57%)   2 ( 3%)      3.5%
+```
+
+**§6V.3 read a one-day window as a collapse. It is not monotone** — the share≥40%
+fraction goes 90%, 36%, 54%, 46%, 41%, 12%. The honest statement is a **highly
+volatile bimodal population swinging between roughly 36% and 90%, whose most
+recent full 12-hour bucket is 12%** — the lowest observed, but one bucket. Launch
+volume has also roughly halved, 124-167 per 12h down to 67.
+
+The strategic implication is unchanged and arguably worse: the addressable
+population is not merely shrinking, it is **unstable on a twelve-hour timescale**,
+and a bot sized on last week's rate will be wrong in either direction.
+
+### 6W.6 What is now settled
+
+- **Gate 1 is load-bearing and must stay.** MEASURED, decisively.
+- **UNTOUCHED is a within-gate effect only.** It does not generalise and it
+  inverts outside.
+- **There is no substitute population ready to trade.** The ungated majority is
+  either empty (catastrophic) or a lottery whose mean is five trades.
+- The strategy is what §6U said it was — the 9-15% of gated launches that are
+  untouched, n=35 here at median +14.1%, mean +15.4%, win 94% — and that is
+  **12.1 launches/day** in this window, on a population whose share of the chain
+  swings between 12% and 90%.
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-20, from Part 12:**
+
+- **A HARD LIQUIDITY FLOOR AT ENTRY: refuse any pool with `pool_eth <= 0` at
+  +115 s.** §6W.3 measured 70 such launches out of 770: median **-100%**, mean
+  -97.9%, and **94.3% of them cannot be sold into at all**. They destroy 68.51
+  stake-units by themselves and drag the whole 770-launch population from +1.1%
+  to -7.9%. The bot currently avoids them **only by accident**, because an empty
+  pool has a creator share near zero and gate 1 rejects it. The floor must be an
+  explicit, independent check, because gate 1 is under pressure to be relaxed.
+
+- **`UNTOUCHED` MUST NEVER BE EVALUATED OUTSIDE `creator_share >= 40%`.** §6W.1
+  measured it inverting: inside the gate n=35, mean +15.4%, deep 2.9%, win 94%;
+  outside the gate n=165, mean **-47.9%**, deep **46.7%**, win 8%, t = -11.69.
+  The `eth_in_total <= 3.6931 ETH` condition selects the creator's seed buy inside
+  the gate and an empty shell outside it. Implementing UNTOUCHED without the gate
+  would be the single most expensive defect available.
+
+- **Gate 1 is load-bearing and may not be dropped to restore trade volume.**
+  §6V.3 makes the population shift look like a reason to relax it; §6W.6 measures
+  that there is no substitute population. The ungated majority is either empty or
+  a lottery whose entire positive mean is five trades out of 255.
 
 **ADDED 2026-09-19, from Part 9C/9D:**
 
