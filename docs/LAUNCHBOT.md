@@ -8296,6 +8296,108 @@ A +11% mean on four trades is not evidence. The standard deviation of the four i
   and saying otherwise would have been over-reading a short window — the same
   error §6V.3 made and §6W.5 corrected.
 
+## 6Z. PART 13 v2 — THE COMPARISON ARM EXISTS. THREE THINGS BECAME MEASURABLE.
+
+**Status: MEASURED. Backlog cleared in one cycle — 174 attempted, 174 priced, 0
+could-not-reprice, 0 remaining, 43,690 CU. Verified from a fresh connection: 178
+rows, 178 `price_attempted`, 178 with a return, 178 `entry_ok`. Collector restarted
+and running. Halt unchanged.**
+
+### 6Z.1 What the rebuild fixed
+
+§6Y.4 recorded the defect: v1 priced only qualifying launches, so refutation
+conditions 1 and 2 — both of which compare UNTOUCHED against the rest — were
+uncomputable no matter how long collection ran. V2 prices **every** canonical
+launch. The dry run reconciled before the write, per the standing protocol:
+
+```
+rows 178 = qualified 4 + gated-not-untouched 45 + ungated 129    RECONCILES
+```
+
+The comparison arm is the **gated** population, not everything. §6U.5 and
+`loser-tag.ts` fix that: comparing against launches the gates reject would
+rediscover the gates.
+
+### 6Z.2 Conditions 1 and 2 — computable, and they did not fire
+
+```
+                                   n    median     mean    deep    win
+GATED + UNTOUCHED (the rule)       4    +17.3%   +11.0%    0.0%    75%
+GATED + not untouched (the arm)   45     +2.3%    +3.3%    8.9%    53%
+GATED whole sample                49     +2.3%    +3.9%    8.2%    55%
+```
+
+```
+1. UNTOUCHED median <= whole-sample median?   DID NOT FIRE  (+17.3% vs +2.3%)
+2. UNTOUCHED deep   >= whole-sample deep?     DID NOT FIRE  (0.0% vs 8.2%)
+```
+
+**n = 4. Both verdicts are DIRECTIONAL ONLY and are not evidence in either
+direction.** They point the way the rule predicts, and four trades cannot
+establish that. What has changed is that they are now *measurable* — they will
+produce a real verdict as n accumulates, which was impossible before.
+
+### 6Z.3 The §6W inversion REPLICATES out of time
+
+```
+                            n    median     mean    deep    win
+UNGATED + UNTOUCHED        24     -0.6%   -24.8%   20.8%     8%
+UNGATED + not untouched   105     -0.5%    -4.1%    3.8%    15%
+```
+
+§6W measured ungated+UNTOUCHED at mean **-47.9%**, deep **46.7%** on n=165. On a
+fresh window it is mean **-24.8%**, deep **20.8%** — **half the magnitude, same
+sign, same ordering**, and still far worse than the launches it is compared
+against. **This is the first finding in the whole investigation to replicate
+out of time.** It replicates in the direction of "do not do this", which is the
+useful direction for a safety rule.
+
+The §7 prohibition on evaluating UNTOUCHED outside the gate stands, now on two
+independent windows.
+
+### 6Z.4 THE LIQUIDITY FLOOR — the measurement the §7 defect needed
+
+Returns by `pool_eth` band across all 178 priced launches:
+
+```
+band                     n    median     mean    deep    win
+pool_eth < 0.001        11    -23.0%   -45.5%   36.4%     0%
+0.001 - 0.01            45     -0.5%    -0.5%    0.0%     2%
+0.01  - 0.1             26     -0.6%    -4.3%    3.8%     0%
+0.1   - 1               20     -0.5%   -11.6%    0.0%     0%
+1     - 3               36    +13.2%    +3.6%   11.1%    69%
+3+                      40     -0.4%    -2.4%   10.0%    48%
+```
+
+Two things, and the second is larger than the defect I was chasing:
+
+1. **Dust confirms as catastrophic.** Below 0.001 ETH: median -23.0%, mean
+   -45.5%, deep 36.4%, **win rate 0%**. `pool_eth > 0` passes every one of them.
+2. **Every band below 1 ETH has a win rate of 2% or less** — 0%, 2%, 0%, 0% across
+   n = 11, 45, 26, 20. Their medians all sit near -0.5%, which is approximately
+   the round-trip cost. **These pools do not move; you buy, you sell, you pay the
+   spread.** The two bands at 1 ETH and above are the only ones with a real win
+   rate (69% and 48%).
+
+**INFERRED, and stated as such: the floor belongs near 1 ETH, not near zero.** It
+is NOT re-specified here. Setting a threshold from the single window that
+suggested it is the tuning this investigation has repeatedly refused to do, and
+`n` in the decisive bands is 20 to 45. The measurement is recorded; the threshold
+stays an open §7 defect until it can be set on data that did not produce it.
+
+### 6Z.5 Cost and state
+
+43,690 CU for the backlog. Ongoing cost is ~290 CU per canonical launch against
+~250 launches/day ≈ 72,500 CU/day. **The dollar figures in this section are
+INFERRED from the ~$0.50/1,000,000 CU rate that prior runs billed at — they are
+not read from the provider**, per the standing rule that an external cost must
+come from the provider or be labelled as unavailable.
+
+The first v2 cycle found **0 canonical launches** in blocks 68,106,896..68,150,439
+(43,543 blocks, ~73 minutes). Recorded, not interpreted — §6Y.7 already
+established that short quiet patches on this launchpad are normal and that
+reading a trend into one is the error §6V.3 made twice.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-20, from Part 13:**
@@ -8308,13 +8410,20 @@ A +11% mean on four trades is not evidence. The standard deviation of the four i
   `0.0018`, and a strict `> 0` test passes them. The threshold must be measured
   deliberately rather than guessed, but until it exists the strategy is protected
   only by gate 1 — the accidental protection §6W.3 explicitly warned against.
+  **§6Z.4 now supplies the measurement**: every `pool_eth` band below 1 ETH has a
+  win rate of 2% or less (0%, 2%, 0%, 0% across n = 11, 45, 26, 20) with medians
+  near the round-trip cost, while the bands at 1 ETH and above win 69% and 48%.
+  The floor belongs near **1 ETH** — INFERRED, and deliberately NOT adopted here,
+  because setting it on the window that produced it is the tuning this
+  investigation refuses. It stays open until it can be set out of sample.
 
-- **A COLLECTOR THAT PRICES ONLY QUALIFYING LAUNCHES CANNOT SCORE ITS OWN
-  RULE.** §6Y.4: `p13-collect` skipped pricing for non-qualifying launches to
+- **RESOLVED 2026-09-20 (§6Z.1).** A COLLECTOR THAT PRICES ONLY QUALIFYING
+  LAUNCHES CANNOT SCORE ITS OWN RULE. §6Y.4: `p13-collect` skipped pricing for non-qualifying launches to
   save compute, which made refutation conditions 1 and 2 — both of which compare
   UNTOUCHED against the rest of the sample — uncomputable no matter how long it
-  runs. Any future collector must price the comparison arm. The cost is ~12x the
-  pricing calls and still only ~14,000 CU per 17 hours.
+  runs. Any future collector must price the comparison arm. **Fixed in
+  `p13-collect` v2, which prices every canonical launch; the 174-row backlog was
+  cleared for 43,690 CU and conditions 1 and 2 are now computable.**
 
 **ADDED 2026-09-20, from Part 12:**
 
