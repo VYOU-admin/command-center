@@ -8508,6 +8508,111 @@ being better. **The pass rate will look healthy while the edge is gone.** The pa
 rate is therefore not evidence the rule works — only the return comparison against
 the gated arm is, and that still needs n >= 10.
 
+## 6AB. PART 15 — VOLUME DOES NOT BUY PROOF. AND THE 1-ETH FLOOR WAS AN UNGATED FINDING.
+
+**Status: MEASURED, in-sample, zero spend on 15A/15B. P15 committed at `f35fa23`
+before scoring anything fresh. Halt verified from a fresh connection.**
+
+### 6AB.1 15A — the looser rules are SLOWER to prove, not faster
+
+402 gated launches over 3.99 days, entry +115 s, exit +215 s. Gated rate MEASURED
+over the most recent 24 hours of record: **69.0/day**.
+
+```
+rule                        n  trd/day   median     mean     SUM   win%   deep%      p10      t   net$10   net$25
+L0  gates only            402     69.0     5.6%     1.8%    7.09    66%   10.7%   -77.9%   0.97    -6.64    99.78
+L1  + pool_eth >= 0.5     389     66.8     6.3%     1.9%    7.54    69%   11.1%   -78.4%   1.03     0.33   113.43
+L1  + pool_eth >= 1.0     389     66.8     6.3%     1.9%    7.54    69%   11.1%   -78.4%   1.03     0.33   113.43
+L1  + pool_eth >= 2.0     387     66.4     6.4%     2.3%    8.73    69%   11.1%   -78.4%   1.20    12.65   143.66
+L2  + n_sells <= 2        180     30.9     7.8%     2.8%    5.13    72%    9.4%   -28.6%   1.17    16.52    93.42
+L3  + n_sells <= 5        258     44.3     5.4%     1.7%    4.34    66%   10.5%   -79.7%   0.75    -6.41    58.67
+P11 UNTOUCHED (strict)     40      6.9    14.8%    15.3%    6.12    92%    2.5%    +1.5%   4.28    53.45   145.21
+```
+
+**The decisive column.** `n` needed for t = 2 is **(2·sd/mean)²** — it scales with
+the *square* of noise over effect:
+
+```
+rule                        mean       sd   trd/day   n for t=2      DAYS
+L0  gates only              1.8%    36.5%      69.0        1712      24.8
+L1  + pool_eth >= 2.0       2.3%    36.9%      66.4        1071      16.1
+L2  + n_sells <= 2          2.8%    32.6%      30.9         525      17.0
+L3  + n_sells <= 5          1.7%    36.2%      44.3        1850      41.8
+P11 UNTOUCHED (strict)     15.3%    22.6%       6.9           9       1.3
+```
+
+**Loosening the rule made the sample SLOWER to accumulate, not faster.** Every
+loose variant keeps the same ~36% standard deviation while its mean collapses from
+15.3% to under 3%, so the trade count required explodes quadratically. L0 needs
+**1,712 trades and 24.8 days**. The premise that more volume is a faster route to
+proof is **measured false on this population.**
+
+### 6AB.2 15B — THE SUB-1-ETH DEAD ZONE IS AN UNGATED PHENOMENON
+
+§6Z.4 found every `pool_eth` band below 1 ETH had a win rate of 2% or less and
+proposed a ~1 ETH floor. Across the full gated history that **does not transfer**:
+
+```
+pool_eth deciles, GATED launches:
+  0.01  2.84  3.53  3.66  3.70  3.79  3.92  4.04  4.17  4.41  6.14
+
+gated with pool_eth < 1.0 :  13 of 402 (3.2%)
+gated with pool_eth < 2.0 :  15 of 402 (3.7%)
+band 0.5 - 1.0            :  RETURNED NO ROWS
+```
+
+**Gate 1 already removes the low-liquidity launches**, which is why
+`pool_eth >= 0.5` and `pool_eth >= 1.0` score **identically** (n=389 both) — the
+band between them is empty.
+
+**This corrects §6Z.4.** The dead zone was measured over *all* launches, where the
+dust pools live, and generalised to the gated population without checking. It is
+real where it was measured and irrelevant where the strategy operates. The §7 floor
+defect stands but is narrower than stated: it matters only if gate 1 is ever
+relaxed, and it is **not a source of edge**.
+
+### 6AB.3 What is actually there: an UPPER bound
+
+```
+band     n     median     mean    win    deep       t
+2-3     34     +10.3%    +9.3%    76%   17.6%   +1.14
+3-4    223      +8.7%    +4.8%    80%    9.9%   +2.18
+4-5    110      +1.0%    -3.2%    52%   12.7%   -0.81
+5+      20      -8.5%    -8.3%    25%    5.0%   -1.38
+```
+
+**More ETH in the pool by +115 s is worse.** This is the *same* mechanism §6U.6
+established, not a new fitted quantity: ETH in the pool is buying that has already
+happened, so a high value means the launch has been discovered and we would be
+buying late in the demand curve. UNTOUCHED said "very little buying"; this says
+"not yet a lot" — the same axis, relaxed.
+
+### 6AB.4 The rule committed, and its weakness
+
+`docs/NAMED-RULE-P15.md`: gates 1 and 2, `2.0 <= pool_eth <= 4.0`, `n_sells <= 2`,
+entry +115 s, exit +215 s. In-sample **n=133, mean +7.9%, sd 29.4%, 22.8/day, 55
+trades for t=2, 2.4 days.**
+
+**The weakness, stated in the rule file before it scored anything: the split is
+converging.** Win rate, 2-4 ETH versus 4+:
+
+```
+day 0   2-4: 121 / 88% / +5.8%      4+:  51 / 41% / -12.7%
+day 1   2-4:  76 / 79% / +6.7%      4+:  48 / 54% /  -0.8%
+day 2   2-4:  13 / 69% / +2.6%      4+:  13 / 31% /  -3.1%
+day 3   2-4:  47 / 62% / +3.1%      4+:  18 / 61% / +11.5%
+```
+
+The gap runs 47, 25, 38, then **1 point**, and on day 3 the out-of-band arm has the
+better mean. **On the most recent day of record this rule does not separate at
+all.** It is committed anyway because the alternative is a rule that cannot
+accumulate a sample, and a converging split is precisely what a fresh test exists
+to resolve — it should die on fresh data in about three days rather than on a
+judgement call now.
+
+The collector now scores **four rules in parallel on every launch**: P11 static,
+P14a (72h), P14b (12h), P15 band.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-20, from Part 13:**
@@ -8520,7 +8625,12 @@ the gated arm is, and that still needs n >= 10.
   `0.0018`, and a strict `> 0` test passes them. The threshold must be measured
   deliberately rather than guessed, but until it exists the strategy is protected
   only by gate 1 — the accidental protection §6W.3 explicitly warned against.
-  **§6Z.4 now supplies the measurement**: every `pool_eth` band below 1 ETH has a
+  **NARROWED 2026-09-21 by §6AB.2: this defect matters ONLY if gate 1 is relaxed.**
+  Within the gated population only 3.2% of launches have `pool_eth < 1.0` and the
+  0.5-1.0 band RETURNS NO ROWS, so the floor is not a source of edge there and
+  `>= 0.5` and `>= 1.0` score identically. §6Z.4 generalised an all-population
+  measurement to the gated one without checking.
+  **§6Z.4 supplied the measurement**: every `pool_eth` band below 1 ETH has a
   win rate of 2% or less (0%, 2%, 0%, 0% across n = 11, 45, 26, 20) with medians
   near the round-trip cost, while the bands at 1 ETH and above win 69% and 48%.
   The floor belongs near **1 ETH** — INFERRED, and deliberately NOT adopted here,
