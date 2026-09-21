@@ -8830,7 +8830,47 @@ rows predate the column and were never scored under it, so this is **not yet
 refutation condition 4** — but it is the direction of one, and it is recorded now
 rather than after the fact.
 
-### 6AD.6 What arming requires
+### 6AD.6 THE WAIT WINDOW RAISED TO 8 HOURS — AND THE POLL RATE WITH IT
+
+Raised 2026-09-21 on the §6AE rate measurement. **The poll interval had to change
+with it, and that is the substantive part of the edit.**
+
+Each poll costs about 130 CU — `eth_blockNumber` plus the two `eth_getLogs` sweeps
+behind `findCanonicalLaunches` — and that cost is **per poll, not per block
+scanned**, because the sweep covers `lastScan+1..head` whatever the gap. At the
+original 5-second interval an 8-hour wait is 5,760 polls:
+
+```
+5 s poll, 8 h   5,760 polls x 130 = ~749,000 CU   BLOWS the 300,000 ceiling
+                                                  AND the operator's ~500,000 threshold
+20 s poll, 8 h  1,440 polls x 130 = ~187,200 CU
+```
+
+So the interval is 20 s and the ceiling is 400,000, deliberately below the
+check-in threshold:
+
+```
+scanning                ~187,200 CU
+evaluating and trading   ~35,000 CU
+TOTAL                   ~222,200 CU   against a 400,000 ceiling
+```
+
+**Nothing is missed by polling slower.** The sweep is range-based, so a launch is
+merely learned about up to 20 s late, against a 115-second runway to its entry
+block.
+
+The effect on the question the window exists to answer, at §6AE's measured 5.4
+qualifiers/day:
+
+```
+P(catch a qualifier)   90 min -> 29%      8 h -> 83%
+```
+
+Verified live in dry run: `wait_hours 8`, `poll_seconds 20`, `cu_budget ~187200
+scanning + ~35,000 evaluating and trading, ceiling 400000`, then
+`REFUSING TO START: HALTED, scope=chain`.
+
+### 6AD.7 What arming requires
 
 The chain-wide halt (`mode='*'`, set 2026-09-18) must be lifted, and the executor
 run with an explicit `--live`. Given §6AD.5, a longer wait window than 90 minutes
