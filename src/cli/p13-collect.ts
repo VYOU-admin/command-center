@@ -98,6 +98,12 @@ const ROLL = [
   { key: 'b' as const, hours: 12, minN: 10 },   /* the window that actually tracks */
 ];
 const BLOCKS_PER_SEC = 9.93;          /* MEASURED §6V.2 over four spans */
+/** P15 THE LIQUIDITY BAND. docs/NAMED-RULE-P15.md, committed before this scored
+ *  anything. An UPPER bound on pool_eth is the discriminator; the lower one is a
+ *  safety floor that binds on 3.7% of gated launches and is not a source of edge. */
+const P15_FLOOR_ETH = 2.0;
+const P15_CEIL_ETH = 4.0;
+const P15_MAX_SELLS = 2;
 const GATE2_AT_BLOCKS = 900;
 const ENTRY_BLOCKS = 1_150;
 const EXIT_BLOCKS = 2_150;
@@ -222,7 +228,8 @@ async function main(): Promise<void> {
       'price_attempted boolean not null default false',
       'thr_a numeric', 'thr_b numeric',
       'untouched_a boolean', 'untouched_b boolean',
-      'qualified_a boolean', 'qualified_b boolean']) {
+      'qualified_a boolean', 'qualified_b boolean',
+      'qualified_p15 boolean']) {
       await c.query(`alter table bot_p13 add column if not exists ${col}`);
     }
     /* Rows v1 actually priced were exactly the qualifying ones. */
@@ -304,7 +311,7 @@ async function main(): Promise<void> {
 
     let seen = 0; let g1 = 0; let g2 = 0; let un = 0; let qual = 0; let priced = 0;
     let rollSeen = 0; let rollPassA = 0; let rollPassB = 0;
-    let qualACount = 0; let qualBCount = 0;
+    let qualACount = 0; let qualBCount = 0; let qualP15Count = 0;
     let lastA: number | null = null; let lastB: number | null = null;
     for (const l of canon) {
       const pid = (l.topics[1] ?? '').toLowerCase();
@@ -362,6 +369,9 @@ async function main(): Promise<void> {
       const qualB = gate1 && gate2 && unB && liqOk;
       if (qualA) qualACount += 1;
       if (qualB) qualBCount += 1;
+      const qualP15 = gate1 && gate2 && nSells <= P15_MAX_SELLS
+        && poolEth >= P15_FLOOR_ETH && poolEth <= P15_CEIL_ETH;
+      if (qualP15) qualP15Count += 1;
       if (gate1 && gate2) {
         rollSeen += 1;
         if (cuts.a !== null && ethIn <= cuts.a) rollPassA += 1;
@@ -382,10 +392,11 @@ async function main(): Promise<void> {
            gate1, gate2, n_sells, eth_in_total, pool_eth, untouched, liq_ok, qualified,
            entry_ok, exit_ok, ret, currency0, currency1, fee, tick_spacing, hooks,
            zero_is_pricing, price_attempted,
-           thr_a, thr_b, untouched_a, untouched_b, qualified_a, qualified_b)
+           thr_a, thr_b, untouched_a, untouched_b, qualified_a, qualified_b,
+           qualified_p15)
          values ($1,$2,$3,$4,$5::numeric,$6::numeric,$7,$8,$9,$10::numeric,$11::numeric,
                  $12,$13,$14,$15,$16,$17::numeric,$18,$19,$20,$21,$22,$23,true,
-                 $24::numeric,$25::numeric,$26,$27,$28,$29)
+                 $24::numeric,$25::numeric,$26,$27,$28,$29,$30)
          on conflict do nothing`,
         [CHAIN, pid, ib, token, share.toString(), sold90.toString(), gate1, gate2,
           nSells, ethIn.toString(), poolEth.toString(), untouched, liqOk, qualified,
@@ -394,7 +405,7 @@ async function main(): Promise<void> {
           zeroIsPricing,
           cuts.a === null ? null : cuts.a.toString(),
           cuts.b === null ? null : cuts.b.toString(),
-          unA, unB, qualA, qualB]);
+          unA, unB, qualA, qualB, qualP15]);
     }
 
     log.info('P13 cycle done', {
@@ -410,6 +421,7 @@ async function main(): Promise<void> {
       P14a_pass: rollSeen > 0 ? `${rollPassA}/${rollSeen}` : '0/0',
       P14b_pass: rollSeen > 0 ? `${rollPassB}/${rollSeen}` : '0/0',
       QUALIFIED_a: qualACount, QUALIFIED_b: qualBCount,
+      QUALIFIED_p15: qualP15Count,
       cu: inner.cuSpent,
     });
   } finally { c.release(); await app.pool.end(); }
