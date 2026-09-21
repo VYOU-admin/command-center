@@ -86,10 +86,32 @@ const V4_TOO_LITTLE = id('V4TooLittleReceived(uint256,uint256)').slice(0, 10);
 const UNREACHABLE = 1n << 127n;
 /** Refuse to run behind a wallet larger than instrumentation needs. */
 const MAX_WALLET_ETH = 0.05;
-/** How long to wait for a qualifying launch before giving up and saying so. */
-const WAIT_MINUTES = 90;
+/**
+ * How long to wait for a qualifying launch before giving up and saying so.
+ *
+ * **8 HOURS, RAISED FROM 90 MINUTES 2026-09-21.** §6AE measured qualifiers arriving
+ * at ~5.4/day across all four rules, with gaps of up to 337,517 blocks (~9 h). At 90
+ * minutes the chance of catching one was ~22% (Poisson), so the likely outcome was a
+ * timeout that consumed an arming window and answered nothing.
+ */
+const WAIT_MINUTES = 480;
+/**
+ * **THE POLL INTERVAL IS A COST DECISION, NOT A LATENCY ONE.** Each poll costs about
+ * 130 CU — `eth_blockNumber` plus the two `eth_getLogs` sweeps behind
+ * `findCanonicalLaunches` — and that cost is per POLL, not per block scanned, because
+ * the sweep covers `lastScan+1..head` whatever the gap. At the original 5 s over 8
+ * hours that is 5,760 polls and **~749,000 CU, which blows the ceiling below AND the
+ * operator's ~500,000 CU check-in threshold.** At 20 s it is ~187,000 CU.
+ *
+ * Nothing is missed by polling slower: the sweep is range-based, so a launch is merely
+ * learned about up to 20 s late, against a 115-second runway to its entry block.
+ */
+const POLL_MS = 20_000;
 const RECEIPT_TIMEOUT_MS = 120_000;
-const CU_CEILING = 300_000;
+/* Sized for the 8-hour wait: ~187,000 CU of scanning, ~5,000 evaluating the launches
+   seen, and ~30,000 for the round trip, with headroom. Deliberately below the
+   operator's ~500,000 CU check-in threshold. */
+const CU_CEILING = 400_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms); });
 
@@ -127,6 +149,10 @@ async function main(): Promise<void> {
       hard_stops: 'one trade (structural), halt re-checked before buy AND sell, '
         + `position = positionWei(live rate), wallet ceiling ${MAX_WALLET_ETH} ETH, `
         + 'reachable sell bound, sell amount = chain balance',
+      wait_hours: WAIT_MINUTES / 60,
+      poll_seconds: POLL_MS / 1000,
+      cu_budget: `~${Math.round(WAIT_MINUTES * 60_000 / POLL_MS) * 130} scanning `
+        + `+ ~35,000 evaluating and trading, ceiling ${CU_CEILING}`,
     });
 
     /* ---- PREFLIGHT ---------------------------------------------------- */
@@ -197,7 +223,7 @@ async function main(): Promise<void> {
     while (cand === null && Date.now() < deadline) {
       polls += 1;
       const head = Number(BigInt(String(await rpc.call('eth_blockNumber', []))));
-      if (head <= lastScan) { await sleep(5_000); continue; }
+      if (head <= lastScan) { await sleep(POLL_MS); continue; }
       let fresh: CanonicalLaunch[] = [];
       try {
         fresh = await findCanonicalLaunches(rpc, lastScan + 1, head,
@@ -205,7 +231,7 @@ async function main(): Promise<void> {
             unknown as [bigint, bigint, string, bigint, bigint]);
       } catch (err) {
         log.warn('launch scan failed, retrying', errorFields(err));
-        await sleep(5_000); continue;
+        await sleep(POLL_MS); continue;
       }
       lastScan = head;
       for (const L of fresh) {
@@ -228,13 +254,13 @@ async function main(): Promise<void> {
         });
         if (v.gate1 && v.gate2) { cand = L; break; }
       }
-      if (cand === null && polls % 12 === 1) {
+      if (cand === null && polls % 15 === 1) {
         log.info('waiting for a qualifying launch', {
           head, scanned, minutes_left: Math.round((deadline - Date.now()) / 60_000),
           note: 'NO RULE WILL BE RELAXED TO FIND ONE',
         });
       }
-      if (cand === null) await sleep(5_000);
+      if (cand === null) await sleep(POLL_MS);
     }
     if (cand === null) {
       log.info('NO QUALIFYING LAUNCH APPEARED — STOPPING, NOTHING TRADED', {
