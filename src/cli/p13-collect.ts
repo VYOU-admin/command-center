@@ -56,6 +56,7 @@
  * - This process NEVER trades. It only reads and prices.
  */
 import { AbiCoder, id } from 'ethers';
+import type { PoolClient } from 'pg';
 import { bootstrap } from '../bootstrap.js';
 import { errorFields, log } from '../logger.js';
 import { RpcClient } from '../adapters/token-updates/rpc.js';
@@ -85,7 +86,18 @@ const START_BLOCK = 67_493_776;
 /** THE RULE. Frozen. */
 const GATE1_SHARE = 0.40;
 const GATE2_SOLD = 0.25;
-const UNTOUCHED_ETH = 3.6931;
+const UNTOUCHED_ETH = 3.6931;          /* P11, static. Kept on the record. */
+/** P14 rolling cuts. The percentile is taken over GATED launches only — the
+ *  population the rule selects within — and over launches STRICTLY EARLIER than
+ *  the one being evaluated, so a launch never contributes to the cut that gates
+ *  it. Below MIN_N the rule DOES NOT FIRE and the column is null; there is no
+ *  silent fallback to a constant (§7: an error path must not emit a plausible
+ *  default). See docs/NAMED-RULE-P14.md. */
+const ROLL = [
+  { key: 'a' as const, hours: 72, minN: 20 },   /* as specified in the brief */
+  { key: 'b' as const, hours: 12, minN: 10 },   /* the window that actually tracks */
+];
+const BLOCKS_PER_SEC = 9.93;          /* MEASURED §6V.2 over four spans */
 const GATE2_AT_BLOCKS = 900;
 const ENTRY_BLOCKS = 1_150;
 const EXIT_BLOCKS = 2_150;
@@ -149,6 +161,40 @@ async function priceRoundTrip(
   return { entryOk: true, exitOk, exitOut, ret };
 }
 
+/** 25th percentile of `eth_in_total` over GATED launches strictly before `ib`,
+ *  within the trailing window. Returns null below minN — the rule then does not
+ *  fire, which is reported rather than papered over with a constant. */
+async function rollingCuts(
+  c: PoolClient, ib: number,
+): Promise<Record<'a' | 'b', number | null>> {
+  const out: Record<string, number | null> = {};
+  for (const r of ROLL) {
+    const span = Math.round(r.hours * 3600 * BLOCKS_PER_SEC);
+    /* Drawn from BOTH priced histories. `bot_p13` alone starts at block
+       67,512,037, so a 72h window at the current head would be truncated to about
+       one day of data and the "3-day" percentile would silently be a 1-day one.
+       `bot_ungated_price` stores no gate columns, so gate 2 is reconstructed from
+       `sold_90` exactly as gate 2 is defined, rather than trusting its `gated`
+       flag, which encodes gate 1 only. */
+    const q = await c.query<{ n: string; p: string | null }>(
+      `with h as (
+         select init_block, eth_in_total from bot_p13
+          where chain = $1 and gate1 and gate2
+         union all
+         select init_block, eth_in_total from bot_ungated_price
+          where chain = $1 and creator_share >= $4::numeric and sold_90 < $5::numeric
+       )
+       select count(*)::text n,
+              percentile_cont(0.25) within group (order by eth_in_total)::text p
+         from h where init_block < $2 and init_block >= $3`,
+      [CHAIN, ib, ib - span, GATE1_SHARE.toString(), GATE2_SOLD.toString()]);
+    const row = q.rows[0];
+    const n = row === undefined ? 0 : Number(row.n);
+    out[r.key] = n >= r.minN && row?.p != null ? Number(row.p) : null;
+  }
+  return out as Record<'a' | 'b', number | null>;
+}
+
 async function main(): Promise<void> {
   const key = process.env['ALCHEMY_API_KEY'];
   if (!key) throw new Error('ALCHEMY_API_KEY is not set');
@@ -173,7 +219,10 @@ async function main(): Promise<void> {
        re-deriving it; `price_attempted` separates "tried and failed" from "never tried". */
     for (const col of ['currency0 text', 'currency1 text', 'fee integer',
       'tick_spacing integer', 'hooks text', 'zero_is_pricing boolean',
-      'price_attempted boolean not null default false']) {
+      'price_attempted boolean not null default false',
+      'thr_a numeric', 'thr_b numeric',
+      'untouched_a boolean', 'untouched_b boolean',
+      'qualified_a boolean', 'qualified_b boolean']) {
       await c.query(`alter table bot_p13 add column if not exists ${col}`);
     }
     /* Rows v1 actually priced were exactly the qualifying ones. */
@@ -254,6 +303,9 @@ async function main(): Promise<void> {
       .sort((a, b) => Number(BigInt(a.blockNumber)) - Number(BigInt(b.blockNumber)));
 
     let seen = 0; let g1 = 0; let g2 = 0; let un = 0; let qual = 0; let priced = 0;
+    let rollSeen = 0; let rollPassA = 0; let rollPassB = 0;
+    let qualACount = 0; let qualBCount = 0;
+    let lastA: number | null = null; let lastB: number | null = null;
     for (const l of canon) {
       const pid = (l.topics[1] ?? '').toLowerCase();
       const c0 = addrTopic(l.topics[2] ?? '');
@@ -300,6 +352,22 @@ async function main(): Promise<void> {
       const untouched = nSells === 0 && ethIn <= UNTOUCHED_ETH;
       const liqOk = poolEth > 0;
       const qualified = gate1 && gate2 && untouched && liqOk;
+      /* P14: the SAME launch scored under both rolling cuts, in parallel with the
+         static one. No variant is privileged; the brief asks which fires more and
+         which is right, which needs all three on the same launches. */
+      const cuts = await rollingCuts(c, ib);
+      const unA = cuts.a !== null && nSells === 0 && ethIn <= cuts.a;
+      const unB = cuts.b !== null && nSells === 0 && ethIn <= cuts.b;
+      const qualA = gate1 && gate2 && unA && liqOk;
+      const qualB = gate1 && gate2 && unB && liqOk;
+      if (qualA) qualACount += 1;
+      if (qualB) qualBCount += 1;
+      if (gate1 && gate2) {
+        rollSeen += 1;
+        if (cuts.a !== null && ethIn <= cuts.a) rollPassA += 1;
+        if (cuts.b !== null && ethIn <= cuts.b) rollPassB += 1;
+        lastA = cuts.a; lastB = cuts.b;
+      }
       if (gate1) g1 += 1;
       if (gate2) g2 += 1;
       if (untouched) un += 1;
@@ -313,21 +381,35 @@ async function main(): Promise<void> {
         `insert into bot_p13 (chain, pool_id, init_block, token, creator_share, sold_90,
            gate1, gate2, n_sells, eth_in_total, pool_eth, untouched, liq_ok, qualified,
            entry_ok, exit_ok, ret, currency0, currency1, fee, tick_spacing, hooks,
-           zero_is_pricing, price_attempted)
+           zero_is_pricing, price_attempted,
+           thr_a, thr_b, untouched_a, untouched_b, qualified_a, qualified_b)
          values ($1,$2,$3,$4,$5::numeric,$6::numeric,$7,$8,$9,$10::numeric,$11::numeric,
-                 $12,$13,$14,$15,$16,$17::numeric,$18,$19,$20,$21,$22,$23,true)
+                 $12,$13,$14,$15,$16,$17::numeric,$18,$19,$20,$21,$22,$23,true,
+                 $24::numeric,$25::numeric,$26,$27,$28,$29)
          on conflict do nothing`,
         [CHAIN, pid, ib, token, share.toString(), sold90.toString(), gate1, gate2,
           nSells, ethIn.toString(), poolEth.toString(), untouched, liqOk, qualified,
           p.entryOk, p.exitOk, p.ret === null ? null : p.ret.toString(),
           pool.currency0, pool.currency1, pool.fee, pool.tickSpacing, pool.hooks,
-          zeroIsPricing]);
+          zeroIsPricing,
+          cuts.a === null ? null : cuts.a.toString(),
+          cuts.b === null ? null : cuts.b.toString(),
+          unA, unB, qualA, qualB]);
     }
 
     log.info('P13 cycle done', {
       window: `${from}..${to}`, canonical_seen: seen,
       gate1_passed: g1, gate2_passed: g2, untouched: un,
       QUALIFIED: qual, priced_new: priced, priced_backlog: bDone,
+      /* P14: the thresholds are logged every cycle so their movement is visible
+         without a query, and the realised pass rates are the mechanism test —
+         a percentile cut that is tracking holds near 25%. */
+      P14a_thr_72h: lastA === null ? 'below MIN_N — RULE DID NOT FIRE' : lastA.toFixed(4),
+      P14b_thr_12h: lastB === null ? 'below MIN_N — RULE DID NOT FIRE' : lastB.toFixed(4),
+      gated_this_cycle: rollSeen,
+      P14a_pass: rollSeen > 0 ? `${rollPassA}/${rollSeen}` : '0/0',
+      P14b_pass: rollSeen > 0 ? `${rollPassB}/${rollSeen}` : '0/0',
+      QUALIFIED_a: qualACount, QUALIFIED_b: qualBCount,
       cu: inner.cuSpent,
     });
   } finally { c.release(); await app.pool.end(); }
