@@ -8716,6 +8716,127 @@ counter, `approvals.ts`'s two-step Permit2 grant, `receipt.ts`, `sellability.ts`
 `calldata.ts` — and add a hard one-trade stop. **That is new live-trading code and
 it is not written.**
 
+## 6AD. PART 16B — THE ONE-SHOT EXECUTOR IS BUILT. IT HAS NOT BEEN ARMED.
+
+**Status: BUILT, deployed, and exercised as far as the halt allows. NO TRADE. The
+chain-wide halt was never lifted. Nothing has been broadcast.**
+
+### 6AD.1 A FATAL DEFECT IN THE FIRST VERSION, CAUGHT BEFORE IT TRADED
+
+`oneshot` v1 picked its candidate by querying `bot_p13` for a row whose entry block
+had not yet passed. **That condition is unsatisfiable.** The collector only
+processes launches whose EXIT has matured — `to = head - (EXIT_BLOCKS + 3000)` — so
+every stored row satisfies `init_block + 1150 <= head - 4000`. Its entry is always
+at least 4,000 blocks in the past.
+
+```
+newest stored init_block   68,614,783
+its entry block (+1150)    68,615,933
+stored only when           init_block <= head - 5150
+therefore                  init_block + 1150 <= head - 4000  <  head
+```
+
+**The executor would have waited its full 90 minutes and reported "nothing traded",
+every time, forever** — and the report would have looked like a quiet chain rather
+than a broken query. This is the filter-matching-nothing failure mode in its most
+expensive form: a live-trading path that silently cannot fire.
+
+### 6AD.2 THE FIX: ONE SHARED RULE IMPLEMENTATION
+
+The fix is not a looser query. A live executor must evaluate a launch **as it
+happens**, which the collector CLI's logic could not be called from. Copying it into
+the executor would have created the second implementation `rule.ts`'s own header
+records drifting five times on this project.
+
+So the rules are extracted to **`src/bot/collector-rules.ts`** — thresholds,
+`readEntryState`, `rollingCuts`, `scoreRules`, `findCanonicalLaunches` — and it is
+imported by **both** `p13-collect` and `oneshot`. `bot/rule.ts` is untouched; §6AC.2
+established that re-pointing it under a plumbing-test authorisation is exactly what
+this project forbids.
+
+**The refactor was proved behaviour-preserving before it shipped**, two ways:
+
+```
+a boundary grid hitting every threshold exactly, old inline logic vs scoreRules():
+  43,200 cases, 302,400 field comparisons, 0 disagreements
+replay of every stored row against its stored flags:
+  270 rows, 0 disagreements
+```
+
+### 6AD.3 What the executor does, and the stops that are structural
+
+```
+preflight  mode live, key present, chain 4663, halt clear, wallet <= 0.05 ETH,
+           balance > 3x the position
+scan       poll for canonical Pools.trade launches whose ENTRY BLOCK IS STILL AHEAD,
+           score each through the shared module, admit on gates 1 and 2
+entry      at init+1150 RE-SCORE on the full window; a launch that no longer
+           qualifies is DROPPED, not traded on the provisional verdict
+buy        broadcast, await receipt, MINED or stop
+balance    read the token balance FROM THE CHAIN (a quote is not a balance)
+approve    ensureSellReadiness for exactly that balance (two-step Permit2)
+sell       at init+2150 simulate at a REACHABLE bound, then broadcast, await receipt
+report     every hash, block, gas and the ETH delta, re-read from chain
+```
+
+- **ONE TRADE IS STRUCTURAL, not checked.** The buy is outside any loop; there is no
+  iteration and no counter to get wrong. `launchbot`'s `MAX_TRADES_PER_RUN = 10` and
+  `MAX_CONCURRENT = 5` cannot apply because there is nothing here to repeat.
+- **The halt is re-read immediately before the buy AND before the sell**, not only
+  at startup.
+- **A wallet ceiling of 0.05 ETH** refuses to run behind a balance larger than
+  instrumentation needs.
+- **The sell bound is reachable** (§6A.3) and the sell amount is the chain's balance.
+- **Nothing is retried.** Every failure path stops and names what is open.
+
+### 6AD.4 Exercised, as far as a halt permits
+
+```
+live-gate build check                      PASS (185 files; signing confined to signer.ts/rpc.ts)
+full npm run build                         exit 0
+createBroadcaster in dry-run               REFUSED — no signing path outside live mode
+createBroadcaster --live, no key           REFUSED — names BOT_PRIVATE_KEY
+BOT_LIVE=1 with no flag                    RAISES — an env var does not control live mode
+ReadOnlyRpc eth_sendRawTransaction         REFUSED by name
+ReadOnlyRpc eth_sign / eth_signTransaction REFUSED by name
+minOut(1)                                  1 (never zero)
+positionWei(0 / -1 / NaN / Infinity)       REFUSED, all four
+oneshot dry run with the halt set          REFUSED at preflight, scope=chain
+```
+
+**Untested, and it cannot be tested without arming: signing, gas estimation, the
+chain's acceptance of our bytes, and the sell itself.** That is precisely what the
+test exists for.
+
+### 6AD.5 THE RATE PROBLEM, WHICH THE OPERATOR SHOULD SEE BEFORE ARMING
+
+Combined across all four rules, qualifiers are MEASURED at **3.9/day** — about one
+every 6.2 hours. Against the executor's 90-minute wait that is a **~22% chance of
+finding one (Poisson, INFERRED)**. A live run will most likely time out and report
+nothing traded, which is by design but wastes the arming window.
+
+```
+rule    qualifiers stored    of 270 canonical, over 30.8 h
+P11                    5
+P14a                   1
+P14b                   0
+P15                    0
+ANY                    5     = 3.9/day
+```
+
+**P15 has fired 0 times on the 43 launches it has actually been evaluated against,
+over 4.7 hours**, against a pre-registered prediction of 15-35/day. The other 227
+rows predate the column and were never scored under it, so this is **not yet
+refutation condition 4** — but it is the direction of one, and it is recorded now
+rather than after the fact.
+
+### 6AD.6 What arming requires
+
+The chain-wide halt (`mode='*'`, set 2026-09-18) must be lifted, and the executor
+run with an explicit `--live`. Given §6AD.5, a longer wait window than 90 minutes
+is the sensible change before arming — otherwise the likely outcome is a timeout.
+**Nothing is armed and the halt stands.**
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-21, from Part 16 — THE LARGEST GAP IN THIS DOCUMENT:**
