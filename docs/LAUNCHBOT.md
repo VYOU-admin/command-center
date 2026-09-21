@@ -8613,7 +8613,134 @@ judgement call now.
 The collector now scores **four rules in parallel on every launch**: P11 static,
 P14a (72h), P14b (12h), P15 band.
 
+## 6AC. PART 16 — THE LIVE TEST WAS AUTHORISED AND WAS NOT RUN. THE BOT CANNOT SEE THE LAUNCHES.
+
+**Status: MEASURED. NO TRADE WAS MADE. The chain-wide halt was NEVER LIFTED and
+remains set. No transaction of any kind was broadcast.**
+
+### 6AC.1 The balance, and a correction
+
+MEASURED from chain at block 68,633,882:
+
+```
+address        0x4aB56F6a15b7B17948C624C68462C2b825D2Cb4a
+balance        4,375,531,713,699,534 wei = 0.00437553 ETH
+nonce          172 latest, 172 pending  (nothing in flight)
+gas price      0.0498 gwei
+```
+
+Valued at the rate `bot/wallet.ts` actually uses — the newest row of
+`native_usd_prices`, **$2,664.90/ETH**, 1.42 hours behind head — the balance is
+**$11.66**, which matches the stated top-up.
+
+**§6AB's "$7.79" was wrong.** It valued the balance at $1,779/ETH, an *implied*
+rate derived from the `SIZE_WEI = 562000000000000` constant in the measurement
+CLIs. That constant is a fixed wei amount used by `rule-p7` and `ungated-price` for
+comparability across windows; it is **not** how the live bot sizes. `positionWei()`
+divides `MAX_POSITION_USD` by a live `ethUsd`, so a live $1 position today is
+**375,248,677,992,939 wei (0.00037525 ETH)**, not 562e12. Returns are ratios and
+are unaffected; only the dollar labelling was wrong.
+
+### 6AC.2 THE BLOCKER: THE LIVE RULE IS NOT ANY OF THE FOUR COLLECTOR RULES
+
+The authorisation was to trade "ONE launch that qualifies under any of the four
+collector rules (P11, P14a, P14b, P15)". **`src/bot/rule.ts` — which its own header
+declares THE ONE IMPLEMENTATION of the entry rule — cannot express any of them.**
+Occurrences in that file:
+
+```
+creator_share / creatorShare   0        pool_eth / poolEth     0
+sold_90 / sold90               0        eth_in / ethIn         0
+n_sells / nSells               0        untouched              0
+```
+
+What it checks instead: the counter is a pricing asset, the init-to-first-swap gap
+is 11-600 blocks, `tx.to` is in `LAUNCHPADS`, and the fee is in `ALLOWED_FEES`.
+
+**Empirically, on the five most recent launches the collector rules qualified —
+every one is rejected, on all three checks:**
+
+```
+pool            qualified under   tx.to                      in LAUNCHPADS   fee    allowed   gap   ok
+0x55218cce588a  P11, P14a         (contract creation)        NO              2500   NO        0     NO
+0xa0a9b9cb5f06  P11               0x0000ffffbe8efe702c87...  NO              null   NO        0     NO
+0x68189e44a02c  P11               (contract creation)        NO              null   NO        0     NO
+0xa476dced6dc1  P11               (contract creation)        NO              null   NO        0     NO
+0x71d96a5d0f48  P11               (contract creation)        NO              null   NO        0     NO
+```
+
+Three independent reasons, each sufficient on its own:
+
+1. **`LAUNCHPADS` does not contain the Pools.trade factory or entry contract.** It
+   contains `0x58daec3116aae6d93017baaea7749052e8a04fa7` — which §6C already
+   established is the **Uniswap v4 PositionManager, not a launchpad** — and the
+   PoolManager. The launches the collector rules select are created by
+   `0x0000ffffbe8efe702c8703ae3477ff5de3d319c0` or by direct contract creation.
+2. **`ALLOWED_FEES` excludes them.** Observed fee 2500 against an allow-list of
+   500 and 10000.
+3. **`GAP_MIN_BLOCKS = 11` structurally excludes the entire population.** Every
+   canonical Pools.trade launch has its **first swap in the SAME block as
+   `Initialize` — gap 0** — because the creator's seed buy is in the creation
+   transaction. A rule requiring an 11-block gap can never admit one.
+
+**Running `launchbot --live` would therefore not have executed the authorised
+test.** It would have traded whatever the *old, superseded* rule selected — the
+rule that produced the 13 trades and the $120 loss — or nothing at all.
+
+Two further reasons it was not run, either of which alone would stop it:
+
+- **No other CLI can broadcast a real trade.** `exit-broadcast-drill` drives
+  `executeExit` with a **test double** that does not sign and reaches no network.
+- **There is no one-trade limit.** `MAX_TRADES_PER_RUN` is 10 and
+  `MAX_CONCURRENT` is 5, and no flag reduces either. The brief said one position;
+  the machinery offers five.
+
+The `fee null` entries above are a data-completeness artefact, not a defect: those
+four rows were inserted by collector v1 before the `fee` column existed, and v2
+marked them `price_attempted` so the backlog pass — which is what populates the
+pool struct — correctly skipped them.
+
+### 6AC.3 What this means
+
+**The four collector rules have never been connected to the executing code.** They
+are scored by `p13-collect`, which only reads and prices; the bot that can actually
+trade selects a different population by a different rule. This is the
+two-implementations failure `rule.ts`'s own header warns about — "ROBINHOOD.md
+records five occasions where two implementations of one rule drifted, most recently
+with the weaker copy in the running path" — except here they never agreed at all.
+
+Closing it needs a purpose-built one-shot executor: wait for a launch qualifying
+under the collector rules, buy $1 at +115 s, sell the full balance at +215 s at a
+reachable bound, stop. It would reuse the proven parts — `signer.ts`'s nonce
+counter, `approvals.ts`'s two-step Permit2 grant, `receipt.ts`, `sellability.ts`,
+`calldata.ts` — and add a hard one-trade stop. **That is new live-trading code and
+it is not written.**
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-21, from Part 16 — THE LARGEST GAP IN THIS DOCUMENT:**
+
+- **NONE OF THE FOUR SCORED RULES (P11, P14a, P14b, P15) IS IMPLEMENTED IN THE
+  EXECUTING CODE.** `src/bot/rule.ts` contains **zero** references to
+  `creator_share`, `sold_90`, `n_sells`, `pool_eth` or `eth_in_total`. It selects
+  on launchpad, fee tier and init-to-first-swap gap. §6AC.2 measured all five most
+  recent collector-qualified launches being rejected by it on all three checks.
+  Every finding from §6I onward describes a population the bot cannot trade.
+
+- **`GAP_MIN_BLOCKS = 11` STRUCTURALLY EXCLUDES EVERY POOLS.TRADE LAUNCH.** Their
+  first swap is in the **same block** as `Initialize` — gap 0 — because the
+  creator's seed buy rides in the creation transaction. This single constant makes
+  the entire studied population unreachable.
+
+- **`LAUNCHPADS` NAMES THE WRONG CONTRACTS.** It lists
+  `0x58daec3116aae6d93017baaea7749052e8a04fa7`, which §6C established is the
+  Uniswap v4 **PositionManager**, and the PoolManager. It does not list the
+  Pools.trade factory `0x000000e2…` or its entry `0x0000ffff…`, which create the
+  launches every rule since §6D is about.
+
+- **THERE IS NO ONE-TRADE LIMIT.** `MAX_TRADES_PER_RUN` is 10 and `MAX_CONCURRENT`
+  is 5, with no flag to reduce either. A plumbing test authorised for one position
+  cannot be bounded to one with the current CLI.
 
 **ADDED 2026-09-20, from Part 13:**
 
