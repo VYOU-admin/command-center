@@ -8837,6 +8837,137 @@ run with an explicit `--live`. Given §6AD.5, a longer wait window than 90 minut
 is the sensible change before arming — otherwise the likely outcome is a timeout.
 **Nothing is armed and the halt stands.**
 
+## 6AE. PART 13 MORNING SCORE — n = 5. STILL NOT EVALUABLE. TWO FINDINGS REPLICATE.
+
+**Status: MEASURED. Halt verified from a fresh connection: `mode='*'` halted,
+`bot_trades` 130 rows, last 2026-09-17. NO TRADING HAS OCCURRED.**
+
+### 6AE.1 A correction to the scheduled prompt's premise
+
+The scheduled run asserted the loop had been running continuously since
+2026-09-20 ~20:45 UTC as PID 23. **It had not.** It was deliberately stopped and
+restarted three times during Parts 14-16 to deploy P14a/P14b scoring, P15 scoring,
+and the shared `bot/collector-rules.ts`. It is now **PID 35, up 4h18m, 26 cycles,
+0 failures, 0 non-zero exits.** Every row persisted in Postgres across all three
+restarts, which is the point of committing rows as they are produced rather than
+writing to the container.
+
+### 6AE.2 n FIRST
+
+```
+rule    evaluated   fired    n    median     mean   deep   win
+P11           292       5    5    +17.3%   +14.8%     0%   80%
+P14a           81       1    1    +29.8%   +29.8%     0%  100%
+P14b           81       0    0    RETURNED NO ROWS
+P15            65       3    3    +11.4%    +8.5%     0%  100%
+
+ANY of the four      n=8    median +11.5%   mean +12.4%   deep 0   win 88%
+AT $25/TRADE: gross $24.83, gas $1.54, NET $23.28
+peak concurrent positions 1, peak capital at risk $25
+```
+
+**n = 5 for the committed P11 rule and n = 8 across all four. Both are below the
+evaluability floor of 10. THE RESULT IS NOT EVALUABLE and no conclusion is drawn
+in either direction.** A mean of +12.4% on eight trades is not evidence. The gaps
+between consecutive qualifiers run 24,866 / 52,086 / 296,587 / 337,517 / 302,368 /
+7,697 / 33,963 blocks — up to nine hours apart.
+
+`evaluated` is reported beside `fired` deliberately: P14a/P14b were evaluated on 81
+of 292 rows and P15 on 65, because those columns postdate the earlier rows. **A zero
+against a null column is not a zero result**, and §6AD.5's note that P15 had fired
+zero times is now superseded — it has fired 3 times on 65 evaluations.
+
+### 6AE.3 The funnel — gate 1 is still the binding constraint
+
+```
+canonical launches seen                      292   100.0%
+  pass GATE 1 (creator_share >= 40%)         104    35.6%
+  pass GATE 2 (sold by +90 s < 25%)          252    86.3%
+  pass BOTH gates                             84    28.8%
+  UNTOUCHED (n_sells=0 & eth<=3.6931)         54    18.5%
+  both gates AND untouched                     5     1.7%
+  pass liquidity floor (pool_eth > 0)        292   100.0%
+QUALIFIED (all four)                           5     1.7%
+```
+
+Gate 1 rejects 188 of 292; gate 2 rejects 40. The per-12h share>=40% rate is
+**36%, 36%, 34%, 37%** — flat across four buckets and at the bottom of the 36-90%
+range §6W.5 recorded. Median creator share 37.4% throughout. **The population has
+stopped moving**, which retires the "collapse" reading §6V.3 floated and §6Y.7
+already began correcting.
+
+Safety counts, all zero: qualified-with-empty-pool 0, entry-could-not-execute 0,
+unsellable-at-exit 0, deep losses 0.
+
+### 6AE.4 The four pre-registered conditions
+
+```
+1. UNTOUCHED median <= whole-sample median    DID NOT FIRE   (+17.3% vs +3.5%)
+2. UNTOUCHED deep   >= whole-sample deep      DID NOT FIRE   (0.0% vs 7.1%)
+3. UNTOUCHED share of gated outside 8-30%     DID NOT FIRE   (5/84 = 6.0%)  <-- SEE BELOW
+4. deep rate exactly zero again               NOT EVALUABLE at n=5
+```
+
+**Condition 3 needs care and is NOT softened here.** The share is **5/84 = 6.0%**,
+which is **outside the pre-registered 8-30% band**, so read literally the condition
+**FIRES**. Reported both ways rather than resolved by preference:
+
+- Read as written — "UNTOUCHED share of gated launches outside 8-30%" — it **FIRES
+  at 6.0%**, and the pre-registered meaning was that the population had shifted so
+  the percentile cut is no longer measuring the same thing. That is precisely what
+  §6AA measured: the static 3.6931 cut has gone inert.
+- At n=5 in the numerator, 6.0% versus an 8% floor is two launches. It cannot be
+  separated from noise.
+
+**The honest verdict: condition 3 FIRES on the literal reading, and the failure it
+was written to detect has independently been confirmed by §6AA.** Conditions 1 and 2
+point the way the rule predicts but rest on n=5.
+
+### 6AE.5 THE §6W INVERSION REPLICATES A THIRD TIME, AND STRENGTHENS
+
+```
+                            n    median     mean    deep    win
+UNGATED + UNTOUCHED        49     -0.6%   -31.7%   28.6%     6%
+UNGATED + not untouched   159     -0.5%    -0.1%    3.8%    23%
+```
+
+Three independent windows now: §6W measured mean **-47.9%**, deep 46.7% (n=165);
+§6Z measured **-24.8%**, deep 20.8% (n=24); this window measures **-31.7%**, deep
+28.6% (n=49). **Same sign, same ordering, every time, and the deep-loss rate is
+7.5x the arm it is compared against.** This remains the only finding in the
+investigation to replicate out of time, and it replicates as a prohibition.
+
+### 6AE.6 THE SUB-1-ETH DEAD ZONE HOLDS AT LARGER n
+
+```
+band                        n     median     mean    deep    win
+pool_eth < 0.001 (dust)    26     -89.5%   -58.3%   53.8%     0%
+0.001 - 0.01               67      -0.5%    -0.5%    0.0%     1%
+0.01  - 0.1                43      -0.5%    -2.2%    2.3%     2%
+0.1   - 1                  22      -0.5%   -13.0%    0.0%     0%
+1     - 3                  73     +13.6%   +11.0%    6.8%    79%
+3+                         61      +2.3%    +0.1%    9.8%    54%
+```
+
+**The pattern holds and sharpens.** Every band below 1 ETH still wins 2% or less —
+now 0%, 1%, 2%, 0% on n of 26, 67, 43, 22, against 79% and 54% above 1 ETH. The
+dust band got **worse** with more data: median -89.5% and deep 53.8% against the
+earlier -23.0% and 36.4%, on n=26 rather than 11.
+
+This is now measured on 158 sub-1-ETH launches across two windows with a consistent
+sign. **It is the most reliably replicated quantitative pattern in this document
+after the §6W inversion** — and per §6AB.2 it remains an *ungated* phenomenon, so
+it is a safety rail rather than a source of edge. The §7 floor defect stays open;
+the threshold still should not be set on the data that suggested it.
+
+### 6AE.7 Where this leaves it
+
+Nothing about any rule is established. The two things that ARE established are both
+prohibitions: **do not evaluate UNTOUCHED outside the gate**, and **do not trade a
+pool with under ~1 ETH of net inflow**. At the measured 8 qualifiers per 35.5 hours
+across all four rules — about 5.4/day — n=10 for the committed P11 rule alone is
+roughly five more days away.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-21, from Part 16 — THE LARGEST GAP IN THIS DOCUMENT:**
