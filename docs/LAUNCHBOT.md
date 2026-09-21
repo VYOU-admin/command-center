@@ -8398,6 +8398,116 @@ The first v2 cycle found **0 canonical launches** in blocks 68,106,896..68,150,4
 established that short quiet patches on this launchpad are normal and that
 reading a trend into one is the error §6V.3 made twice.
 
+## 6AA. PART 14 — THE ROLLING CUT, AND WHY A 3-DAY WINDOW REPRODUCES THE CONSTANT
+
+**Status: MEASURED. Rule committed at `50c38ec` (`docs/NAMED-RULE-P14.md`) before
+scoring any launch. Collector restarted scoring all three cuts in parallel. Halt
+verified from a fresh connection; `bot_trades` unchanged at 130.**
+
+### 6AA.1 The specified 3-day window is also inert — MEASURED
+
+395 gated launches over 3.96 days. A percentile cut has one job: select a fixed
+fraction. If it tracks, the realised pass rate stays near 25%. **Returns were not
+consulted** in this test.
+
+```
+window   MIN_N   covered   thr min   thr max   pass mean   pass sd
+6h           8       93%     2.653     4.478       26.0%     13.4%
+12h         10       96%     2.804     4.119       23.6%     10.6%
+24h         12       97%     2.981     4.006       27.3%     17.8%
+48h         16       96%     3.109     3.904       31.0%     23.0%
+72h         20       95%     3.622     3.805       27.3%     19.9%
+```
+
+**The 72-hour threshold moves across 0.18 ETH in total, with the static 3.6931
+sitting inside its range.** Its pass rate tracks the static cut bucket for bucket
+and reaches 62% in the most recent bucket — exactly the inert behaviour P11 shows.
+
+**Confirmed live on the first cycle after restart: P14a computed `3.6943` against
+the static `3.6931`. A difference of 0.0012 ETH.** P14b computed `2.9297`.
+
+**The mechanism.** `eth_in_total` has a structural lower mode near 3.5-3.7 ETH —
+the creator's seed buy (§6W.2). A 25th percentile over three days sits on that mode
+and is pinned there, while the population's *median* swings with the upper tail.
+The percentile is anchored to a constant of the launch format, so a slow window
+reproduces a constant. **A rolling statistic is not automatically adaptive; it is
+adaptive only if its window is shorter than the timescale the population moves on.**
+
+### 6AA.2 THE ETH CUT IS NOT WHAT IS BLOCKING n
+
+Of the 16 gated launches since the v2 restart, **zero have `n_sells == 0`**, so
+**zero qualify under the static cut, the 72h cut, or the 12h cut alike.**
+
+```
+share of GATED launches with n_sells == 0, per 6h bucket
+  block 65005032   gated  94   zero-sells 39 (41%)   med n_sells   1
+  block 65658020   gated  47   zero-sells 16 (34%)   med n_sells   2
+  block 66092870   gated  27   zero-sells  6 (22%)   med n_sells   4
+  block 66295709   gated  30   zero-sells  0 ( 0%)   med n_sells   4
+  block 67587139   gated  16   zero-sells  3 (19%)   med n_sells   4
+  block 68011104   gated   9   zero-sells  2 (22%)   med n_sells   3
+  block 68229798   gated  16   zero-sells  0 ( 0%)   med n_sells   4
+```
+
+Zero-sells has fallen from 41% of gated launches to 0%, with median `n_sells`
+rising to 4. **Changing the ETH threshold cannot restore `n`**, and this is
+recorded now so that neither a recovery nor a continued drought is later
+attributed to the P14 change.
+
+### 6AA.3 In-sample backtest — a mechanism check, NOT evidence
+
+```
+                          n    median     mean      SUM    deep    win       t
+STATIC 3.6931 (P11)      39    +14.1%   +14.9%    +5.82    2.6%    92%   +4.09
+ROLLING 72h (P14a)       31    +17.3%   +18.5%    +5.74    0.0%    94%   +5.82
+ALL GATED (the arm)     395     +5.4%    +1.4%    +5.60   10.9%    66%   +0.77
+
+overlap 29   static only 10   rolling only 2
+```
+
+**The two rules are 29 of 31 the same selection.** The backtest cannot distinguish
+them and is not offered as a reason to prefer either. All three figures are
+in-sample: the rule was built after seeing this data.
+
+### 6AA.4 The 9 (now 16) launches since restart, under each cut
+
+```
+block       n_sells   eth_in    static   roll72   roll12       ret
+68229798          4    2.666      PASS     PASS     PASS     +2.6%
+68243292          4    2.616      PASS     PASS     PASS     +3.3%
+68247097          3    2.527      PASS     PASS     PASS     +6.1%
+68263857          3    2.705      PASS     PASS     PASS     +5.4%
+68276319          3    3.031      PASS     PASS     fail     +4.9%
+68284725          2    2.930      PASS     PASS     fail     +3.4%
+68293097          2    3.052      PASS     PASS     fail     +3.5%
+68301118          5    3.072      PASS     PASS     fail    +24.2%
+68339176          2    2.998      PASS     PASS     fail     +2.7%
+68360809         17    3.886      fail     fail     fail    -81.7%
+68363313         16    5.720      fail     fail     fail     -8.5%
+68368330         22    4.118      fail     fail     fail    +25.7%
+68380344          9    5.538      fail     fail     fail     -8.1%
+68391883         24    4.467      fail     fail     fail    -35.2%
+68395271         16    5.152      fail     fail     fail     +8.5%
+68399598          3    3.135      PASS     PASS     fail     -3.2%
+
+QUALIFY (all four conditions): static 0/16, roll72 0/16, roll12 0/16
+```
+
+**REPORTED, NOT CONCLUDED FROM.** The +2.6% to +24.2% run that prompted the
+question extended to seven more launches, four of which are negative and one of
+which is **-81.7%**. A nine-launch positive streak became sixteen launches with a
+deep loss in them. That is what a small sample does, and it is the reason the
+evaluability floor exists.
+
+### 6AA.5 The failure mode P14 still has, stated before it fires
+
+A percentile cut always passes 25% by construction, so it can never go inert in the
+P11 sense. It can go **meaningless**: if `eth_in_total` stops relating to the
+outcome, the rule keeps selecting exactly 25% of launches and those launches stop
+being better. **The pass rate will look healthy while the edge is gone.** The pass
+rate is therefore not evidence the rule works — only the return comparison against
+the gated arm is, and that still needs n >= 10.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-20, from Part 13:**
