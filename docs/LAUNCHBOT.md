@@ -9143,6 +9143,139 @@ P15 or anything else, and §6AE's n=5 is unchanged by it. The simulator's exactn
 rests on a single observation at a size that moves no price; a larger position on a
 thinner pool is a different question and has not been asked.
 
+## 6AG. PART 17 — THE POST-LAUNCH PROPOSAL IS MEASURABLY WRONG IN ITS CORE CLAIM
+
+**Status: MEASURED on stored paths, ZERO new RPC. IN-SAMPLE throughout — this is
+choosing what to test, not proving anything. No trading.**
+
+### 6AG.1 Buying what already ran is buying the top. MEASURED.
+
+`bot_horizon_grid` stores `eth_out` at ten hold lengths for a fixed position, so
+`eth_out(H2)/eth_out(H1) - 1` is exactly the price return **between** those holds.
+That makes the post-launch question answerable with no new spend. Entry +15 s,
+n=255 tokens still sellable at +5 min:
+
+```
+leg              n    median      mean   win%      p90
++5m -> +15m    255     -0.0%     -8.4%    18%    37.0%
++5m -> +30m    255     -0.1%     -9.7%    10%     0.0%
++5m -> +60m    255     -0.2%    -25.9%     6%     0.0%
++5m -> +24h    255     -3.4%    -31.6%    10%     0.0%
+for contrast:
++90s -> +5m    254     +0.0%     +6.6%    39%    46.5%
+```
+
+**Only 18% of tokens rise at all between +5 and +15 minutes, and 6% between +5 and
++60.** The p90 of 0.0% from +30 min onward says the 90th-percentile token does not
+move — most are simply dead, with no trades to move the price.
+
+And the direct test of the proposal's core claim, quintiles by how hard the token
+ran from +90 s to +5 min:
+
+```
+quintile of the run     n    med RUN    med NEXT 10 min    win%
+q1                     50     -57.0%              -0.1%     14%
+q2                     50      -0.0%               0.0%      0%
+q3                     50      +0.0%               0.0%      6%
+q4                     50     +11.1%               0.0%     38%
+q5                     54     +46.4%             -88.9%     31%
+```
+
+**The tokens that ran hardest lost a median 88.9% over the next ten minutes.** The
+operator's own challenge question — "is post-launch momentum just buying the top
+from the same insiders?" — is answered on our data: **yes.** This is the most
+extreme single result in this document, and it points the opposite way from the
+proposal.
+
+### 6AG.2 The shape that explains it
+
+`bot_runner_label`, n=1016 over a 15-minute window:
+
+```
+band                n    med peak   med END   peak at   ended >= start
+never ran (<1.1x) 468       1.00x     0.95x        0s     60 (13%)
+1.1-1.5x          120       1.29x     0.18x      130s      4 ( 3%)
+1.5-2x            124       1.66x     0.18x      267s     14 (11%)
+2-5x              232       2.69x     0.66x      586s     94 (41%)
+5x+                72       8.01x     3.49x      680s     43 (60%)
+```
+
+**33% of tokens peak after +5 minutes**, and the genuine runners peak late — the
+5x+ band at 680 s. That part of the proposal's instinct is right and I expected it
+to be wrong. But the modest movers, which is what a volume spike will mostly
+surface, **end at 0.18x — an 82% loss** — and only 3-11% of them finish above where
+they started.
+
+Activity does not rescue it. Quintiles by `swaps_in_window`, the only volume-like
+field stored:
+
+```
+q1  swaps    1-   8   med peak 1.00x   med END 0.96x
+q5  swaps  694-3432   med peak 2.40x   med END 0.21x
+```
+
+**More volume buys a bigger peak AND a worse ending.** The most-traded quintile
+ends at 0.21x.
+
+### 6AG.3 TWO THINGS THE PROPOSAL NEEDS THAT CANNOT BE MEASURED AT ALL
+
+Reported as explicit nulls rather than worked around:
+
+- **The volume-versus-own-baseline signal cannot be tested on stored data.** Every
+  stored table holds either price at fixed offsets or a single aggregate swap
+  count. **No per-minute volume series exists for any token.** The `+90s -> +5m`
+  run used above is the closest available proxy, and it is a price proxy, not a
+  volume one.
+- **The scored-wallet question cannot be answered either.** Only **27 of 1,016**
+  launches have any scored buyer at all, and those are measured at +15 s — the
+  question §5B already asked. A scored buy *at the moment it happens, minutes in*
+  needs a per-swap buyer series that is stored nowhere. `wallet_scores` has 29,034
+  rows of scores, but nothing links them to a timestamped swap.
+
+### 6AG.4 The third-party claims — what holds and what does not
+
+`nirholas/robinhood-volume-alerts` is real, is for chain 4663, and does what the
+operator described: per-token volume baselines (a trimmed mean in `baseline.ts`),
+spike detection, eight event kinds, and a `performance.ts` for tracked-alert
+milestones. **What it does not contain is any outcome data.** No backtest, no
+profitability figures, no hit rate. The same is true of every comparable tool
+found: the feature lists are specific, the evidence that the alerts make money is
+absent everywhere.
+
+That absence is the finding. **Nobody publishes whether these alerts work**, and
+the one dataset that can speak to it is ours, which says the post-spike window is
+where the losses are.
+
+### 6AG.5 What I would do instead
+
+The proposal's execution half is sound and the signal half is refuted:
+
+- **Right:** stop racing the launch; let a human decide; use an off-the-shelf bot
+  with TP/SL rather than building an executor; log every alert and score it
+  independently of whether anyone acted.
+- **Wrong:** "volume spike after it survived" selects the q5 cohort, which loses a
+  median 88.9% in the next ten minutes.
+
+**The alert engine is worth building. The trigger should be the opposite of a
+momentum spike.** Everything this investigation has replicated points the same way
+— §6U.6's mechanism (ETH already in the pool means the launch is already
+discovered), §6AB.3's upper bound (2-4 ETH beats 4+), §6AF's live trade, which
+fired on P15 and made +1.51% gross. **Early and quiet, not late and loud.**
+
+And the one finding that has replicated three times out of sample is a
+prohibition, not an entry: never take an untouched-looking launch outside
+`creator_share >= 40%` (§6AE.5), and never trade a pool under ~1 ETH of net inflow
+(§6AE.6).
+
+### 6AG.6 The honest strategic position
+
+Nothing in this document is an established money-making strategy. The launch-snipe
+work has n=5 on its committed rule. The post-launch idea is refuted before it was
+built, which is the cheapest possible outcome and the reason it was measured first.
+What exists is: a validated simulator (§6AF.2, exact to the wei), working
+execution plumbing, two replicated prohibitions, and a collector that accumulates
+without supervision.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-21, from Part 16 — THE LARGEST GAP IN THIS DOCUMENT:**
