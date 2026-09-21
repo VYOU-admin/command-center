@@ -9008,6 +9008,141 @@ pool with under ~1 ETH of net inflow**. At the measured 8 qualifiers per 35.5 ho
 across all four rules — about 5.4/day — n=10 for the committed P11 rule alone is
 roughly five more days away.
 
+## 6AF. PART 16 — THE SELL BROADCAST, MINED, AND RETURNED ETH. AND THE SIMULATOR IS EXACT.
+
+**Status: MEASURED, LIVE, ON CHAIN. One trade. The chain-wide halt was lifted for
+the run and re-armed automatically on exit, verified on a fresh connection.**
+
+**THE QUESTION THIS TEST EXISTED TO ANSWER: yes. A sell broadcast, mined, and
+returned ETH.** No sell had ever been broadcast in this project before 2026-09-21
+19:11 UTC.
+
+### 6AF.1 Every transaction, re-read from chain
+
+```
+BUY       0x3d5b4c8dc6c68e0d31b5acac0df48419930fc7a8286664667e21ba01223cb7fa
+          SUCCESS  block 69,037,857  nonce 172  gas 115,877  fee 6,857,832,614,000 wei
+APPROVAL  0xe2597174d2ddd39946e4671049ba7b76cc79222f7a6c45df5fd4159ff8c6c8e1
+          SUCCESS  block 69,037,862  nonce 173  gas  47,674  fee 2,800,561,456,000 wei
+SELL      0xc27bac47e9c71e52ad88b302fda61f507c3bd86a6621643dd91c6ad60bb04665
+          SUCCESS  block 69,038,857  nonce 174  gas 105,456  fee 6,045,792,480,000 wei
+
+TOTAL GAS 15,704,186,550,000 wei = 0.0000157042 ETH = $0.0433
+```
+
+**Nonces 172, 173, 174 — sequential, no gaps, no replacements.** `signer.ts`'s
+receipt-seeded counter worked on its first real outing; §6A recorded the `'pending'`
+read killing the first live run after four minutes at exactly this point.
+
+**Only ONE approval was needed.** STEP 1 (token -> Permit2) was **SKIPPED** because
+the ERC-20 allowance was already unlimited; STEP 2 (Permit2 -> router) was sent for
+the **exact amount**, never unlimited, and confirmed by re-reading both allowances
+from the chain.
+
+### 6AF.2 THE SIMULATOR-VS-REALITY CHECK — EXACT TO THE WEI
+
+Every exit figure in this document came from `eth_call` simulation and none had ever
+been checked against a real fill. Measured independently of the run's own reporting,
+from the wallet's balance delta across the sell block plus that transaction's gas:
+
+```
+position in (wei)        362,387,170,761,157
+SIMULATED eth_out        367,843,922,638,475
+REAL eth_out (measured)  367,843,922,638,475
+difference                             0 wei      *** EXACT ***
+
+real gross return        1.5058%
+simulated gross return   1.5058%
+```
+
+**`simulateSellAt` predicted the realised output exactly.** The buy was equally
+exact: `fill_vs_quote = 1.0000`, tokens received 22,695,973,315,873,541,551,855
+against a quote of the same number to the digit.
+
+This is the single most consequential measurement in the document. It does **not**
+prove the simulator is exact on every pool — one observation, one pool, a quiet
+block, a $1 size that moves nothing. But the standing rule is that no measurement
+becomes a decision until one real observation confirms it, and **this is that
+observation for the exit-pricing method that §6E onward is built on.** The figures
+were pool-price figures presented as executability figures once before (§6A.3); this
+time the executability was tested and it matched.
+
+### 6AF.3 The trade
+
+```
+pool            0xd73ce9cf5a5dd39b93a35259cd16bff5f3bf5db7fb19b358efa366acbbab4023
+token           0x81eba23d3e7f08252efd4ff9f23e461a4bfc1c26
+init block      69,036,701
+qualified under P15 ONLY
+```
+
+**The rule applied at the entry block, and the re-score mattered.** At discovery
+(+12 s) the launch read `n_sells 0, eth_in 3.6018` and would have fired P11. By the
+entry block it read `n_sells 1, eth_in_total 3.8227, pool_eth 3.8214`:
+
+```
+P11   False   (n_sells is no longer 0, and 3.8227 > 3.6931)
+P14a  False   (roll_72h 3.1334)
+P14b  False   (roll_12h 2.8768)
+P15   True    (n_sells 1 <= 2, and 2.0 <= 3.8214 <= 4.0)
+```
+
+**Had the executor traded on its provisional verdict it would have traded a
+launch that no longer qualified under the rule that admitted it.** The re-score at
+the entry block is the guard that caught it, and P15 — the loosest of the four, and
+the one §6AB committed with its converging-split weakness stated — is what actually
+fired.
+
+### 6AF.4 The money
+
+```
+ETH before        4,375,531,713,699,534 wei
+ETH after         4,365,284,279,026,852 wei
+ETH delta           -10,247,434,672,682 wei = -0.00001025 ETH = -$0.0283
+gas total            15,704,186,550,000 wei =               $0.0433
+trade result ex-gas                                         +$0.0151
+tokens received   22,695,973,315,873,541,551,855
+tokens remaining                              0   POSITION FULLY CLOSED
+```
+
+**The trade made +1.5058% gross and lost money net, because gas is absolute.**
+$0.0433 of gas against a $1 position is **4.33%** — and §6S.4 already measured that
+a $1 position cannot carry this cost structure. That is not a finding about the
+strategy; it is the arithmetic the position size was chosen to ignore, deliberately,
+because this run was instrumentation. At $100 the same trade nets +1.46%.
+
+Compute cost of the whole armed run: **31,991 CU** against a 400,000 ceiling.
+
+### 6AF.5 The safety machinery, all of it exercised
+
+```
+halt cleared at 16:47:15  -> reason "Part 16: authorised one-shot live plumbing test"
+halt RE-ARMED at 19:12:29 -> reason "auto re-armed after the Part 16 one-shot live test"
+VERIFIED ON A FRESH CONNECTION: mode='*' halted=true
+wrapper and oneshot processes: BOTH GONE, exit 0
+bot_trades: 130 rows, last 2026-09-17 — unchanged, as designed (oneshot does not
+            write that table)
+```
+
+The re-arm ran from a shell trap, unconditionally, and its own path had been
+exercised before arming while the halt was already set. It did not depend on anyone
+remembering.
+
+**One trade, structurally.** The buy sits outside any loop, so there was nothing to
+repeat and no counter to get wrong.
+
+### 6AF.6 What this does and does not establish
+
+**Established, MEASURED:** the plumbing works end to end — signing, nonce
+sequencing, Permit2 two-step approval, buy, balance read, reachable-bound sell,
+receipt handling, and the halt re-arm. And the simulator matched a real fill to the
+wei on one pool.
+
+**NOT established:** anything about any rule. One trade at $1 is not evidence about
+P15 or anything else, and §6AE's n=5 is unchanged by it. The simulator's exactness
+rests on a single observation at a size that moves no price; a larger position on a
+thinner pool is a different question and has not been asked.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-21, from Part 16 — THE LARGEST GAP IN THIS DOCUMENT:**
