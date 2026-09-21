@@ -65,6 +65,10 @@ import { simulateSellAt } from '../bot/sellability.js';
 import { poolIdOf } from '../bot/pool-state.js';
 import { buildSwap } from '../bot/calldata.js';
 import { TOPICS } from '../adapters/token-updates/decode.js';
+import {
+  GATE1_SHARE, GATE2_SOLD, P11_ETH, P15_CEIL_ETH, P15_FLOOR_ETH, P15_MAX_SELLS,
+  ROLL, BLOCKS_PER_SEC, scoreRules,
+} from '../bot/collector-rules.js';
 
 const CHAIN = 'robinhood';
 const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
@@ -84,26 +88,18 @@ const CU_CEILING = 150_000;
 /** PINNED: the `to` block of the Part 12 run. Everything after this is genuinely new. */
 const START_BLOCK = 67_493_776;
 /** THE RULE. Frozen. */
-const GATE1_SHARE = 0.40;
-const GATE2_SOLD = 0.25;
-const UNTOUCHED_ETH = 3.6931;          /* P11, static. Kept on the record. */
+/* Every rule threshold now comes from bot/collector-rules.ts, which the executor
+   imports too. Two copies of a threshold is the drift rule.ts's header records
+   happening five times on this project. */
 /** P14 rolling cuts. The percentile is taken over GATED launches only — the
  *  population the rule selects within — and over launches STRICTLY EARLIER than
  *  the one being evaluated, so a launch never contributes to the cut that gates
  *  it. Below MIN_N the rule DOES NOT FIRE and the column is null; there is no
  *  silent fallback to a constant (§7: an error path must not emit a plausible
  *  default). See docs/NAMED-RULE-P14.md. */
-const ROLL = [
-  { key: 'a' as const, hours: 72, minN: 20 },   /* as specified in the brief */
-  { key: 'b' as const, hours: 12, minN: 10 },   /* the window that actually tracks */
-];
-const BLOCKS_PER_SEC = 9.93;          /* MEASURED §6V.2 over four spans */
 /** P15 THE LIQUIDITY BAND. docs/NAMED-RULE-P15.md, committed before this scored
  *  anything. An UPPER bound on pool_eth is the discriminator; the lower one is a
  *  safety floor that binds on 3.7% of gated launches and is not a source of edge. */
-const P15_FLOOR_ETH = 2.0;
-const P15_CEIL_ETH = 4.0;
-const P15_MAX_SELLS = 2;
 const GATE2_AT_BLOCKS = 900;
 const ENTRY_BLOCKS = 1_150;
 const EXIT_BLOCKS = 2_150;
@@ -354,23 +350,18 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const gate1 = share >= GATE1_SHARE;
-      const gate2 = sold90 < GATE2_SOLD;
-      const untouched = nSells === 0 && ethIn <= UNTOUCHED_ETH;
-      const liqOk = poolEth > 0;
-      const qualified = gate1 && gate2 && untouched && liqOk;
-      /* P14: the SAME launch scored under both rolling cuts, in parallel with the
-         static one. No variant is privileged; the brief asks which fires more and
-         which is right, which needs all three on the same launches. */
+      /* ONE implementation of the decision, shared with `oneshot`. */
       const cuts = await rollingCuts(c, ib);
+      const v = scoreRules({ creatorShare: share, sold90, nSells,
+        ethInTotal: ethIn, poolEth }, cuts);
+      const gate1 = v.gate1; const gate2 = v.gate2; const liqOk = v.liqOk;
+      const untouched = nSells === 0 && ethIn <= P11_ETH;
+      const qualified = v.p11;
       const unA = cuts.a !== null && nSells === 0 && ethIn <= cuts.a;
       const unB = cuts.b !== null && nSells === 0 && ethIn <= cuts.b;
-      const qualA = gate1 && gate2 && unA && liqOk;
-      const qualB = gate1 && gate2 && unB && liqOk;
+      const qualA = v.p14a; const qualB = v.p14b; const qualP15 = v.p15;
       if (qualA) qualACount += 1;
       if (qualB) qualBCount += 1;
-      const qualP15 = gate1 && gate2 && nSells <= P15_MAX_SELLS
-        && poolEth >= P15_FLOOR_ETH && poolEth <= P15_CEIL_ETH;
       if (qualP15) qualP15Count += 1;
       if (gate1 && gate2) {
         rollSeen += 1;

@@ -74,21 +74,16 @@ import { buildSwap } from '../bot/calldata.js';
 import { positionWei, minOut } from '../bot/rule.js';
 import { isHalted } from '../bot/state.js';
 import { simulateSellAt } from '../bot/sellability.js';
-import { TOPICS } from '../adapters/token-updates/decode.js';
+import {
+  ENTRY_BLOCKS, EXIT_BLOCKS, findCanonicalLaunches, readEntryState, rollingCuts,
+  scoreRules, type CanonicalLaunch,
+} from '../bot/collector-rules.js';
 
 const CHAIN = 'robinhood';
 const RPC_URL = 'https://robinhood-mainnet.g.alchemy.com/v2/{key}';
-const POOL_MANAGER = '0x8366a39cc670b4001a1121b8f6a443a643e40951';
 const abi = AbiCoder.defaultAbiCoder();
 const V4_TOO_LITTLE = id('V4TooLittleReceived(uint256,uint256)').slice(0, 10);
 const UNREACHABLE = 1n << 127n;
-const PRICING = [
-  '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
-  '0x5fc5360d0400a0fd4f2af552add042d716f1d168',
-  '0x0000000000000000000000000000000000000000',
-];
-const ENTRY_BLOCKS = 1_150;   /* +115 s */
-const EXIT_BLOCKS = 2_150;    /* +215 s */
 /** Refuse to run behind a wallet larger than instrumentation needs. */
 const MAX_WALLET_ETH = 0.05;
 /** How long to wait for a qualifying launch before giving up and saying so. */
@@ -96,8 +91,6 @@ const WAIT_MINUTES = 90;
 const RECEIPT_TIMEOUT_MS = 120_000;
 const CU_CEILING = 300_000;
 
-interface Log { topics: string[]; data: string; blockNumber: string; transactionHash: string }
-const addrTopic = (t: string): string => `0x${t.slice(26)}`.toLowerCase();
 const sleep = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms); });
 
 interface Candidate {
@@ -182,72 +175,82 @@ async function main(): Promise<void> {
     });
 
     /* ---- WAIT FOR ONE QUALIFYING LAUNCH ------------------------------- */
-    /* Read from the collector's table. This file does NOT re-implement a rule. */
+    /*
+     * EVALUATED LIVE, THROUGH THE SHARED RULE MODULE.
+     *
+     * v1 queried `bot_p13` for a row whose entry block had not yet passed. That is
+     * UNSATISFIABLE: the collector only processes launches whose EXIT has matured, so
+     * every stored row's entry is at least 4,000 blocks in the past. v1 would have
+     * waited its full window and reported "nothing traded", every time. The rules now
+     * live in `bot/collector-rules.ts` and are imported by the collector AND by this
+     * file, so evaluating them here is not a second implementation.
+     *
+     * A launch is a candidate only while its entry block is still AHEAD of head, and
+     * the state is read at the block we have actually reached — never extrapolated.
+     */
     const deadline = Date.now() + WAIT_MINUTES * 60_000;
-    let cand: Candidate | null = null;
+    let cand: CanonicalLaunch | null = null;
+    let rulesFired = '';
+    let scanned = 0;
+    let lastScan = Number(BigInt(String(await rpc.call('eth_blockNumber', [])))) - 400;
     let polls = 0;
     while (cand === null && Date.now() < deadline) {
       polls += 1;
       const head = Number(BigInt(String(await rpc.call('eth_blockNumber', []))));
-      const q = await c.query<{ pool_id: string; init_block: string; token: string;
-        qualified: boolean; qualified_a: boolean; qualified_b: boolean;
-        qualified_p15: boolean }>(
-        `select pool_id, init_block::text, token, qualified, qualified_a,
-                qualified_b, qualified_p15
-           from bot_p13
-          where chain = $1
-            and (qualified or qualified_a or qualified_b or qualified_p15)
-            and init_block + $2 > $3
-          order by init_block desc limit 1`, [CHAIN, ENTRY_BLOCKS, head]);
-      const r = q.rows[0];
-      if (r !== undefined) {
-        cand = { poolId: r.pool_id, initBlock: Number(r.init_block), token: r.token,
-          rules: [r.qualified && 'P11', r.qualified_a && 'P14a',
-            r.qualified_b && 'P14b', r.qualified_p15 && 'P15']
-            .filter(Boolean).join(',') };
-        break;
+      if (head <= lastScan) { await sleep(5_000); continue; }
+      let fresh: CanonicalLaunch[] = [];
+      try {
+        fresh = await findCanonicalLaunches(rpc, lastScan + 1, head,
+          (data) => abi.decode(['uint24', 'int24', 'address', 'uint160', 'int24'], data) as
+            unknown as [bigint, bigint, string, bigint, bigint]);
+      } catch (err) {
+        log.warn('launch scan failed, retrying', errorFields(err));
+        await sleep(5_000); continue;
       }
-      if (polls % 10 === 1) {
+      lastScan = head;
+      for (const L of fresh) {
+        scanned += 1;
+        /* Only usable if we can still reach its entry block. */
+        if (L.initBlock + ENTRY_BLOCKS <= head) continue;
+        /* Read what has happened SO FAR and score it. A launch that already fails a
+           gate on partial data can only get worse for gate 2 and the sell count, so
+           it is dropped; one that passes is re-scored at the entry block below. */
+        const st = await readEntryState(rpc, L.poolId, L.initBlock, head);
+        const cuts = await rollingCuts(c, CHAIN, L.initBlock);
+        const v = scoreRules(st, cuts);
+        log.info('launch seen', {
+          pool_id: L.poolId, init_block: L.initBlock,
+          blocks_to_entry: L.initBlock + ENTRY_BLOCKS - head,
+          creator_share: st.creatorShare.toFixed(4), sold_90: st.sold90.toFixed(4),
+          n_sells: st.nSells, eth_in: st.ethInTotal.toFixed(4),
+          pool_eth: st.poolEth.toFixed(4),
+          gate1: v.gate1, gate2: v.gate2, provisional_rules: v.which || 'none',
+        });
+        if (v.gate1 && v.gate2) { cand = L; break; }
+      }
+      if (cand === null && polls % 12 === 1) {
         log.info('waiting for a qualifying launch', {
-          head, minutes_left: Math.round((deadline - Date.now()) / 60_000),
+          head, scanned, minutes_left: Math.round((deadline - Date.now()) / 60_000),
           note: 'NO RULE WILL BE RELAXED TO FIND ONE',
         });
       }
-      await sleep(15_000);
+      if (cand === null) await sleep(5_000);
     }
     if (cand === null) {
       log.info('NO QUALIFYING LAUNCH APPEARED — STOPPING, NOTHING TRADED', {
-        waited_minutes: WAIT_MINUTES, polls,
+        waited_minutes: WAIT_MINUTES, polls, launches_scanned: scanned,
         note: 'a rule was NOT relaxed to force a trade. Re-run to wait again.',
       });
       return;
     }
-    log.info('CANDIDATE FOUND', {
+    log.info('CANDIDATE PASSED BOTH GATES — holding to the entry block', {
       pool_id: cand.poolId, init_block: cand.initBlock, token: cand.token,
-      qualified_under: cand.rules,
       entry_block: cand.initBlock + ENTRY_BLOCKS,
       exit_block: cand.initBlock + EXIT_BLOCKS,
     });
 
     /* Reconstruct the pool key from the Initialize log — never from a stored guess. */
-    const il = (await rpc.call('eth_getLogs', [{
-      address: POOL_MANAGER, topics: [TOPICS.initializeV4, cand.poolId],
-      fromBlock: `0x${cand.initBlock.toString(16)}`,
-      toBlock: `0x${cand.initBlock.toString(16)}`,
-    }])) as Log[];
-    if (il.length === 0) throw new Error(`no Initialize log for ${cand.poolId}`);
-    const l0 = il[0]!;
-    const c0 = addrTopic(l0.topics[2] ?? '');
-    const c1 = addrTopic(l0.topics[3] ?? '');
-    const d = abi.decode(['uint24', 'int24', 'address', 'uint160', 'int24'], l0.data) as
-      unknown as [bigint, bigint, string, bigint, bigint];
-    const pool = { currency0: c0, currency1: c1, fee: Number(d[0]),
-      tickSpacing: Number(d[1]), hooks: d[2].toLowerCase() };
-    const zeroIsPricing = PRICING.includes(c0);
-    const token = zeroIsPricing ? c1 : c0;
-    if (token.toLowerCase() !== cand.token.toLowerCase()) {
-      throw new Error(`token mismatch: chain says ${token}, table says ${cand.token}`);
-    }
+    const { pool, zeroIsPricing, token } = cand;
 
     /* ---- WAIT FOR THE ENTRY BLOCK ------------------------------------- */
     const entryBlock = cand.initBlock + ENTRY_BLOCKS;
@@ -256,6 +259,36 @@ async function main(): Promise<void> {
       if (head >= entryBlock) break;
       await sleep(Math.min(10_000, (entryBlock - head) * 100));
     }
+
+    /*
+     * THE DECISIVE EVALUATION, AT THE ENTRY BLOCK. The scan above admitted the launch
+     * on PARTIAL data to avoid missing it; the rule is applied for real here, on the
+     * full 0..+115 s window, and a launch that no longer qualifies is DROPPED rather
+     * than traded on the earlier provisional verdict.
+     */
+    const stateNow = await readEntryState(rpc, cand.poolId, cand.initBlock);
+    const cutsNow = await rollingCuts(c, CHAIN, cand.initBlock);
+    const verdict = scoreRules(stateNow, cutsNow);
+    log.info('RULE APPLIED AT THE ENTRY BLOCK', {
+      pool_id: cand.poolId,
+      creator_share: stateNow.creatorShare.toFixed(4),
+      sold_90: stateNow.sold90.toFixed(4), n_sells: stateNow.nSells,
+      eth_in_total: stateNow.ethInTotal.toFixed(4),
+      pool_eth: stateNow.poolEth.toFixed(4),
+      roll_72h: cutsNow.a === null ? 'below MIN_N' : cutsNow.a.toFixed(4),
+      roll_12h: cutsNow.b === null ? 'below MIN_N' : cutsNow.b.toFixed(4),
+      P11: verdict.p11, P14a: verdict.p14a, P14b: verdict.p14b, P15: verdict.p15,
+      qualifies: verdict.any,
+    });
+    if (!verdict.any) {
+      log.info('NO LONGER QUALIFIES AT THE ENTRY BLOCK — STOPPING, NOTHING TRADED', {
+        pool_id: cand.poolId,
+        note: 'the provisional verdict during the scan was on partial data. The rule '
+          + 'is applied on the full window here and it does not fire. Not relaxed.',
+      });
+      return;
+    }
+    rulesFired = verdict.which;
 
     /* Quote at the entry block with an UNREACHABLE bound: this is a QUOTE, and the
        revert payload is the router's own output. It is never used as an exit price
@@ -294,6 +327,7 @@ async function main(): Promise<void> {
       deadline: BigInt(Math.floor(Date.now() / 1000) + 600) });
     log.info('BUY — ABOUT TO BROADCAST', {
       pool_id: cand.poolId, token, entry_block: entryBlock,
+      qualified_under: rulesFired,
       amount_in_wei: size.toString(), quoted_out: quoted.toString(),
       min_out: minOut(quoted).toString(),
       to: buy.to, value_wei: buy.value.toString(),
