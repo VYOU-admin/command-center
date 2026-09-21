@@ -109,7 +109,8 @@
     "halt-control": "node dist/cli/halt-control.js",
     "creator-backfill": "node --enable-source-maps dist/cli/creator-backfill.js",
     "ungated-price": "node --enable-source-maps dist/cli/ungated-price.js",
-    "p13-collect": "node --enable-source-maps dist/cli/p13-collect.js"
+    "p13-collect": "node --enable-source-maps dist/cli/p13-collect.js",
+    "oneshot": "node --enable-source-maps dist/cli/oneshot.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
