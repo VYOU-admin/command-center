@@ -77,6 +77,21 @@ const HORIZONS = [
 const SIZE_WEI = 36_000_000_000_000_000n;
 
 interface Log { topics: string[]; data: string; blockNumber: string }
+
+/**
+ * A 20-byte address, or nothing.
+ *
+ * **`v4_pool_init.hooks` IS KNOWINGLY SHORT BY ONE BYTE on 306,560 of 678,441 rows**
+ * — `src/intake/v4-init.ts` records it: an early version used a topic helper on a
+ * data word, which drops the address's HIGH byte. Those rows were never rewritten.
+ * Feeding one to `buildSwap` throws `invalid address`, which is how this was found.
+ *
+ * So the stored row is USED ONLY IF EVERY ADDRESS IN IT IS WELL FORMED. Otherwise
+ * the key is re-derived from the chain, which is always correct. A short address is
+ * a defect to route around, never a value to pad and hope.
+ */
+const isAddr = (a: string | null | undefined): a is string =>
+  typeof a === 'string' && /^0x[0-9a-f]{40}$/.test(a.toLowerCase());
 interface PoolKey {
   currency0: string; currency1: string; fee: number; tickSpacing: number; hooks: string;
 }
@@ -134,6 +149,20 @@ async function main(): Promise<void> {
       primary key (chain, wallet, token, buy_block, lag, horizon)
     )`);
 
+    /* Rows stored before the isAddr check may carry a short `hooks` from
+       v4_pool_init. Un-key them so discovery re-derives from the chain. */
+    const fixed = await c.query(
+      `update bot_follow_track set key_ok = false
+        where chain = $1 and key_ok
+          and (currency0 !~ '^0x[0-9a-f]{40}$' or currency1 !~ '^0x[0-9a-f]{40}$'
+               or hooks !~ '^0x[0-9a-f]{40}$')`, [CHAIN]);
+    if ((fixed.rowCount ?? 0) > 0) {
+      log.warn('un-keyed rows carrying a malformed pool key, will re-derive', {
+        rows: fixed.rowCount,
+        cause: 'v4_pool_init.hooks is knowingly short by one byte on ~45% of rows',
+      });
+    }
+
     const head = Number(BigInt(String(await rpc.call('eth_blockNumber', []))));
 
     /* ---- 1. DISCOVER new buys by the four ------------------------------ */
@@ -159,7 +188,8 @@ async function main(): Promise<void> {
         `select pool_id, currency0, currency1, fee, tick_spacing, hooks
            from v4_pool_init where chain=$1 and lower(pool_id)=lower($2)`,
         [CHAIN, f.pool ?? ''])).rows[0];
-      if (st !== undefined) {
+      if (st !== undefined && isAddr(st.currency0) && isAddr(st.currency1)
+          && isAddr(st.hooks)) {
         pk = { currency0: st.currency0.toLowerCase(), currency1: st.currency1.toLowerCase(),
           fee: st.fee, tickSpacing: st.tick_spacing, hooks: st.hooks.toLowerCase() };
         zip = PRICING.includes(pk.currency0);
@@ -175,10 +205,13 @@ async function main(): Promise<void> {
             const c1 = addrTopic(l.topics[3] ?? '');
             const d = abi.decode(['uint24', 'int24', 'address', 'uint160', 'int24'], l.data) as
               unknown as [bigint, bigint, string, bigint, bigint];
-            pk = { currency0: c0, currency1: c1, fee: Number(d[0]),
-              tickSpacing: Number(d[1]), hooks: d[2].toLowerCase() };
-            zip = PRICING.includes(c0);
-            pid = f.pool;
+            const hk = d[2].toLowerCase();
+            if (isAddr(c0) && isAddr(c1) && isAddr(hk)) {
+              pk = { currency0: c0, currency1: c1, fee: Number(d[0]),
+                tickSpacing: Number(d[1]), hooks: hk };
+              zip = PRICING.includes(c0);
+              pid = f.pool;
+            }
           }
         } catch { /* counted below as key_ok=false, never silently dropped */ }
       }
@@ -204,9 +237,12 @@ async function main(): Promise<void> {
          from bot_follow_track
         where chain=$1 and key_ok order by buy_block`, [CHAIN])).rows;
 
-    let scored = 0; let noEntry = 0; let unsellable = 0;
+    let scored = 0; let noEntry = 0; let unsellable = 0; let badKey = 0;
     for (const t of todo) {
       const bb = Number(t.buy_block);
+      if (!isAddr(t.currency0) || !isAddr(t.currency1) || !isAddr(t.hooks)) {
+        badKey += 1; continue;
+      }
       const pool: PoolKey = { currency0: t.currency0, currency1: t.currency1,
         fee: t.fee, tickSpacing: t.tick_spacing, hooks: t.hooks };
       const token = t.zero_is_pricing ? t.currency1 : t.currency0;
@@ -258,6 +294,7 @@ async function main(): Promise<void> {
       rule: 'docs/NAMED-RULE-P19.md, committed before this scored anything',
       tracked_positions: todo.length, legs_scored_this_cycle: scored,
       entry_unpriceable: noEntry, unsellable_at_exit: unsellable,
+      malformed_stored_pool_key: badKey,
       note: 'unpriceable entries are COUNTED — refutation condition 4 needs the denominator',
       cu: inner.cuSpent,
     });
