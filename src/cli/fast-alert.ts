@@ -44,6 +44,7 @@ import { ReadOnlyRpc } from '../bot/rpc.js';
 import { buildSwap } from '../bot/calldata.js';
 import { simulateSellAt } from '../bot/sellability.js';
 import { PRICING, POOL_MANAGER, addrTopic } from '../bot/collector-rules.js';
+import { poolIdOf } from '../bot/pool-state.js';
 import { TOPICS } from '../adapters/token-updates/decode.js';
 
 const CHAIN = 'robinhood';
@@ -84,6 +85,88 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, 
 const isInfra = (e: unknown): boolean =>
   /compute unit|ceiling|budget|ECONNRESET|ETIMEDOUT|timeout|fetch failed|socket/i
     .test((e as Error)?.message ?? '');
+
+/**
+ * THE POOL BEHIND A BUY, FROM THE BUY'S OWN RECEIPT.
+ *
+ * The first version searched 900,000 blocks of `Initialize` logs for one whose
+ * currencies included the token. That is expensive, returns a huge response, and
+ * **resolved 0 of 1 on the first live alert** — a token can have several pools and
+ * the newest is not necessarily the one traded.
+ *
+ * The buy transaction itself is authoritative: it emits a v4 `Swap` whose `topic1`
+ * IS the pool id of the pool actually used. One `eth_getTransactionReceipt` (15 CU)
+ * replaces the sweep and answers the right question — not "which pool exists for
+ * this token" but "which pool did they trade".
+ */
+async function poolIdsFromBuy(
+  rpc: ReadOnlyRpc, txHash: string,
+): Promise<string[]> {
+  const r = (await rpc.call('eth_getTransactionReceipt', [txHash])) as
+    { logs?: { address: string; topics: string[] }[] } | null;
+  const out: string[] = [];
+  for (const l of r?.logs ?? []) {
+    if (l.address.toLowerCase() !== POOL_MANAGER) continue;
+    if ((l.topics[0] ?? '').toLowerCase() !== TOPICS.swapV4.toLowerCase()) continue;
+    const pid = (l.topics[1] ?? '').toLowerCase();
+    if (pid !== '' && !out.includes(pid)) out.push(pid);
+  }
+  return out;
+}
+
+/**
+ * THE POOL KEY FOR A KNOWN POOL ID, AND IT IS PROVED RATHER THAN TRUSTED.
+ *
+ * `poolId = keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks))`,
+ * so **a key that hashes to the expected id is correct in every field** — including
+ * `hooks`, which `v4_pool_init` truncates by one byte on 45% of rows (§6AJ.2).
+ * That makes the check free and total: no field can be wrong if the hash matches.
+ *
+ * Stored row first (0 CU). If it does not hash correctly, the `Initialize` log is
+ * re-read at the block the stored row names — one block, one tiny response — and
+ * checked again. A key that never verifies is reported unresolved, never guessed.
+ */
+async function resolveKey(
+  rpc: ReadOnlyRpc, c: { query: (s: string, p?: unknown[]) => Promise<{ rows: unknown[] }> },
+  poolId: string,
+): Promise<{ pk: PoolKey; via: string } | null> {
+  const row = (await c.query(
+    `select currency0, currency1, fee, tick_spacing, hooks, block_number::text
+       from v4_pool_init where chain=$1 and lower(pool_id)=lower($2)`,
+    [CHAIN, poolId])).rows[0] as {
+      currency0: string; currency1: string; fee: number; tick_spacing: number;
+      hooks: string; block_number: string } | undefined;
+
+  if (row !== undefined && isAddr(row.currency0) && isAddr(row.currency1)
+      && isAddr(row.hooks)) {
+    const pk: PoolKey = { currency0: row.currency0.toLowerCase(),
+      currency1: row.currency1.toLowerCase(), fee: row.fee,
+      tickSpacing: row.tick_spacing, hooks: row.hooks.toLowerCase() };
+    if (poolIdOf(pk).toLowerCase() === poolId) return { pk, via: 'stored+verified' };
+  }
+
+  /* The stored row is wrong or short. Re-read the Initialize log at the block it
+     names — exact, one block, filtered by the pool id itself. */
+  const at = row === undefined ? null : Number(row.block_number);
+  if (at !== null && Number.isFinite(at)) {
+    try {
+      const iv = (await rpc.call('eth_getLogs', [{
+        address: POOL_MANAGER, topics: [TOPICS.initializeV4, poolId],
+        fromBlock: `0x${at.toString(16)}`, toBlock: `0x${at.toString(16)}`,
+      }])) as Log[];
+      for (const iL of iv) {
+        const c0 = addrTopic(iL.topics[2] ?? '');
+        const c1 = addrTopic(iL.topics[3] ?? '');
+        const d = abi.decode(['uint24', 'int24', 'address', 'uint160', 'int24'],
+          iL.data) as unknown as [bigint, bigint, string, bigint, bigint];
+        const pk: PoolKey = { currency0: c0, currency1: c1, fee: Number(d[0]),
+          tickSpacing: Number(d[1]), hooks: d[2].toLowerCase() };
+        if (poolIdOf(pk).toLowerCase() === poolId) return { pk, via: 'chain+verified' };
+      }
+    } catch (e) { if (isInfra(e)) throw e; }
+  }
+  return null;
+}
 
 async function erc20(rpc: ReadOnlyRpc, token: string, sel: string): Promise<string | null> {
   try {
@@ -161,6 +244,24 @@ async function main(): Promise<void> {
           const token = l.address.toLowerCase();
           const blk = Number(BigInt(l.blockNumber));
           if (!WALLETS.includes(wallet)) continue;
+          /*
+           * **A PRICING ASSET ARRIVING IS A SALE, NOT A PURCHASE.**
+           *
+           * The detector keys on "a token moved INTO the wallet". For a pool priced
+           * in native ETH that is unambiguous — selling returns ETH, which emits no
+           * ERC-20 Transfer. But for a pool priced in an ERC-20 (this chain has
+           * several), selling returns THAT asset as a Transfer into the wallet, and
+           * the first live alert fired on exactly this: token
+           * `0x0bd7d308f8e1639f…`, which is itself a pricing asset.
+           *
+           * Alerting on a sell as though it were a buy is the worst possible failure
+           * for a follow signal — it points the operator at the exit.
+           */
+          if (PRICING.includes(token)) {
+            log.info('skipped: a pricing asset arriving is a SELL, not a buy',
+              { wallet: SHORT[wallet], asset: token, block: blk });
+            continue;
+          }
           /* DE-DUPLICATE PER (wallet, token): these wallets ladder. */
           const dup = (await c.query(
             `select 1 from bot_fast_alert where chain=$1 and wallet=$2 and token=$3`,
@@ -170,25 +271,27 @@ async function main(): Promise<void> {
           /* Resolve the pool key from chain. v4_pool_init is not trusted: its
              `hooks` is short by one byte on 45% of rows (§6AJ.2). */
           let pk: PoolKey | null = null; let zip = false; let poolId: string | null = null;
+          let keyVia = 'none';
           try {
-            const iv = (await rpc.call('eth_getLogs', [{
-              address: POOL_MANAGER, topics: [TOPICS.initializeV4],
-              fromBlock: `0x${Math.max(0, blk - 900_000).toString(16)}`,
-              toBlock: `0x${blk.toString(16)}`,
-            }])) as Log[];
-            for (const iL of iv.reverse()) {
-              const c0 = addrTopic(iL.topics[2] ?? '');
-              const c1 = addrTopic(iL.topics[3] ?? '');
-              if (c0 !== token && c1 !== token) continue;
-              const d = abi.decode(['uint24', 'int24', 'address', 'uint160', 'int24'],
-                iL.data) as unknown as [bigint, bigint, string, bigint, bigint];
-              const hk = d[2].toLowerCase();
-              if (!isAddr(c0) || !isAddr(c1) || !isAddr(hk)) continue;
-              pk = { currency0: c0, currency1: c1, fee: Number(d[0]),
-                tickSpacing: Number(d[1]), hooks: hk };
-              zip = PRICING.includes(c0);
-              poolId = (iL.topics[1] ?? '').toLowerCase();
+            /*
+             * A ROUTE HAS SEVERAL SWAPS. TAKE THE ONE HOLDING THIS TOKEN.
+             *
+             * Taking the first `Swap` in the receipt resolved both test alerts to
+             * the SAME pool — an old routing hop, not the token's own pool. The
+             * right pool is the one whose verified key actually contains the
+             * token; every other Swap in the transaction is a hop we do not trade.
+             */
+            const candidates = await poolIdsFromBuy(rpc, l.transactionHash);
+            for (const cand of candidates) {
+              const r = await resolveKey(rpc, c, cand);
+              if (r === null) continue;
+              if (r.pk.currency0 !== token && r.pk.currency1 !== token) continue;
+              pk = r.pk; keyVia = r.via; poolId = cand;
+              zip = PRICING.includes(pk.currency0);
               break;
+            }
+            if (pk === null && candidates.length > 0) {
+              keyVia = `no candidate pool holds the token (${candidates.length} swap(s))`;
             }
           } catch (e) { if (isInfra(e)) throw e; }
 
@@ -231,7 +334,7 @@ async function main(): Promise<void> {
             [CHAIN, wallet, token, blk, sent, alertErr]);
           log.info('ALERT', { wallet: SHORT[wallet], token, symbol,
             block: blk, lag_s: lagSec.toFixed(1), delivered: sent,
-            pool_key: pk !== null });
+            pool_id: poolId, pool_key: pk !== null, key_via: keyVia });
         }
       }
 
