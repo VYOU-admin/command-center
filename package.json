@@ -111,7 +111,8 @@
     "ungated-price": "node --enable-source-maps dist/cli/ungated-price.js",
     "p13-collect": "node --enable-source-maps dist/cli/p13-collect.js",
     "oneshot": "node --enable-source-maps dist/cli/oneshot.js",
-    "follow-track": "node --enable-source-maps dist/cli/follow-track.js"
+    "follow-track": "node --enable-source-maps dist/cli/follow-track.js",
+    "fast-alert": "node --enable-source-maps dist/cli/fast-alert.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
