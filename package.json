@@ -110,7 +110,8 @@
     "creator-backfill": "node --enable-source-maps dist/cli/creator-backfill.js",
     "ungated-price": "node --enable-source-maps dist/cli/ungated-price.js",
     "p13-collect": "node --enable-source-maps dist/cli/p13-collect.js",
-    "oneshot": "node --enable-source-maps dist/cli/oneshot.js"
+    "oneshot": "node --enable-source-maps dist/cli/oneshot.js",
+    "follow-track": "node --enable-source-maps dist/cli/follow-track.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
