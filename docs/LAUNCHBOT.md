@@ -9567,7 +9567,129 @@ wallets rather than at a volume spike. It costs nothing, it is out of sample by
 construction, and it answers the only question that matters before money moves:
 **does following these four, at a realistic lag, actually make money.**
 
+## 6AJ. PART 19 — THE TRACKER IS BUILT AND RUNNING. REFUTATION CONDITION 4 FIRED ON ITS FIRST CYCLE.
+
+**Status: BUILT, deployed, running. NO RETURNS ARE REPORTED, because the rule's own
+plumbing check failed and reporting a return over a 23%-complete, biased subset is
+exactly what condition 4 exists to prevent. Halt verified `mode='*' halted=true`.**
+
+### 6AJ.1 What was built
+
+`src/cli/follow-track.ts`, against `docs/NAMED-RULE-P19.md` committed at `5f10b48`
+**before it scored a single buy**. It tracks the four wallets named in §6AI.5 and
+scores our own $100-notional round trip at two entry lags x four horizons:
+
+```
+LAG_FAST   300 blocks (~30 s)    needs direct polling that does not exist
+LAG_SLOW  9000 blocks (~15 min)   the median lag of today's 30-minute monitor
+horizons   +5m  +15m  +1h  +24h   from entry
+```
+
+Every exit is a **reachable-bound `simulateSellAt`** (§6A.3); a position that cannot
+be sold is **-100%, never 0%**. The FAST-vs-SLOW comparison is the deliverable: if
+FAST pays and SLOW does not, build the poller; if neither does, stop.
+
+### 6AJ.2 A PRE-EXISTING DATA DEFECT, FOUND BY WALKING INTO IT
+
+The first run died on `TypeError: invalid address (value="0x0000...0000")` — an
+address 38 hex characters long. The cause is not in this code:
+
+```
+v4_pool_init.hooks length 40 (38 hex chars):  306,560 rows
+v4_pool_init.hooks length 42 (correct)     :  371,881 rows
+```
+
+**45% of `v4_pool_init` carries a truncated `hooks` address**, and
+`src/intake/v4-init.ts` already records why — an early version used a topic helper
+on a data word, "which drops the address's HIGH BYTE", and those rows were never
+rewritten. The comment even says `hooks` is "knowingly short by one byte on rows".
+
+The fix is to **route around it, never to pad it**: an `isAddr` guard accepts a
+stored key only if every address in it is well formed, otherwise the key is
+re-derived from the chain. 39 already-stored rows were un-keyed for re-derivation.
+**A short address is a defect to detect, not a value to repair by guessing.**
+
+### 6AJ.3 REFUTATION CONDITION 4 FIRED — 77% OF ENTRIES UNPRICEABLE
+
+```
+FOLLOW-TRACK CYCLE DONE
+  tracked_positions          510
+  legs_scored_this_cycle     920
+  entry_unpriceable        3,100
+  unsellable_at_exit           3
+  malformed_stored_pool_key    0
+  cu                     249,976   (ceiling 250,000 — the run TRUNCATED)
+```
+
+Condition 4 was written as: *"More than 30% of entries unpriceable. That is a
+plumbing failure and must be reported as one, NOT as a result."* It is **77%**.
+**No return figures are reported from this cycle.**
+
+### 6AJ.4 The cause, diagnosed rather than guessed
+
+```
+                       n    zeroIsPricing
+entry_ok = TRUE       56      56 (100%)
+entry_ok = FALSE     207      57  (27%)
+```
+
+**`zeroIsPricing` is the discriminator.** Every priceable pool has a recognised
+pricing asset as `currency0`; three quarters of the unpriceable ones do not. When
+`currency0` is not in the `PRICING` list, `quoteBuy` still attaches native ETH as
+`value` and swaps in the wrong direction — it is trying to spend an asset the
+wallet does not hold.
+
+A second cause sits alongside it: many unpriceable pools carry **`fee = 8388608`**,
+which is `0x800000` — the Uniswap v4 **dynamic-fee flag**. Those pools take their
+fee from a hook at swap time and do not route like a fixed-fee pool.
+
+**The four wallets trade a much wider pool universe than the launch research ever
+touched.** Everything from §6D onward is native-ETH-side Pools.trade launches with
+fixed fees; these wallets are also trading token/token pairs and dynamic-fee hooked
+pools. The quoting machinery was built for the narrow case and silently produced a
+null for the rest.
+
+### 6AJ.5 What this leaves, and what it costs to finish
+
+The 23% that DID price is **936 legs across 56 tokens** — real, but **biased to
+native-ETH-side fixed-fee pools**, which is precisely the population the rest of
+this document already covers. Reporting a follow-return from it would answer a
+different question than the one asked.
+
+To finish the tracker honestly, two things are needed and neither is a tweak:
+
+1. **Quote in the pool's actual pricing asset**, not always native ETH — pick the
+   side from the pool key and size the notional in that asset.
+2. **Handle dynamic-fee pools** (`fee & 0x800000`), or exclude them explicitly and
+   report how many positions that drops.
+
+The CU ceiling also needs raising: this cycle spent **249,976 of 250,000** and
+truncated. A full pass over 510 positions x 2 lags x 4 horizons is roughly 400,000
+CU, which is inside the operator's ~500,000 single-spend threshold but needs the
+per-invocation ceiling lifted to match.
+
+**Discovery works.** 298 new buys found in one cycle, 232 pool keys resolved. The
+wallet selection, the two-lag design and the maturity handling are all sound. What
+is not yet built is the ability to price the trades these four actually make.
+
 ## 7. Rules here the code does not implement
+
+**ADDED 2026-09-23, from Part 19:**
+
+- **`v4_pool_init.hooks` IS TRUNCATED ON 306,560 OF 678,441 ROWS (45%).** An early
+  `src/intake/v4-init.ts` used a topic helper on a data word, dropping the
+  address's high byte; the comment in that file records it as "knowingly short by
+  one byte" and the rows were never rewritten. **Any code reading that column must
+  validate the address and re-derive from chain on failure** — §6AJ.2 found it by
+  `buildSwap` throwing `invalid address`. Padding it would be inventing a byte.
+
+- **THE QUOTING PATH ONLY HANDLES NATIVE-ETH-SIDE FIXED-FEE POOLS.** §6AJ.4
+  measured 77% of the four wallets' positions being unpriceable: `quoteBuy`
+  attaches native ETH as `value` regardless of what the pool's pricing asset
+  actually is, and many of these pools carry `fee = 8388608` (`0x800000`), the v4
+  **dynamic-fee flag**. Everything from §6D onward is native-ETH Pools.trade
+  launches, so this never surfaced. It must be fixed before any follow strategy
+  can be scored.
 
 **ADDED 2026-09-21, from Part 16 — THE LARGEST GAP IN THIS DOCUMENT:**
 
