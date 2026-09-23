@@ -9422,6 +9422,151 @@ decision arriving twice and carry no extra information.
 - **17 of the top 50 have never sold anything**, and 57.9% of all positions are
   still open, so "realised P&L" describes a minority of what these wallets hold.
 
+## 6AI. PART 18C/18D — THERE IS NO COPYABLE EXIT, AND THE FAST WALLETS ARE THE LOSING ONES
+
+**Status: MEASURED, ZERO CU. No trading.**
+
+### 6AI.1 18C — hold time, winners against losers
+
+1,061 closed, fully-priced positions with a hold time.
+
+```
+                          n      p25      MEDIAN       p75
+first buy -> LAST sell
+  winners (ret > 0)     508     5.2m      62.6m    1460.9m
+  losers  (ret <= 0)    553     1.9m      27.1m     452.2m
+first buy -> FIRST sell
+  winners               508     0.5m       7.0m      80.4m
+  losers                553     1.1m       9.4m     119.8m
+win rate 47.9%
+```
+
+**The obvious reading is wrong.** Winners are held 2.3x longer to FULL exit, which
+looks like "let winners run" — but they **start** selling SOONER than losers
+(7.0m against 9.4m). The difference is not discipline about cutting losses. It is
+that a winner takes longer to finish selling because there is a rising market to
+sell into; a loser is exited in one go because there is nothing to work.
+
+### 6AI.2 They sell mildly into strength, and their exit timing is worth NOTHING
+
+Measured against other wallets' trades, so a wallet's own prints cannot flatter it:
+
+```
+sell price vs the 5 min BEFORE it   n=1,088   median +0.74%   55% above
+price 5 min AFTER their sell        n=1,147   median  0.00%   50% up
+```
+
+They do sell slightly into strength (+0.74%, 55%). But **the price five minutes
+after they sell has a median of exactly 0.00% and goes up half the time.** That is
+a coin flip. **These wallets have no exit alpha at all** — they are not getting out
+ahead of a fall. Whatever edge they have is in the entry, not the exit.
+
+This is a clean null and it matters: there is nothing in their exits worth copying.
+
+### 6AI.3 There is no common exit pattern — the spread is 9,055x
+
+```
+full exit (>=95% of tokens sold)   969  (91%)
+partial                             92   (9%)
+median sell events per position      1
+```
+
+They exit in **one shot**, not a ladder. But *when* they do it has no shared shape:
+
+```
+per-wallet median hold, wallets with >=10 closed positions
+  0xbe6ef9631ba991      0.2m      0x2e27296db73efa      21.6m
+  0xd523aaca0da819      0.3m      0x68b48ffec961ce      62.6m
+  0x40e9f03b40c625      0.4m      0x395e9b25043842     144.2m
+  0x5638484ba2d2f1      4.2m      0xe5239c5bcdb8e9    1516.9m
+  0x92a8d5ce2ecc20      9.0m      0x0b30d99a8b5b92    2112.8m
+
+spread: 0.2 min to 2,112.8 min — a ratio of 9,055x
+```
+
+**Each wallet does its own thing.** There is no exit rule to copy, because there is
+no exit rule shared by more than a handful of them.
+
+### 6AI.4 THE PATTERN THAT DOES EXIST, AND IT INVERTS THE OBVIOUS PLAN
+
+Across the 25 wallets with >=10 closed positions:
+
+```
+spearman(median hold, median return) = +0.282
+spearman(median hold, win rate)      = +0.421
+
+hold <= 10 min : 10 wallets, 299 positions, median-of-median return  -1.5%, mean win 41%
+hold >= 1000min:  5 wallets, 275 positions, median-of-median return  +4.4%, mean win 60%
+```
+
+**The fast wallets are the losing ones.** Every wallet with a median hold under ten
+minutes has a negative or zero median return; the patient ones win 60% and make
++4.4% a position. The three fastest — 0.2m, 0.3m, 0.4m medians across 117
+positions — return -0.0%, -0.0% and -1.5%.
+
+**This contradicts the strategy the rest of this document has been chasing.** §6P
+through §6AF are all fast flips: enter +115 s, exit +215 s, a 100-second hold. The
+wallets that actually make money on this chain hold for **hours to days**.
+
+The caution on it: correlation on 25 wallets is not causation, the window is only
+ten days, and a long median hold biases toward positions that happened to close
+inside it. But the direction is consistent across two independent cuts (return and
+win rate) and it is the opposite of what a follow-the-fast-money plan assumes.
+
+### 6AI.5 18D — THE RECOMMENDATION
+
+**Is there a subset worth following?** On realised P&L, yes — but not the ones the
+alert volume points at. The candidates, all with >=40 closed positions and a
+POSITIVE median return:
+
+```
+wallet               closed   win%   medRet      ROI     P&L USD   medHold
+0x0b30d99a8b5b92c3       65    80%    +8.9%    15.1%      $94.25   2112.8m
+0x008bac045a4220bf       41    63%    +8.1%    40.6%   $4,887.17   2015.9m
+0x91dc0fbd6d30783a       60    68%    +4.2%     3.5%   $6,008.39   1633.0m
+0xe5239c5bcdb8e9bf       84    57%    +5.0%    10.7%   $3,855.72   1516.9m
+```
+
+Four wallets, 250 closed positions between them, win rates 57-80%, positive median
+returns. **None of them is in the top 3 by volume, and the biggest P&L wallet
+(0x5638484b, $173k) is excluded** because its median return is -9.2% and 64% of its
+profit is one trade.
+
+**Is the lag short enough?** Yes — §6AH.3 measured +4.24% median in the minute
+after a top-wallet buy, on other wallets' trades, with 61% up. The window is about
+five minutes and the median buy comes 16.6 minutes after launch, so detection at a
+20-60 second poll is comfortably inside it.
+
+**What the strategy would look like:**
+
+```
+poll         watchlist_activity every 20-30 s (it is already being written)
+trigger      a buy by one of the four named wallets
+size         small and fixed; the median position return is +4 to +9%, not a multiple
+exit         NOT copied from them — they have no exit alpha (18C.2).
+             A fixed rule, and the honest starting point is HOURS not minutes.
+frequency    the four wallets bought 250 closed positions over ~10 days = ~25/day
+             between them, before any additional filter
+```
+
+**But the honest verdict is: not yet, and not as a fast flip.**
+
+1. The four candidate wallets are selected **on the same data that measures them**.
+   That is in-sample, and this document has watched three in-sample selections die
+   out of time (§6S, §6V.5, §6AA).
+2. Their edge is a **+4 to +9% median over hours**. Against $0.193 absolute gas
+   that needs a $100+ position to survive, which §6S.4 already established.
+3. **They have no exit alpha**, so following them only copies half a strategy, and
+   the half nobody has designed is the half that decides the result.
+4. The entire P&L finding leans on one position out of 1,041.
+
+**What I would do instead of building a follower:** the cheap, decisive next step is
+to log the four wallets' buys prospectively for a week and score them at +5m, +15m,
++1h and +24h — the outcome tracker from the Part 17 proposal, pointed at four named
+wallets rather than at a volume spike. It costs nothing, it is out of sample by
+construction, and it answers the only question that matters before money moves:
+**does following these four, at a realistic lag, actually make money.**
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-21, from Part 16 — THE LARGEST GAP IN THIS DOCUMENT:**
