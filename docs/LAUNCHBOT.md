@@ -9276,6 +9276,152 @@ What exists is: a validated simulator (§6AF.2, exact to the wei), working
 execution plumbing, two replicated prohibitions, and a collector that accumulates
 without supervision.
 
+## 6AH. PART 18A/18B — THE TOP WALLETS DO MAKE MONEY, AND THE MOVE IS NOT OVER WHEN THEY BUY
+
+**Status: MEASURED, ZERO CU — every figure is from `watchlist_activity` and
+`token_decimals_cache`, already stored. No trading.**
+
+### 6AH.1 Method and its limits, stated first
+
+P&L is per `(wallet, token)` position: realised on the CLOSED fraction as
+`sold_usd - bought_usd x (sold_tokens / bought_tokens)`. **Only positions where
+EVERY row carries `usd > 0` are counted**, so a partly-priced position is excluded
+rather than half-counted. `usd_amount` is present on 61.6% of rows.
+
+`v4_swaps_all` cannot help: it stops at block **64,216,393** while the alert feed
+runs to **70,082,541**, so it is ~6M blocks stale and prices none of the recent
+activity. Price here is therefore the **implied price of watchlist trades
+themselves** (`usd_amount / token_amount`), which samples only moments a watchlist
+wallet traded. That is a real limitation and it is not hidden.
+
+### 6AH.2 18A — realised P&L, ranked on money not volume
+
+```
+positions (wallet x token)   5,672
+fully priced                 2,727
+of those, CLOSED               1,041
+still held, never sold       3,286   (57.9% of all positions)
+```
+
+**Only 28 of the top 50 wallets have any closed, fully-priced position. 17 of the
+50 have never recorded a sell at all.**
+
+```
+rank wallet              closed   win%   medRet      ROI       P&L USD   medHold
+   1 0x5638484ba2d2f1d1      35    40%    -9.2%   157.6%   $173,450.58      4.2m
+   2 0x92a8d5ce2ecc201b      41    24%    -7.7%    33.6%    $32,736.04      9.0m
+   3 0x2e27296db73efa09      77    44%    -3.2%    14.0%    $13,838.40     21.6m
+   4 0x395e9b25043842dd      28    39%    -6.9%    23.0%    $11,503.20    144.2m
+   5 0xe4f3c2e834de80ec       1   100%    20.1%    20.1%    $10,631.38   1497.8m
+   6 0xf197e981c934f87b      18    39%    -7.1%    38.4%     $9,372.96      9.1m
+   7 0x91dc0fbd6d30783a      60    68%     4.2%     3.5%     $6,008.39   1633.0m
+   8 0x0bd25aaf269cb40d      51    45%    -6.8%    10.8%     $5,590.01     37.3m
+   9 0x008bac045a4220bf      41    63%     8.1%    40.6%     $4,887.17   2015.9m
+  10 0x12702ead6a7b128b      30    40%    -3.8%    25.3%     $3,981.89     22.4m
+ ...
+  28 0xeb6a36195e5b1278      35    43%    -5.4%   -24.1%    $-7,329.40      6.0m
+
+AGGREGATE  1,041 closed positions, win 48.3%
+           basis $873,749   realised P&L $272,168   ROI 31.15%
+           24 of 28 wallets in profit, median wallet ROI 14.0%
+```
+
+**Almost every wallet has a NEGATIVE median return and a POSITIVE ROI.** Rank 1
+has a median of -9.2% and an ROI of 157.6%. These wallets lose small, often, and
+win large, rarely. The whole-sample median return per position is **-0.1%**.
+
+**The concentration is severe and must be read with the table:**
+
+```
+top  1 position  = $173,466   63.7% of ALL realised P&L
+top  3 positions = $202,125   74.3%
+top 10 positions = $249,696   91.7%
+excluding the single biggest: n=1,040, basis $769,554, P&L $98,701, ROI 12.83%
+```
+
+**One position is 64% of the result.** Excluding it, ROI is still **+12.83% across
+1,040 positions** — thinner, but broad rather than a single trade. Four wallets
+(ranks 5, 19, 24, 26) rest on a **single closed position** and their ROI figures
+mean nothing.
+
+**Checked and cleared:** this P&L is NOT an artefact of the 10 tracked tokens.
+Those contribute n=15, basis $12,053, P&L $1,272. Everything else — the alerted
+launch population — is n=1,026, basis $861,696, P&L $270,896.
+
+### 6AH.3 18B — THEY ARE NOT SNIPERS, AND THE MOVE IS NOT OVER
+
+```
+time from launch to their buy, n=6,618
+  p10 1.3m   p25 4.2m   MEDIAN 16.6m   p75 44.2m   p90 201.6m
+  within 2 min of launch:   954 (14.4%)
+  within 15 min:          3,160 (47.7%)
+```
+
+**The median top-wallet buy is 16.6 minutes after launch.** Only 14% are inside two
+minutes. They are not racing the launch, which means the detection window is
+minutes rather than milliseconds — and that is the difference between followable
+and not.
+
+**Price after one of them buys.** Measured two ways, because the obvious confound
+is a wallet laddering its own price up:
+
+```
+                   n      median      mean     up%
+WITH the wallet's own trades in the price series
+  +1 min        2,869      +1.38%    +8.34%    56%
+  +5 min        2,509      +1.64%   +21.17%    53%
+  +15 min       2,609      +0.03%   +34.87%    50%
+  +60 min       3,024      -2.87%   +46.05%    44%
+
+SELF EXCLUDED — only OTHER wallets' trades
+  +1 min        2,009      +4.24%   +11.65%    61%
+  +5 min        2,056      +2.79%   +25.40%    55%
+  +15 min       2,232      +0.17%   +40.83%    51%
+  +60 min       2,670      -2.82%   +51.87%    44%
+```
+
+**The confound is refuted and the effect is STRONGER without it.** Excluding the
+buyer's own trades, the median price one minute later is **+4.24% with 61% up** —
+so the rise is other participants, not the wallet pushing itself. **Following them
+is not buying their exit liquidity, at least not in the first minutes.**
+
+The signal decays fast: +4.24% at one minute, +2.79% at five, **+0.17% at fifteen**,
+negative at sixty. The actionable window is roughly the first five minutes.
+
+**The remaining limitation, which cannot be removed from stored data:** the "price"
+is the implied price of *other watchlist wallets'* trades. If those wallets also
+tend to buy into strength, part of the +4.24% is a crowd of scored wallets rather
+than the wider market. A clean answer needs real per-block pool prices.
+
+### 6AH.4 Confirming buys — more than half, and usually far enough apart
+
+```
+tokens bought by >=2 of the top 50: 1,124 of 2,089 (53.8%)
+gap between the 1st and 2nd wallet:
+  p10 0s   p25 6s   MEDIAN 222s   p75 10,199s   p90 115,594s
+  within 10s of each other: 300 (27%)  — simultaneous, not a signal
+  more than 60s apart:      691 (61%)  — potentially actionable
+```
+
+**A second confirming buy exists on 54% of tokens and lands a median 3.7 minutes
+after the first.** 61% are more than a minute apart, which is enough time to act
+on the first as a trigger. The 27% that arrive within ten seconds are the same
+decision arriving twice and carry no extra information.
+
+### 6AH.5 What 18A and 18B establish
+
+- **These wallets make money on the alerted population** — ROI 31.1% headline,
+  **+12.8% excluding the one position that is 64% of it**, across 1,040 closed
+  positions with a 48% win rate.
+- **They do it by losing small and often, and winning large and rarely.** Median
+  return per position is -0.1%. Any follow strategy inherits that shape and must
+  survive long strings of small losses.
+- **They buy a median 16.6 minutes after launch, not at the launch.**
+- **The move continues after their buy** — +4.24% median in the first minute on
+  other wallets' trades — and is gone by fifteen minutes.
+- **17 of the top 50 have never sold anything**, and 57.9% of all positions are
+  still open, so "realised P&L" describes a minority of what these wallets hold.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-21, from Part 16 — THE LARGEST GAP IN THIS DOCUMENT:**
