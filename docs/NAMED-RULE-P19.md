@@ -85,3 +85,64 @@ A position that cannot be sold is **-100%**, never 0%.
 - **No position sizing, no live trading.** This writes rows and nothing else.
 - **No filter on which of their buys to follow.** Every buy is tracked. Filtering
   would be a second in-sample selection layered on the first.
+
+---
+
+# P20 — THE FAST ALERTER. WHAT WOULD MAKE IT NOT WORTH RUNNING.
+
+Committed 2026-09-23 **before the alerter has sent a single message.** It is an
+alert and a scoreboard. It never trades, and it contains no buy logic.
+
+## Measured before building, not estimated
+
+```
+poll method     ONE eth_getLogs for ERC-20 Transfers into any of the four
+                (a buy delivers the token to the wallet, so topic2 = the wallet)
+cost            60 CU/call — Alchemy's published figure, confirmed against this
+                account's own dashboard at 4,920 CU / 82 calls
+interval        15 s  ->  5,760 polls/day  ->  345,600 CU/day  (~$0.17/day)
+RPC round trip  22 / 43 / 89 ms  (min / median / max, MEASURED over 6 calls)
+detection lag   worst 15.0 s, average 7.5 s
+alert volume    53 distinct new positions in the last 24 h across the four
+```
+
+5 s polling was rejected: 1,036,800 CU/day, above the operator's ~500,000
+guidance, for a lag improvement that is irrelevant against a window §6AH measured
+in minutes.
+
+## What it does
+
+Every 15 s it looks for token transfers into the four wallets, de-duplicates per
+`(wallet, token)` so a laddered entry is ONE alert rather than forty, posts a
+Discord card, and writes a row. Separately it scores every alerted buy at **+1m,
++5m, +15m, +1h, +24h** from the wallet's buy block, independently of whether the
+operator acted.
+
+**An unpriceable pool is recorded as unpriceable and counted, never skipped**, and
+the unpriceable share is reported on every scoring pass. §6AJ.0 records why that
+number cannot be taken on trust: the previous attempt's "77% unpriceable" was this
+file's own error path swallowing a compute-unit ceiling. Infrastructure failures
+now stop the run instead of becoming a verdict.
+
+## ABANDONMENT CONDITIONS — written before it runs
+
+1. **Fewer than 10 alerts in 24 h** sustained over three days. Two of the four
+   wallets produce nearly all the volume and one has been silent since 17 Sep; if
+   the active two stop, there is nothing to follow.
+2. **Median scored return <= 0 at EVERY horizon once n >= 50 positions.** The
+   alerts are then not worth acting on, whatever the wallets' own P&L says.
+3. **The +5m median is indistinguishable from the +1h median** at n >= 50 — then
+   there is no window, the §6AH decay curve was an artefact of pricing from other
+   watchlist wallets' trades, and speed buys nothing.
+4. **Unpriceable share above 30% after the §6AJ.0 fix.** That reopens the
+   multi-asset quoting question, and it must be reported as a plumbing state
+   rather than folded into the returns.
+5. **Detection lag above 60 s in practice.** The measured design is 7.5 s average;
+   if the running system cannot hold that, the window §6AH measured is missed and
+   the alert is decoration.
+
+## Explicitly NOT part of this
+
+No trading, no executor, no buy logic, no position sizing. The operator decides
+manually. **This rule may not be amended to add any of those** — a new rule would
+be needed, and it would need its own pre-registration.
