@@ -9609,6 +9609,46 @@ stored key only if every address in it is well formed, otherwise the key is
 re-derived from the chain. 39 already-stored rows were un-keyed for re-derivation.
 **A short address is a defect to detect, not a value to repair by guessing.**
 
+### 6AJ.0 **RETRACTED 2026-09-23 — 6AJ.3 AND 6AJ.4 BELOW ARE WRONG**
+
+**The "77% of entries unpriceable" finding and its causal story are artefacts of a
+defect in `follow-track.ts` itself, not measurements.** They are left in place
+below, struck through by this notice, because deleting a published wrong finding
+hides the failure that produced it.
+
+`quoteBuy`'s catch swallowed **every** error and returned `null`, which the caller
+stores as `entry_ok = false` — "this pool cannot be priced". The compute-unit
+ceiling throws through that same catch. The run hit **249,976 of 250,000 CU** and
+processes positions `order by buy_block` ASCENDING, so it priced the oldest, ran
+out of budget, and then recorded every remaining position as unpriceable.
+
+That is why the "unpriceable" set looked like recent blocks and the "priceable"
+set looked like old ones — an ordering artefact, which the section rationalised
+into a story about pricing sides and dynamic fees.
+
+**Refuted directly: six of six recent positions recorded `entry_ok = false` PRICE
+ON THE FIRST ATTEMPT with a fresh budget.**
+
+```
+token 0xe02c53d448a6  blk 69986656  -> PRICED
+token 0x3786728a2c49  blk 69974558  -> PRICED
+token 0x3786728a2c49  blk 69974512  -> PRICED
+token 0xc8488be2e4f4  blk 69958374  -> PRICED
+token 0xefab538cf3c2  blk 69921850  -> PRICED
+token 0xefab538cf3c2  blk 69921519  -> PRICED
+```
+
+**This broke §7's standing rule that an error path must never emit a plausible
+default value** — and it did exactly the damage that rule predicts: a
+wrong-but-believable number, reasoned into a mechanism, and written into this
+document before anyone questioned it. Both call sites now rethrow infrastructure
+and budget failures instead of converting them to a verdict, and the 3,100
+poisoned `entry_ok = false` rows were deleted (936 `entry_ok = true` rows kept and
+reconciled on a fresh read).
+
+**The true unpriceable share is NOT YET MEASURED.** The §7 entry claiming the
+quoting path only handles native-ETH fixed-fee pools is withdrawn with it.
+
 ### 6AJ.3 REFUTATION CONDITION 4 FIRED — 77% OF ENTRIES UNPRICEABLE
 
 ```
@@ -9683,7 +9723,10 @@ is not yet built is the ability to price the trades these four actually make.
   validate the address and re-derive from chain on failure** — §6AJ.2 found it by
   `buildSwap` throwing `invalid address`. Padding it would be inventing a byte.
 
-- **THE QUOTING PATH ONLY HANDLES NATIVE-ETH-SIDE FIXED-FEE POOLS.** §6AJ.4
+- **WITHDRAWN 2026-09-23 (see §6AJ.0).** ~~THE QUOTING PATH ONLY HANDLES
+  NATIVE-ETH-SIDE FIXED-FEE POOLS.~~ This rested on a CU-ceiling artefact; six of
+  six of the supposedly unpriceable positions price with a fresh budget. The real
+  share is not yet measured. Original text: §6AJ.4
   measured 77% of the four wallets' positions being unpriceable: `quoteBuy`
   attaches native ETH as `value` regardless of what the pool's pricing asset
   actually is, and many of these pools carry `fee = 8388608` (`0x800000`), the v4

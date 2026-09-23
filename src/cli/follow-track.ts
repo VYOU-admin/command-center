@@ -116,6 +116,26 @@ async function quoteBuy(
       const out = dec[1] as bigint;
       return out > 0n ? out : null;
     }
+    /*
+     * ============================================================
+     * AN INFRASTRUCTURE ERROR IS NOT A PRICING RESULT. RETHROW IT.
+     * ============================================================
+     *
+     * **THIS CATCH PREVIOUSLY SWALLOWED EVERY ERROR AND RETURNED `null`**, which
+     * the caller stores as `entry_ok = false` — "this pool cannot be priced".
+     * The compute-unit ceiling throws here like anything else, so when a run
+     * exhausted its budget every remaining position was recorded as unpriceable.
+     *
+     * That produced §6AJ.3's "77% of entries unpriceable" and §6AJ.4's causal
+     * story about pricing sides and dynamic fees. **Both were artefacts.** Six of
+     * six of those same positions price on the first attempt with a fresh budget.
+     *
+     * This is §7's rule — an error path must never emit a plausible default —
+     * broken by this file, and it produced a believable wrong finding that was
+     * written into the document before it was caught. A genuine revert is a
+     * result; a budget or transport failure is not, and must stop the run.
+     */
+    throw err;
   }
   return null;
 }
@@ -273,7 +293,13 @@ async function main(): Promise<void> {
             const s = await simulateSellAt(rpc, { pool, token, owner, amount: tokensOut,
               zeroForOneBuy: t.zero_is_pricing, block: `0x${exitBlock.toString(16)}` });
             ok = s.executes === true; ethOut = s.ethOut;
-          } catch { ok = false; }
+          } catch (err) {
+            /* Same rule as quoteBuy: a budget or transport failure is not a
+               verdict that the position could not be sold. Let it stop the run. */
+            if (/compute unit|ceiling|budget|ECONNRESET|timeout|fetch failed/i
+              .test((err as Error).message)) throw err;
+            ok = false;
+          }
           /* A position that cannot be closed is -100%, never 0%. */
           const ret = ok && ethOut !== null
             ? Number(ethOut - SIZE_WEI) / Number(SIZE_WEI) : -1;
