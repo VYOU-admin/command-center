@@ -9712,6 +9712,126 @@ per-invocation ceiling lifted to match.
 wallet selection, the two-lag design and the maturity handling are all sound. What
 is not yet built is the ability to price the trades these four actually make.
 
+## 6AK. PART 20 — THE ALERTER WORKS. CONDITION 4 FIRED, AND IT RE-ESTABLISHES WHAT §6AJ.0 RETRACTED.
+
+**Status: MEASURED over 9.2 hours of live running. 46 alerts, 46 delivered, 0
+failures, 0 restarts after the first. No trading; halt set throughout.**
+
+### 6AK.1 The alerter meets its design
+
+```
+alerts                46      delivered 46      delivery errors 0
+rate                  120/day            (condition 1 abandons below 10/day)
+detection lag         min 0.3s   MEDIAN 7.4s   p90 13.9s   max 15.1s
+                      design was 7.5s average; condition 5 abandons above 60s
+pricing-asset skips   22        sells correctly NOT alerted as buys
+cost                  345,600 CU/day
+```
+
+**The measured median lag is 7.4 s against a 7.5 s design.** Against §6AH.3's window
+— +4.24% at one minute, gone by fifteen — that is comfortably inside it, and it is
+roughly **120x faster than the 0-30 minute `watchlist-watch` lag** the follow idea
+would otherwise have inherited.
+
+**`0x0b30d99a` WOKE UP.** §6AI.5 and `NAMED-RULE-P19.md` both recorded it as silent
+since 17 September and kept it in the list rather than selecting on post-selection
+behaviour. It has now produced 2 alerts. Keeping it was right.
+
+### 6AK.2 The pool-key resolver: 0% -> 37%, and why not higher
+
+The first resolver searched 900,000 blocks of `Initialize` logs for a pool holding
+the token and resolved **0 of 1**. It was replaced by reading the buy's own receipt
+— the v4 `Swap` whose `topic1` IS the pool traded — and then **proving the key**:
+
+```
+poolId = keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks))
+```
+
+A key that hashes to the expected id is correct **in every field, including
+`hooks`**, which §6AJ.2 records `v4_pool_init` truncating by one byte on 45% of
+rows. The check is free and total. Observed working:
+
+```
+stored row REJECTED: hooks len 40 (truncated)
+re-read at block 28801646: poolIdOf matches true  => RESOLVED via chain+verified
+```
+
+**It resolves 17 of 46 (37%).** The other 29 are not a resolver failure:
+
+```
+sampled unkeyed transactions:   3 of 5 contain ZERO v4 Swap logs
+PoolManager touched at all:     2 of 5
+one had 300 logs, busiest contract 0x1b0e319c6a x200 — not the v4 PoolManager
+```
+
+**These wallets trade substantially OUTSIDE Uniswap v4.** The alert is still
+correct — the token arrived, the buy happened — but there is no v4 pool to price it
+against. That is a fact about the wallets, not a defect in the resolver.
+
+### 6AK.3 A SELL WAS ALERTED AS A BUY. FIXED.
+
+The very first live alert fired on `0x0bd7d308f8e163…`, **which is a pricing
+asset** — so that Transfer was sale *proceeds*, not a purchase.
+
+The detector keys on "a token moved INTO the wallet". For a native-ETH pool that is
+unambiguous; selling returns ETH and emits no ERC-20 Transfer. This chain has ERC-20
+pricing assets, and selling into one emits a Transfer that is indistinguishable from
+a buy at the log level.
+
+**Alerting on a sell as a buy is the worst available failure for a follow signal —
+it points the operator at the exit.** Pricing assets are now excluded explicitly and
+**22 such sells have been skipped in 9.2 hours**, so it was not a one-off.
+
+### 6AK.4 CONDITION 4 FIRED — 70.6% UNPRICEABLE — AND IT IS REAL THIS TIME
+
+```
+scoreboard legs   68      positions 17      entry priceable 20
+unpriceable share 70.6%           (condition 4 abandons above 30%)
+infrastructure failures            0
+```
+
+Pre-registered wording: *"Unpriceable share above 30% after the §6AJ.0 fix. That
+reopens the multi-asset quoting question, and it must be reported as a plumbing
+state rather than folded into the returns."* It is reported as one. **No return
+figure from this pass is interpreted.**
+
+The cause, among the 17 positions that DID get a key:
+
+```
+priced = TRUE  (5)    zeroIsPricing TRUE on 5 of 5
+priced = FALSE (12)   zeroIsPricing FALSE on 10 of 12
+```
+
+**`zeroIsPricing` is the discriminator, cleanly, with zero infrastructure failures
+in the run.** `quoteBuy` attaches native ETH as `value` whatever the pool's actual
+pricing asset is, so a pool priced in an ERC-20 cannot be quoted.
+
+**This is the same conclusion §6AJ.4 reached and §6AJ.0 retracted.** The retraction
+was still correct: that evidence was a compute-unit artefact and could not support
+any conclusion, as six-of-six re-pricing proved. **The hypothesis has now been
+re-established on clean data** — which is the difference between a finding and a
+guess that happened to be right.
+
+Two of the twelve failures carry `zeroIsPricing = true` (fee 3000 and fee 21000),
+so a residual cause remains beyond the pricing side. It is small and not yet
+diagnosed.
+
+### 6AK.5 Where this leaves it
+
+**The alert half is done and works.** 120/day, 7.4 s median lag, correct
+sell-exclusion, Discord delivery at 46/46.
+
+**The scoreboard half is blocked on two things**, both now measured rather than
+assumed:
+
+1. **~63% of these wallets' buys are not on Uniswap v4 at all.** No v4 quoting work
+   fixes that; it needs whatever venue they are actually using, identified first.
+2. **Of the v4 buys, pools not priced in native ETH cannot be quoted.** That is the
+   multi-asset quoting path, now properly evidenced.
+
+Until both are closed the scoreboard measures a biased minority — native-ETH-side
+v4 pools — which is the population the rest of this document already covers.
+
 ## 7. Rules here the code does not implement
 
 **ADDED 2026-09-23, from Part 19:**
