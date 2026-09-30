@@ -15,7 +15,7 @@ id: wallet-scores
 name: Wallet Scoring
 source: wallet-scores
 
-enabled: true
+enabled: false
 
 # Every 30 minutes. The hourly jobs land rows on the hour; this runs often
 # enough that a score is never more than one cycle behind the rows it describes,

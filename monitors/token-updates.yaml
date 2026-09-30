@@ -35,7 +35,7 @@ source: token-updates
 # Rows are no longer payment-proven at all -- proof happens once per wallet at
 # cohort time -- so this job makes no payment call and is back to its measured
 # 430-714 CU per run.
-enabled: true
+enabled: false
 
 schedule: 1h
 

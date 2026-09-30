@@ -15,7 +15,7 @@ id: watchlist-watch
 name: Watchlist Watch
 source: watchlist-watch
 
-enabled: true
+enabled: false
 
 # Every 30 minutes, matching wallet-scores, so the watchlist a run uses is never
 # more than one scoring cycle stale.

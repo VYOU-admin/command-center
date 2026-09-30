@@ -30,7 +30,7 @@
 id: token-price
 name: Token Price
 source: token-price
-enabled: true
+enabled: false
 
 # One minute. Two tokens is two requests per cycle against a 300/minute limit,
 # so the schedule is bounded by usefulness rather than by the source.

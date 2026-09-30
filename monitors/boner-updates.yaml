@@ -15,7 +15,7 @@ id: boner-updates
 name: BONER Cohort Updates
 source: token-updates
 
-enabled: true
+enabled: false
 
 schedule: 1h
 

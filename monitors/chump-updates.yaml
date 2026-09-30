@@ -10,7 +10,7 @@ id: chump-updates
 name: CHUMP Cohort Updates
 source: token-updates
 
-enabled: true
+enabled: false
 
 schedule: 1h
 
